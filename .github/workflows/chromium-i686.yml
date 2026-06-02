@@ -13,6 +13,9 @@ jobs:
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
+          # Force initialization/bootstrap
+          cd depot_tools
+          ./gclient
       
       - name: Get Latest Version
         run: |
@@ -30,23 +33,26 @@ jobs:
       - name: Install System Dependencies
         run: |
           cd chromium_source
-          # Use --os=ubuntu:22.04 if supported, or skip if the script itself is too rigid.
-          # Attempting to run with --no-prompt and --lib32.
-          # If it fails, proceed assuming dependencies might be partially met or try manual apt-get.
           sudo ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt || echo "Script failed, proceeding to build"
       
       - name: Install i386 Sysroot
         run: |
           cd chromium_source
+          # Ensure depot_tools is in PATH for this step
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
           
       - name: GN Gen
         run: |
           cd chromium_source
+          # Ensure depot_tools is in PATH for this step
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           mkdir -p out/Release_x86
           gn gen out/Release_x86 --args='target_cpu="x86" is_debug=false symbol_level=0'
           
       - name: Build
         run: |
           cd chromium_source
+          # Ensure depot_tools is in PATH for this step
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           autoninja -C out/Release_x86 chrome
