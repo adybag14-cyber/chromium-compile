@@ -6,44 +6,39 @@ on:
     - cron: '0 0 */2 * *'
 
 jobs:
-  sync:
+  build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
       - name: Install depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
-      - name: Sync Chromium
+      
+      - name: Fetch Chromium Source
         run: |
-          # Placeholder for actual sync logic if repo is managed by gclient
-          # For a new repo, it might need 'fetch' or 'gclient config'
-          echo "Syncing Chromium source..."
-
-  build-host:
-    needs: sync
-    runs-on: ubuntu-22.04
-    steps:
+          mkdir chromium && cd chromium
+          fetch --nohooks chromium
+          cd src
+          git checkout main # Or a specific tag
+          gclient sync
+      
       - name: Install System Dependencies
         run: |
+          cd chromium/src
           sudo ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt
-      - name: Build Host Toolchain
-        run: |
-          # Logic to build host toolchain
-          echo "Building host toolchain..."
-
-  cross-compile-i686:
-    needs: build-host
-    runs-on: ubuntu-22.04
-    steps:
+      
       - name: Install i386 Sysroot
         run: |
+          cd chromium/src
           python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
+          
       - name: GN Gen
         run: |
+          cd chromium/src
           mkdir -p out/Release_x86
           gn gen out/Release_x86 --args='target_cpu="x86" is_debug=false symbol_level=0'
+          
       - name: Build
         run: |
+          cd chromium/src
           autoninja -C out/Release_x86 chrome
