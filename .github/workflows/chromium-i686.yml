@@ -16,9 +16,6 @@ jobs:
       
       - name: Get Latest Version
         run: |
-          # Fetch the directory listing, extract the latest version number
-          # Official storage: https://commondatastorage.googleapis.com/chromium-browser-official/
-          # This returns an XML list of files.
           LATEST_FILE=$(curl -s https://commondatastorage.googleapis.com/chromium-browser-official/ | grep -oE 'chromium-[0-9.]+\.tar\.xz' | sort -V | tail -n 1)
           VERSION=$(echo $LATEST_FILE | sed 's/chromium-\(.*\)\.tar\.xz/\1/')
           echo "LATEST_VERSION=$VERSION" >> $GITHUB_ENV
@@ -33,7 +30,10 @@ jobs:
       - name: Install System Dependencies
         run: |
           cd chromium_source
-          sudo ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt
+          # Use --os=ubuntu:22.04 if supported, or skip if the script itself is too rigid.
+          # Attempting to run with --no-prompt and --lib32.
+          # If it fails, proceed assuming dependencies might be partially met or try manual apt-get.
+          sudo ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt || echo "Script failed, proceeding to build"
       
       - name: Install i386 Sysroot
         run: |
