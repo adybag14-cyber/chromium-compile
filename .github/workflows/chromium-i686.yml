@@ -1,4 +1,4 @@
-name: Chromium i686 Build (Tarball)
+name: Chromium i686 Build (Latest Tarball)
 on:
   push:
   workflow_dispatch:
@@ -14,14 +14,21 @@ jobs:
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
       
+      - name: Get Latest Version
+        run: |
+          # Fetch the directory listing, extract the latest version number
+          # Official storage: https://commondatastorage.googleapis.com/chromium-browser-official/
+          # This returns an XML list of files.
+          LATEST_FILE=$(curl -s https://commondatastorage.googleapis.com/chromium-browser-official/ | grep -oE 'chromium-[0-9.]+\.tar\.xz' | sort -V | tail -n 1)
+          VERSION=$(echo $LATEST_FILE | sed 's/chromium-\(.*\)\.tar\.xz/\1/')
+          echo "LATEST_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Latest version detected: $VERSION"
+
       - name: Download Chromium Tarball
         run: |
-          # Download a recent stable version
-          # NOTE: Version needs to be updated periodically or automated
-          VERSION="134.0.6998.35"
-          wget https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$VERSION.tar.xz
-          tar -xf chromium-$VERSION.tar.xz
-          mv chromium-$VERSION chromium_source
+          wget https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$LATEST_VERSION.tar.xz
+          tar -xf chromium-$LATEST_VERSION.tar.xz
+          mv chromium-$LATEST_VERSION chromium_source
       
       - name: Install System Dependencies
         run: |
