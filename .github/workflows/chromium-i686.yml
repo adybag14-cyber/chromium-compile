@@ -57,28 +57,26 @@ jobs:
           cd ${{ github.workspace }}/chromium_source
           echo "=== Patching GN x86 Linux assertion ==="
           
-          # Patch the definition of is_valid_x86_target to always be true
-          # This keeps the assertion intact but makes it pass
-          if grep -q 'is_valid_x86_target' BUILD.gn; then
-            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' BUILD.gn
-            echo "Patched is_valid_x86_target definition in root BUILD.gn"
-          fi
+          # Only patch lines where is_valid_x86_target is being assigned (starts with whitespace then the var)
+          # This avoids hitting lines inside assert() blocks
+          sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' BUILD.gn
+          echo "Patched is_valid_x86_target definition in root BUILD.gn"
           
-          # Same for v8/BUILD.gn if it has its own definition
-          if [ -f v8/BUILD.gn ] && grep -q 'is_valid_x86_target' v8/BUILD.gn; then
-            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' v8/BUILD.gn
+          # Same for v8/BUILD.gn
+          if [ -f v8/BUILD.gn ]; then
+            sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' v8/BUILD.gn
             echo "Patched is_valid_x86_target definition in v8/BUILD.gn"
           fi
           
           # Same for build/config/BUILD.gn
-          if [ -f build/config/BUILD.gn ] && grep -q 'is_valid_x86_target' build/config/BUILD.gn; then
-            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' build/config/BUILD.gn
+          if [ -f build/config/BUILD.gn ]; then
+            sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' build/config/BUILD.gn
             echo "Patched is_valid_x86_target definition in build/config/BUILD.gn"
           fi
           
           # Same for build/config/BUILDCONFIG.gn
-          if [ -f build/config/BUILDCONFIG.gn ] && grep -q 'is_valid_x86_target' build/config/BUILDCONFIG.gn; then
-            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' build/config/BUILDCONFIG.gn
+          if [ -f build/config/BUILDCONFIG.gn ]; then
+            sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' build/config/BUILDCONFIG.gn
             echo "Patched is_valid_x86_target definition in build/config/BUILDCONFIG.gn"
           fi
           
