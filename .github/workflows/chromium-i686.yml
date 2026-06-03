@@ -20,7 +20,7 @@ jobs:
 
       - name: Install depot_tools
         run: |
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ github.workspace }}/depot_tools
+          git clone --depth=1 https://googlesource.com ${{ github.workspace }}/depot_tools
           echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
           
           # FIXED: Force depot_tools to bootstrap its internal Python environment
@@ -30,7 +30,7 @@ jobs:
       - name: Get Latest Version String
         id: version
         run: |
-          VERSION=$(curl -s "https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Linux&num=1" | jq -r '.[0].version')
+          VERSION=$(curl -s "https://appspot.com" | jq -r '.[0].version')
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
              VERSION="126.0.6478.114"
           fi
@@ -41,7 +41,7 @@ jobs:
         run: |
           mkdir -p ${{ github.workspace }}/chromium_source
           echo "Streaming download and extracting simultaneously..."
-          curl -sL https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$VERSION.tar.xz | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
+          curl -sL https://googleapis.com | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
 
       - name: Install System Dependencies
         run: |
@@ -63,8 +63,8 @@ jobs:
           # SAFETY HACK: Tarballs sometimes miss the version metadata file. We fake it just in case.
           echo "LASTCHANGE=$VERSION-refs/heads/master@{#000000}" > build/util/LASTCHANGE
           
-          # Generate the Ninja files
-          gn gen out/Release_x86 --args='target_cpu="x86" is_debug=false symbol_level=0 blink_symbol_level=0 enable_nacl=false is_official_build=true'
+          # FIXED: Added target_os="linux" to explicitly trigger the 32-bit cross-compilation pipeline
+          gn gen out/Release_x86 --args='target_os="linux" target_cpu="x86" is_debug=false symbol_level=0 blink_symbol_level=0 enable_nacl=false is_official_build=true'
           
       - name: The 6-Hour Max Compile Battle
         run: |
