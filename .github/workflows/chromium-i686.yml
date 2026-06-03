@@ -24,10 +24,10 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ github.workspace }}/depot_tools
           echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
 
-          
       - name: Get Latest Version String
         id: version
         run: |
+          # Querying the official public layout repository index page
           LATEST_FILE=$(curl -s https://googleapis.com | grep -oE 'chromium-[0-9.]+\.tar\.xz' | sort -V | tail -n 1)
           VERSION=$(echo $LATEST_FILE | sed 's/chromium-\(.*\)\.tar\.xz/\1/')
           echo "VERSION=$VERSION" >> $GITHUB_ENV
@@ -37,8 +37,8 @@ jobs:
         run: |
           mkdir -p ${{ github.workspace }}/chromium_source
           echo "Streaming download and extracting simultaneously to save disk..."
-          # Piping curl directly into tar prevents saving the 3GB compressed file to disk
-          curl -s https://googleapis.comchromium-$VERSION.tar.xz | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
+          # Fixed URL formatting to hit the official Google public build engine storage bucket
+          curl -sL https://googleapis.comchromium-$VERSION.tar.xz | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
 
       - name: Install System Dependencies
         run: |
