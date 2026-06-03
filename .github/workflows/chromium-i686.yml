@@ -7,55 +7,66 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # Switch this to 'ubuntu-22.04' only if testing, but use 'self-hosted' for your Ryzen machine
+    runs-on: self-hosted
     steps:
-      - name: Install depot_tools
+      - name: Setup Workspace and Depot Tools
         run: |
+          mkdir -p ${{ github.workspace }}/build_dir
+          cd ${{ github.workspace }}/build_dir
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
-          
-      - name: Fix vpython environment
-        run: |
-          # Clear cache to ensure fresh virtual environment
-          rm -rf ~/.cache/.vpython-root
-          
-          # Force initialization/bootstrap
-          cd depot_tools
-          ./gclient
-      
-      - name: Get Latest Version
+          echo "${{ github.workspace }}/build_dir/depot_tools" >> $GITHUB_PATH
+
+      - name: Get Latest Version String
+        id: version_check
         run: |
           LATEST_FILE=$(curl -s https://commondatastorage.googleapis.com/chromium-browser-official/ | grep -oE 'chromium-[0-9.]+\.tar\.xz' | sort -V | tail -n 1)
           VERSION=$(echo $LATEST_FILE | sed 's/chromium-\(.*\)\.tar\.xz/\1/')
           echo "LATEST_VERSION=$VERSION" >> $GITHUB_ENV
           echo "Latest version detected: $VERSION"
 
-      - name: Download Chromium Tarball
+      - name: Download & Extract Source Tarball
         run: |
-          wget https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$LATEST_VERSION.tar.xz
+          cd ${{ github.workspace }}/build_dir
+          wget -q https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$LATEST_VERSION.tar.xz
           tar -xf chromium-$LATEST_VERSION.tar.xz
-          mv chromium-$LATEST_VERSION chromium_source
-      
+          mv chromium-$LATEST_VERSION src
+          rm chromium-$LATEST_VERSION.tar.xz
+
+      - name: Initialize Gclient Profile & Sync Dependencies
+        run: |
+          cd ${{ github.workspace }}/build_dir
+          export PATH="${{ github.workspace }}/build_dir/depot_tools:$PATH"
+          
+          # Create mandatory project layout configurations
+          gclient config --name=src https://googlesource.com
+          
+          # Sync the required third-party directories without pulling Git histories
+          gclient sync --no-history --shallow --nohooks
+
       - name: Install System Dependencies
         run: |
-          cd chromium_source
-          sudo ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt || echo "Script failed, proceeding to build"
-      
-      - name: Install i386 Sysroot
+          cd ${{ github.workspace }}/build_dir/src
+          sudo ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt || echo "Ignoring minor dependency return errors"
+
+      - name: Install Target i386 Sysroot
         run: |
-          cd chromium_source
-          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd ${{ github.workspace }}/build_dir/src
+          export PATH="${{ github.workspace }}/build_dir/depot_tools:$PATH"
           python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
-          
-      - name: GN Gen
+          gclient runhooks
+
+      - name: GN Project Configuration Gen
         run: |
-          cd chromium_source
-          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd ${{ github.workspace }}/build_dir/src
+          export PATH="${{ github.workspace }}/build_dir/depot_tools:$PATH"
           mkdir -p out/Release_x86
-          gn gen out/Release_x86 --args='target_cpu="x86" is_debug=false symbol_level=0'
           
-      - name: Build
+          # Added flags specifically to reduce compilation bloat on older CPUs
+          gn gen out/Release_x86 --args='target_cpu="x86" is_debug=false symbol_level=0 blink_symbol_level=0 enable_nacl=false is_official_build=true'
+
+      - name: Compile Application Binaries
         run: |
-          cd chromium_source
-          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd ${{ github.workspace }}/build_dir/src
+          export PATH="${{ github.workspace }}/build_dir/depot_tools:$PATH"
           autoninja -C out/Release_x86 chrome
