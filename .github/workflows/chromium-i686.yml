@@ -69,51 +69,21 @@ jobs:
           export PATH="${{ github.workspace }}/depot_tools:$PATH"
           python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
 
-      - name: Patch GN for x86 Linux support
+      - name: Patch BUILD.gn for x86 Linux
         run: |
           cd ${{ github.workspace }}/chromium_source
-          python3 << 'PYEOF'
-          import os
-          import re
+          if [ -f BUILD.gn ]; then
+            sed -i 's/is_valid_x86_target\s*=\s*false/is_valid_x86_target = true/g' BUILD.gn || true
+            grep -n "is_valid_x86_target" BUILD.gn || true
+          fi
+          if [ -f build/config/BUILD.gn ]; then
+            sed -i 's/assert(target_cpu != "x86" || is_valid_x86_target)/if (!is_valid_x86_target) assert(target_cpu != "x86")/g' build/config/BUILD.gn || true
+            grep -n "is_valid_x86_target" build/config/BUILD.gn || true
+          fi
+          if [ -f build/config/BUILDCONFIG.gn ]; then
+            grep -n "is_valid_x86_target" build/config/BUILDCONFIG.gn || true
+          fi
 
-          files_to_patch = [
-              'build/config/BUILDCONFIG.gn',
-              'build/config/BUILD.gn',
-              'BUILD.gn',
-              'v8/BUILD.gn',
-          ]
-
-          var_pattern = re.compile(r'^(\s*)is_valid_x86_target\s*=\s*false\b', re.MULTILINE)
-
-          patched_files = []
-
-          for filepath in files_to_patch:
-              if not os.path.exists(filepath):
-                  print(f"Skip: {filepath} not found")
-                  continue
-
-              with open(filepath, 'r') as f:
-                  content = f.read()
-
-              def replace_var(match):
-                  indent = match.group(1)
-                  return indent + 'is_valid_x86_target = true'
-
-              new_content, replacements = var_pattern.subn(replace_var, content)
-
-              if replacements > 0:
-                  with open(filepath, 'w') as f:
-                      f.write(new_content)
-                  print(f"Set is_valid_x86_target = true in {filepath} ({replacements} occurrence(s))")
-                  patched_files.append(filepath)
-              else:
-                  print(f"No changes in {filepath}")
-
-          if not patched_files:
-              print("WARNING: Did not find is_valid_x86_target = false in any file.")
-              print("This variable may not exist in this Chromium version,")
-              print("or it may be defined elsewhere. GN gen will reveal if more patching is needed.")
-          PYEOF
 
       - name: Write LASTCHANGE
         run: |
