@@ -70,64 +70,61 @@ jobs:
           python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
 
       - name: Patch BUILD.gn for x86 Linux
-        run: |
-          cd ${{ github.workspace }}/chromium_source
-          python3 - << 'PYEOF'
-          import os
-
-          target = 'BUILD.gn'
-          if not os.path.exists(target):
-              print('Skip: BUILD.gn not found')
-              raise SystemExit(0)
-
-          with open(target, 'r') as f:
-              content = f.read()
-
-          original = content
-          content = content.replace('is_valid_x86_target = false', 'is_valid_x86_target = true')
-          for src in [
-              'assert(is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm")',
-              "assert(is_valid_x86_target || target_cpu != 'x86' || v8_target_cpu == 'arm')",
-          ]:
-              content = content.replace(src, 'assert(true)  # PATCHED: allow x86 linux')
-
-          if content != original:
-              with open(target, 'w') as f:
-                  f.write(content)
-              print('Patched BUILD.gn')
-          else:
-              print('No patch needed in BUILD.gn')
-
-          seen_target = False
-          for i, line in enumerate(content.splitlines(), 1):
-              if 'is_valid_x86_target' in line or 'PATCHED: allow x86 linux' in line:
-                  if target in line or 'PATCHED: allow x86 linux' in line or i <= 10:
-                      seen_target = True
-                  print(f'{i}: {line}')
-          if not seen_target:
-              print('Patched BUILD.gn without matching line output')
-          PYEOF
-        env:
-          LAST_STEP_PATCHED_BUILDGN: true
-
-      - name: Verify BUILD.gn patch
+        id: patch
         run: |
           cd ${{ github.workspace }}/chromium_source
           python3 - << 'PYEOF'
           import os, re
+
           target = 'BUILD.gn'
+          with open(target, 'r') as f:
+              text = f.read()
+              lines = text.splitlines()
+              print('Target file lines:', len(lines))
+
+          original = text
+          pre_assert = None
+          for i, line in enumerate(lines, 1):
+              if 'is_valid_x86_target' in line:
+                  print(f'Pre patch {i}: {line}')
+              if 'assert(is_valid_x86_target' in line:
+                  pre_assert = (i, line.strip())
+                  print(f'Pre patch {i}: {line}')
+
+          text = re.sub(r'is_valid_x86_target\s*=\s*false', 'is_valid_x86_target = true', text)
+          text = text.replace(
+              'assert(is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm")',
+              'assert(true)  # PATCHED: allow x86 linux'
+          )
+
+          if text != original:
+              with open(target, 'w') as f:
+                  f.write(text)
+              print('Patched BUILD.gn')
+          else:
+              print('No patch needed in BUILD.gn')
+
           with open(target, 'r') as f:
               lines = f.read().splitlines()
           hits = []
           for i, line in enumerate(lines, 1):
               if 'is_valid_x86_target' in line or 'PATCHED: allow x86 linux' in line:
                   hits.append((i, line))
+          if not hits:
+              raise SystemExit('BUILD.gn patch verification failed: no matching line found')
           for i, line in hits:
               print(f'{i}: {line}')
           if not any('PATCHED: allow x86 linux' in line for _, line in hits):
               raise SystemExit('BUILD.gn patch verification failed: assertion guard still present')
           print('Verified: BUILD.gn patch is active')
           PYEOF
+
+      - name: Report BUILD.gn patch result
+        if: failure() && steps.patch.outcome == 'success'
+        run: |
+          echo "Patch step finished, but a later step failed."
+          ls -l ${{ github.workspace }}/chromium_source/BUILD.gn || true
+          sed -n '1488,1515p' ${{ github.workspace }}/chromium_source/BUILD.gn || true
 
 
       - name: Write LASTCHANGE
