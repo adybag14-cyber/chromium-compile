@@ -80,22 +80,16 @@ jobs:
           with open(target, 'r') as f:
               text = f.read()
               lines = text.splitlines()
-              print('Target file lines:', len(lines))
 
           original = text
-          pre_assert = None
+          print('Pre patch matches:')
           for i, line in enumerate(lines, 1):
-              if 'is_valid_x86_target' in line:
-                  print(f'Pre patch {i}: {line}')
-              if 'assert(is_valid_x86_target' in line:
-                  pre_assert = (i, line.strip())
-                  print(f'Pre patch {i}: {line}')
+              if 'is_valid_x86_target' in line or 'true)  # PATCHED: allow x86 linux' in line:
+                  print(f'{i}: {line}')
 
-          text = re.sub(r'is_valid_x86_target\s*=\s*false', 'is_valid_x86_target = true', text)
-          text = text.replace(
-              'assert(is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm")',
-              'assert(true)  # PATCHED: allow x86 linux'
-          )
+          text = re.sub(r'is_valid_x86_target\s*=\s*[^\n]+', 'is_valid_x86_target = true', text)
+          pattern = r'assert\(\s*\n?\s*is_valid_x86_target\s*[^\n]*\)\s*;'
+          text = re.sub(pattern, 'assert(true)  # PATCHED: allow x86 linux', text)
 
           if text != original:
               with open(target, 'w') as f:
