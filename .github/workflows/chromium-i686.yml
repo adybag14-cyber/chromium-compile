@@ -6,6 +6,7 @@ on:
 jobs:
   experimental_build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
     steps:
       - name: Maximize Runner Disk Space
         run: |
@@ -15,6 +16,9 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo apt-get purge -y '^mysql-' '^mongodb-' '^postgresql-' '^dotnet-' '^android-sdk-' || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean || true
           echo "=== Disk space AFTER cleanup ==="
           df -h
 
@@ -33,6 +37,7 @@ jobs:
              VERSION="126.0.6478.114"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Target Version: $VERSION"
 
       - name: Stream Extract Chromium Tarball
@@ -40,12 +45,14 @@ jobs:
           mkdir -p ${{ github.workspace }}/chromium_source
           echo "Streaming download and extracting simultaneously..."
           curl -sL "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$VERSION.tar.xz" | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
+          echo "Extraction complete. Size:"
+          du -sh ${{ github.workspace }}/chromium_source
 
       - name: Install System Dependencies
         run: |
           cd ${{ github.workspace }}/chromium_source
           sudo DEBIAN_FRONTEND=noninteractive ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt --no-chromeos-fonts || echo "Ignoring dependency errors"
-      
+
       - name: Install i386 Sysroot
         run: |
           cd ${{ github.workspace }}/chromium_source
@@ -55,44 +62,124 @@ jobs:
       - name: Patch GN for x86 Linux support
         run: |
           cd ${{ github.workspace }}/chromium_source
-          echo "=== Patching GN x86 Linux assertion ==="
-          
-          # Only patch lines where is_valid_x86_target is being assigned (starts with whitespace then the var)
-          # This avoids hitting lines inside assert() blocks
-          sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' BUILD.gn
-          echo "Patched is_valid_x86_target definition in root BUILD.gn"
-          
-          # Same for v8/BUILD.gn
-          if [ -f v8/BUILD.gn ]; then
-            sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' v8/BUILD.gn
-            echo "Patched is_valid_x86_target definition in v8/BUILD.gn"
-          fi
-          
-          # Same for build/config/BUILD.gn
-          if [ -f build/config/BUILD.gn ]; then
-            sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' build/config/BUILD.gn
-            echo "Patched is_valid_x86_target definition in build/config/BUILD.gn"
-          fi
-          
-          # Same for build/config/BUILDCONFIG.gn
-          if [ -f build/config/BUILDCONFIG.gn ]; then
-            sed -i 's/^\([[:space:]]*\)is_valid_x86_target[[:space:]]*=.*/\1is_valid_x86_target = true/' build/config/BUILDCONFIG.gn
-            echo "Patched is_valid_x86_target definition in build/config/BUILDCONFIG.gn"
-          fi
-          
-          echo "=== Patch complete ==="
+          VERSION="${{ env.VERSION }}"
+          python3 << 'PYEOF'
+          import os
+          import re
+          import sys
+
+          files_to_patch = [
+              'BUILD.gn',
+              'v8/BUILD.gn',
+              'build/config/BUILD.gn',
+              'build/config/BUILDCONFIG.gn'
+          ]
+
+          # Regex patterns that handle multiline asserts
+          assert_patterns = [
+              # Matches: assert(is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm", "...")
+              # including when split across multiple lines
+              re.compile(
+                  r'assert\(\s*is_valid_x86_target\s*\|\|\s*target_cpu\s*!=\s*"x86"\s*\|\|\s*v8_target_cpu\s*==\s*"arm"[^)]*\)',
+                  re.DOTALL
+              ),
+              # Fallback: any assert containing the x86 condition
+              re.compile(
+                  r'assert\([^)]*is_valid_x86_target[^)]*target_cpu[^)]*"x86"[^)]*\)',
+                  re.DOTALL
+              ),
+          ]
+
+          # Variable assignment pattern
+          var_pattern = re.compile(r'^(\s*)is_valid_x86_target\s*=\s*false\b', re.MULTILINE)
+
+          total_patched = 0
+
+          for filepath in files_to_patch:
+              if not os.path.exists(filepath):
+                  print(f"Skip: {filepath} not found")
+                  continue
+
+              with open(filepath, 'r') as f:
+                  content = f.read()
+
+              original = content
+              modified = False
+
+              # 1) Replace assert conditions (multiline-aware)
+              for pat in assert_patterns:
+                  if pat.search(content):
+                      # Replace the entire assert(...) with assert(true)
+                      content = pat.sub('assert(true)', content)
+                      modified = True
+                      print(f"Patched assert in {filepath}")
+                      break  # Only patch first match per file
+
+              # 2) Replace variable definitions
+              def replace_var(match):
+                  indent = match.group(1)
+                  return indent + 'is_valid_x86_target = true'
+
+              content, var_replacements = var_pattern.subn(replace_var, content)
+              if var_replacements > 0:
+                  modified = True
+                  print(f"Patched {var_replacements} var assignment(s) in {filepath}")
+
+              if modified:
+                  with open(filepath, 'w') as f:
+                      f.write(content)
+                  print(f"Saved {filepath}")
+                  total_patched += 1
+              else:
+                  print(f"No changes in {filepath}")
+
+          if total_patched == 0:
+              print("WARNING: No files were patched! The assert string may have changed.")
+              print("Continuing anyway - GN gen will tell us if we need different patches.")
+
+          PYEOF
+
+      - name: Write LASTCHANGE
+        run: |
+          cd ${{ github.workspace }}/chromium_source
+          mkdir -p build/util
+          # GN expects "<git-hash>-refs/heads/<branch>@{#<number>}"
+          echo "LASTCHANGE=0000000000000000000000000000000000000000-refs/heads/main@{#0}" > build/util/LASTCHANGE
+          cat build/util/LASTCHANGE
 
       - name: GN Project Gen
         run: |
           cd ${{ github.workspace }}/chromium_source
           export PATH="${{ github.workspace }}/depot_tools:$PATH"
           mkdir -p out/Release_x86
-          echo "LASTCHANGE=$VERSION-refs/heads/master@{#000000}" > build/util/LASTCHANGE
-          gn gen out/Release_x86 --args='target_os="linux" target_cpu="x86" is_debug=false symbol_level=0 blink_symbol_level=0 enable_nacl=false is_official_build=true'
-          
+          gn gen out/Release_x86 --args='
+            target_os="linux"
+            target_cpu="x86"
+            is_debug=false
+            symbol_level=0
+            blink_symbol_level=0
+            enable_nacl=false
+            is_official_build=false
+            use_thin_lto=false
+            use_reclient=false
+            treat_warnings_as_errors=false
+          '
+
       - name: The 6-Hour Max Compile Battle
         run: |
           cd ${{ github.workspace }}/chromium_source
           export PATH="${{ github.workspace }}/depot_tools:$PATH"
-          echo "Starting compiler..."
+          echo "Starting compiler at $(date)..."
+          echo "Disk space before build:"
+          df -h
           autoninja -C out/Release_x86 chrome
+          echo "Build finished at $(date)"
+          echo "Final disk space:"
+          df -h
+
+      - name: Upload Build Artifact (if successful)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-i686
+          path: ${{ github.workspace }}/chromium_source/out/Release_x86/chrome
