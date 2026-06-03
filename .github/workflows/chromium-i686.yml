@@ -62,38 +62,22 @@ jobs:
       - name: Patch GN for x86 Linux support
         run: |
           cd ${{ github.workspace }}/chromium_source
-          VERSION="${{ env.VERSION }}"
           python3 << 'PYEOF'
           import os
           import re
-          import sys
 
+          # Files where is_valid_x86_target might be defined
           files_to_patch = [
+              'build/config/BUILDCONFIG.gn',
+              'build/config/BUILD.gn',
               'BUILD.gn',
               'v8/BUILD.gn',
-              'build/config/BUILD.gn',
-              'build/config/BUILDCONFIG.gn'
           ]
 
-          # Regex patterns that handle multiline asserts
-          assert_patterns = [
-              # Matches: assert(is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm", "...")
-              # including when split across multiple lines
-              re.compile(
-                  r'assert\(\s*is_valid_x86_target\s*\|\|\s*target_cpu\s*!=\s*"x86"\s*\|\|\s*v8_target_cpu\s*==\s*"arm"[^)]*\)',
-                  re.DOTALL
-              ),
-              # Fallback: any assert containing the x86 condition
-              re.compile(
-                  r'assert\([^)]*is_valid_x86_target[^)]*target_cpu[^)]*"x86"[^)]*\)',
-                  re.DOTALL
-              ),
-          ]
-
-          # Variable assignment pattern
+          # Match: is_valid_x86_target = false (with optional surrounding whitespace/indent)
           var_pattern = re.compile(r'^(\s*)is_valid_x86_target\s*=\s*false\b', re.MULTILINE)
 
-          total_patched = 0
+          patched_files = []
 
           for filepath in files_to_patch:
               if not os.path.exists(filepath):
@@ -103,39 +87,24 @@ jobs:
               with open(filepath, 'r') as f:
                   content = f.read()
 
-              original = content
-              modified = False
-
-              # 1) Replace assert conditions (multiline-aware)
-              for pat in assert_patterns:
-                  if pat.search(content):
-                      # Replace the entire assert(...) with assert(true)
-                      content = pat.sub('assert(true)', content)
-                      modified = True
-                      print(f"Patched assert in {filepath}")
-                      break  # Only patch first match per file
-
-              # 2) Replace variable definitions
               def replace_var(match):
                   indent = match.group(1)
                   return indent + 'is_valid_x86_target = true'
 
-              content, var_replacements = var_pattern.subn(replace_var, content)
-              if var_replacements > 0:
-                  modified = True
-                  print(f"Patched {var_replacements} var assignment(s) in {filepath}")
+              new_content, replacements = var_pattern.subn(replace_var, content)
 
-              if modified:
+              if replacements > 0:
                   with open(filepath, 'w') as f:
-                      f.write(content)
-                  print(f"Saved {filepath}")
-                  total_patched += 1
+                      f.write(new_content)
+                  print(f"Set is_valid_x86_target = true in {filepath} ({replacements} occurrence(s))")
+                  patched_files.append(filepath)
               else:
                   print(f"No changes in {filepath}")
 
-          if total_patched == 0:
-              print("WARNING: No files were patched! The assert string may have changed.")
-              print("Continuing anyway - GN gen will tell us if we need different patches.")
+          if not patched_files:
+              print("WARNING: Did not find is_valid_x86_target = false in any file.")
+              print("This variable may not exist in this Chromium version,")
+              print("or it may be defined elsewhere. GN gen will reveal if more patching is needed.")
 
           PYEOF
 
