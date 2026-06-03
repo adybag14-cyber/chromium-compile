@@ -21,8 +21,9 @@ jobs:
 
       - name: Install depot_tools
         run: |
-          git clone --depth=1 https://googlesource.com ${{ github.workspace }}/depot_tools
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ github.workspace }}/depot_tools
           echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
+
           
       - name: Get Latest Version String
         id: version
