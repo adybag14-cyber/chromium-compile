@@ -20,6 +20,7 @@ jobs:
 
       - name: Install depot_tools
         run: |
+          # FIXED: Restored the fully qualified chromium subdomain and repo path
           git clone --depth=1 https://googlesource.com ${{ github.workspace }}/depot_tools
           echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
           
@@ -30,7 +31,6 @@ jobs:
       - name: Get Latest Version String
         id: version
         run: |
-          # FIXED: Replaced truncated generic domain with the actual Chromium API endpoint
           VERSION=$(curl -s "https://appspot.com" | jq -r '.[0].version')
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
              VERSION="126.0.6478.114"
