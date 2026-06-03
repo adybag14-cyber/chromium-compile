@@ -20,10 +20,11 @@ jobs:
 
       - name: Install depot_tools
         run: |
-          git clone --depth=1 https://googlesource.com ${{ github.workspace }}/depot_tools
+          # FIXED: Included the 'chromium.' subdomain and full repository path
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ github.workspace }}/depot_tools
           echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
           
-          # FIXED: Force depot_tools to bootstrap its internal Python environment
+          # Force depot_tools to bootstrap its internal Python environment
           export PATH="${{ github.workspace }}/depot_tools:$PATH"
           ${{ github.workspace }}/depot_tools/update_depot_tools
 
@@ -63,7 +64,7 @@ jobs:
           # SAFETY HACK: Tarballs sometimes miss the version metadata file. We fake it just in case.
           echo "LASTCHANGE=$VERSION-refs/heads/master@{#000000}" > build/util/LASTCHANGE
           
-          # FIXED: Added target_os="linux" to explicitly trigger the 32-bit cross-compilation pipeline
+          # FIXED: Added target_os="linux" to satisfy the compiler's x86 cross-compilation target check
           gn gen out/Release_x86 --args='target_os="linux" target_cpu="x86" is_debug=false symbol_level=0 blink_symbol_level=0 enable_nacl=false is_official_build=true'
           
       - name: The 6-Hour Max Compile Battle
