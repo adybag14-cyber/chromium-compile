@@ -74,38 +74,67 @@ jobs:
         run: |
           cd ${{ github.workspace }}/chromium_source
           python3 - << 'PYEOF'
-          import os, re
+          from pathlib import Path
 
-          target = 'BUILD.gn'
-          with open(target, 'r') as f:
-              text = f.read()
-              lines = text.splitlines()
+          target = Path('BUILD.gn')
+          text = target.read_text()
+          lines = text.splitlines()
+          print('Target file lines:', len(lines))
 
-          original = text
           print('Pre patch matches:')
           for i, line in enumerate(lines, 1):
               if 'is_valid_x86_target' in line or 'true)  # PATCHED: allow x86 linux' in line:
                   print(f'{i}: {line}')
 
-          text = re.sub(r'is_valid_x86_target\s*=\s*[^\n]+', 'is_valid_x86_target = true', text)
-          pattern = r'assert\(\s*\n?\s*is_valid_x86_target\s*[^\n]*\)\s*;'
-          text = re.sub(pattern, 'assert(true)  # PATCHED: allow x86 linux', text)
+          original = text
 
+          text = text.replace('is_valid_x86_target = false', 'is_valid_x86_target = true')
+          text = text.replace('is_valid_x86_target= false', 'is_valid_x86_target = true')
+          text = text.replace('is_valid_x86_target=  false', 'is_valid_x86_target = true')
+          text = text.replace('is_valid_x86_target =  false', 'is_valid_x86_target = true')
+          text = text.replace('is_valid_x86_target=  false', 'is_valid_x86_target = true')
+
+          new_lines = []
+          i = 0
+          while i < len(lines):
+              line = lines[i]
+              if 'assert(' in line and 'is_valid_x86_target' in line:
+                  block = []
+                  j = i
+                  while j < len(lines):
+                      block.append(lines[j])
+                      j += 1
+                      if ')' in lines[j-1]:
+                          break
+                  block_text = '\n'.join(block)
+                  if (
+                      'is_valid_x86_target' in block_text
+                      and 'target_cpu' in block_text
+                      and 'x86' in block_text
+                      and 'arm' in block_text
+                  ):
+                      print('Replacing block:', '\n' .join(f'{k+1}: {b}' for k,b in enumerate(block, i+1)))
+                      new_lines.append('assert(true)  # PATCHED: allow x86 linux')
+                      i = j
+                      continue
+              new_lines.append(line)
+              i += 1
+
+          text = '\n'.join(new_lines)
           if text != original:
-              with open(target, 'w') as f:
-                  f.write(text)
+              target.write_text(text)
               print('Patched BUILD.gn')
           else:
               print('No patch needed in BUILD.gn')
 
-          with open(target, 'r') as f:
-              lines = f.read().splitlines()
+          lines = text.splitlines()
           hits = []
           for i, line in enumerate(lines, 1):
               if 'is_valid_x86_target' in line or 'PATCHED: allow x86 linux' in line:
                   hits.append((i, line))
           if not hits:
               raise SystemExit('BUILD.gn patch verification failed: no matching line found')
+          print('Matched lines:')
           for i, line in hits:
               print(f'{i}: {line}')
           if not any('PATCHED: allow x86 linux' in line for _, line in hits):
