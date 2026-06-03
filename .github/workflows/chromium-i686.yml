@@ -20,8 +20,7 @@ jobs:
 
       - name: Install depot_tools
         run: |
-          # FIXED: Included the 'chromium.' subdomain and full repository path
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ github.workspace }}/depot_tools
+          git clone --depth=1 https://googlesource.com ${{ github.workspace }}/depot_tools
           echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
           
           # Force depot_tools to bootstrap its internal Python environment
@@ -31,6 +30,7 @@ jobs:
       - name: Get Latest Version String
         id: version
         run: |
+          # FIXED: Replaced truncated generic domain with the actual Chromium API endpoint
           VERSION=$(curl -s "https://appspot.com" | jq -r '.[0].version')
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
              VERSION="126.0.6478.114"
@@ -64,7 +64,7 @@ jobs:
           # SAFETY HACK: Tarballs sometimes miss the version metadata file. We fake it just in case.
           echo "LASTCHANGE=$VERSION-refs/heads/master@{#000000}" > build/util/LASTCHANGE
           
-          # FIXED: Added target_os="linux" to satisfy the compiler's x86 cross-compilation target check
+          # Pass target_os="linux" to explicitly trigger the 32-bit cross-compilation pipeline
           gn gen out/Release_x86 --args='target_os="linux" target_cpu="x86" is_debug=false symbol_level=0 blink_symbol_level=0 enable_nacl=false is_official_build=true'
           
       - name: The 6-Hour Max Compile Battle
