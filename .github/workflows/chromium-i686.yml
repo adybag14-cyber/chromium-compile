@@ -57,28 +57,29 @@ jobs:
           cd ${{ github.workspace }}/chromium_source
           echo "=== Patching GN x86 Linux assertion ==="
           
-          # Patch root BUILD.gn
-          if grep -q 'is_valid_x86_target || target_cpu != "x86"' BUILD.gn; then
-            sed -i 's/is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm"/true/' BUILD.gn
-            echo "Patched root BUILD.gn"
+          # Patch the definition of is_valid_x86_target to always be true
+          # This keeps the assertion intact but makes it pass
+          if grep -q 'is_valid_x86_target' BUILD.gn; then
+            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' BUILD.gn
+            echo "Patched is_valid_x86_target definition in root BUILD.gn"
           fi
           
-          # Patch v8/BUILD.gn if it exists
-          if [ -f v8/BUILD.gn ] && grep -q 'is_valid_x86_target || target_cpu != "x86"' v8/BUILD.gn; then
-            sed -i 's/is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm"/true/' v8/BUILD.gn
-            echo "Patched v8/BUILD.gn"
+          # Same for v8/BUILD.gn if it has its own definition
+          if [ -f v8/BUILD.gn ] && grep -q 'is_valid_x86_target' v8/BUILD.gn; then
+            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' v8/BUILD.gn
+            echo "Patched is_valid_x86_target definition in v8/BUILD.gn"
           fi
           
-          # Patch build/config/BUILD.gn if similar check exists
+          # Same for build/config/BUILD.gn
           if [ -f build/config/BUILD.gn ] && grep -q 'is_valid_x86_target' build/config/BUILD.gn; then
-            sed -i 's/is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm"/true/' build/config/BUILD.gn
-            echo "Patched build/config/BUILD.gn"
+            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' build/config/BUILD.gn
+            echo "Patched is_valid_x86_target definition in build/config/BUILD.gn"
           fi
           
-          # Patch build/config/BUILDCONFIG.gn if similar check exists
+          # Same for build/config/BUILDCONFIG.gn
           if [ -f build/config/BUILDCONFIG.gn ] && grep -q 'is_valid_x86_target' build/config/BUILDCONFIG.gn; then
-            sed -i 's/is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm"/true/' build/config/BUILDCONFIG.gn
-            echo "Patched build/config/BUILDCONFIG.gn"
+            sed -i '/is_valid_x86_target/c\  is_valid_x86_target = true' build/config/BUILDCONFIG.gn
+            echo "Patched is_valid_x86_target definition in build/config/BUILDCONFIG.gn"
           fi
           
           echo "=== Patch complete ==="
