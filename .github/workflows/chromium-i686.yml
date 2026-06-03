@@ -85,14 +85,11 @@ jobs:
 
           original = content
           content = content.replace('is_valid_x86_target = false', 'is_valid_x86_target = true')
-          content = content.replace(
+          for src in [
               'assert(is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm")',
-              'assert(true)  # PATCHED: allow x86 linux'
-          )
-          content = content.replace(
               "assert(is_valid_x86_target || target_cpu != 'x86' || v8_target_cpu == 'arm')",
-              "assert(true)  # PATCHED: allow x86 linux"
-          )
+          ]:
+              content = content.replace(src, 'assert(true)  # PATCHED: allow x86 linux')
 
           if content != original:
               with open(target, 'w') as f:
@@ -101,10 +98,35 @@ jobs:
           else:
               print('No patch needed in BUILD.gn')
 
-          print('--- Relevant lines ---')
+          seen_target = False
           for i, line in enumerate(content.splitlines(), 1):
               if 'is_valid_x86_target' in line or 'PATCHED: allow x86 linux' in line:
+                  if target in line or 'PATCHED: allow x86 linux' in line or i <= 10:
+                      seen_target = True
                   print(f'{i}: {line}')
+          if not seen_target:
+              print('Patched BUILD.gn without matching line output')
+          PYEOF
+        env:
+          LAST_STEP_PATCHED_BUILDGN: true
+
+      - name: Verify BUILD.gn patch
+        run: |
+          cd ${{ github.workspace }}/chromium_source
+          python3 - << 'PYEOF'
+          import os, re
+          target = 'BUILD.gn'
+          with open(target, 'r') as f:
+              lines = f.read().splitlines()
+          hits = []
+          for i, line in enumerate(lines, 1):
+              if 'is_valid_x86_target' in line or 'PATCHED: allow x86 linux' in line:
+                  hits.append((i, line))
+          for i, line in hits:
+              print(f'{i}: {line}')
+          if not any('PATCHED: allow x86 linux' in line for _, line in hits):
+              raise SystemExit('BUILD.gn patch verification failed: assertion guard still present')
+          print('Verified: BUILD.gn patch is active')
           PYEOF
 
 
