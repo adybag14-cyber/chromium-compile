@@ -98,24 +98,20 @@ jobs:
           i = 0
           while i < len(lines):
               line = lines[i]
-              if 'assert(' in line and 'is_valid_x86_target' in line:
-                  block = []
-                  j = i
+              if 'assert(' in line:
+                  block = [line]
+                  j = i + 1
                   while j < len(lines):
                       block.append(lines[j])
-                      j += 1
-                      if ')' in lines[j-1]:
+                      if lines[j].strip() == ')':
                           break
+                      j += 1
                   block_text = '\n'.join(block)
-                  if (
-                      'is_valid_x86_target' in block_text
-                      and 'target_cpu' in block_text
-                      and 'x86' in block_text
-                      and 'arm' in block_text
-                  ):
-                      print('Replacing block:', '\n' .join(f'{k+1}: {b}' for k,b in enumerate(block, i+1)))
+                  if 'is_valid_x86_target' in block_text:
+                      print(f'Found assert target at {i+1}-{j+1}')
+                      print('\n'.join(f'{k+1}: {b}' for k,b in enumerate(block, i+1)))
                       new_lines.append('assert(true)  # PATCHED: allow x86 linux')
-                      i = j
+                      i = j + 1
                       continue
               new_lines.append(line)
               i += 1
