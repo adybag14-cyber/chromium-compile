@@ -72,17 +72,40 @@ jobs:
       - name: Patch BUILD.gn for x86 Linux
         run: |
           cd ${{ github.workspace }}/chromium_source
-          if [ -f BUILD.gn ]; then
-            sed -i 's/is_valid_x86_target\s*=\s*false/is_valid_x86_target = true/g' BUILD.gn || true
-            grep -n "is_valid_x86_target" BUILD.gn || true
-          fi
-          if [ -f build/config/BUILD.gn ]; then
-            sed -i 's/assert(target_cpu != "x86" || is_valid_x86_target)/if (!is_valid_x86_target) assert(target_cpu != "x86")/g' build/config/BUILD.gn || true
-            grep -n "is_valid_x86_target" build/config/BUILD.gn || true
-          fi
-          if [ -f build/config/BUILDCONFIG.gn ]; then
-            grep -n "is_valid_x86_target" build/config/BUILDCONFIG.gn || true
-          fi
+          python3 - << 'PYEOF'
+          import os
+
+          target = 'BUILD.gn'
+          if not os.path.exists(target):
+              print('Skip: BUILD.gn not found')
+              raise SystemExit(0)
+
+          with open(target, 'r') as f:
+              content = f.read()
+
+          original = content
+          content = content.replace('is_valid_x86_target = false', 'is_valid_x86_target = true')
+          content = content.replace(
+              'assert(is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm")',
+              'assert(true)  # PATCHED: allow x86 linux'
+          )
+          content = content.replace(
+              "assert(is_valid_x86_target || target_cpu != 'x86' || v8_target_cpu == 'arm')",
+              "assert(true)  # PATCHED: allow x86 linux"
+          )
+
+          if content != original:
+              with open(target, 'w') as f:
+                  f.write(content)
+              print('Patched BUILD.gn')
+          else:
+              print('No patch needed in BUILD.gn')
+
+          print('--- Relevant lines ---')
+          for i, line in enumerate(content.splitlines(), 1):
+              if 'is_valid_x86_target' in line or 'PATCHED: allow x86 linux' in line:
+                  print(f'{i}: {line}')
+          PYEOF
 
 
       - name: Write LASTCHANGE
