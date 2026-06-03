@@ -1,4 +1,5 @@
 name: Chromium i686 Build (Cloud Experiment)
+
 on:
   push:
   workflow_dispatch:
@@ -7,6 +8,7 @@ jobs:
   experimental_build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+
     steps:
       - name: Maximize Runner Disk Space
         run: |
@@ -22,6 +24,17 @@ jobs:
           echo "=== Disk space AFTER cleanup ==="
           df -h
 
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git python3 python3-pip curl jq xz-utils \
+            build-essential pkg-config \
+            libgtk-3-dev libnss3-dev libasound2-dev libxss-dev libxtst-dev libxrandr-dev \
+            libxcomposite-dev libxdamage-dev libxfixes-dev libxrender-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libpango1.0-dev libcups2-dev libatk1.0-dev \
+            libatspi2.0-dev libatk-bridge2.0-dev || true
+
       - name: Install depot_tools
         run: |
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ github.workspace }}/depot_tools
@@ -34,7 +47,8 @@ jobs:
         run: |
           VERSION=$(curl -s "https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions" | jq -r '.versions[0].version')
           if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-             VERSION="126.0.6478.114"
+             echo "::error::Failed to resolve latest Chromium version"
+             exit 1
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
@@ -44,14 +58,10 @@ jobs:
         run: |
           mkdir -p ${{ github.workspace }}/chromium_source
           echo "Streaming download and extracting simultaneously..."
-          curl -sL "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$VERSION.tar.xz" | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
+          curl --retry 5 --retry-delay 5 -sL "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${{ env.VERSION }}.tar.xz" \
+            | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
           echo "Extraction complete. Size:"
           du -sh ${{ github.workspace }}/chromium_source
-
-      - name: Install System Dependencies
-        run: |
-          cd ${{ github.workspace }}/chromium_source
-          sudo DEBIAN_FRONTEND=noninteractive ./build/install-build-deps.sh --lib32 --no-arm --no-nacl --no-prompt --no-chromeos-fonts || echo "Ignoring dependency errors"
 
       - name: Install i386 Sysroot
         run: |
@@ -66,7 +76,6 @@ jobs:
           import os
           import re
 
-          # Files where is_valid_x86_target might be defined
           files_to_patch = [
               'build/config/BUILDCONFIG.gn',
               'build/config/BUILD.gn',
@@ -74,7 +83,6 @@ jobs:
               'v8/BUILD.gn',
           ]
 
-          # Match: is_valid_x86_target = false (with optional surrounding whitespace/indent)
           var_pattern = re.compile(r'^(\s*)is_valid_x86_target\s*=\s*false\b', re.MULTILINE)
 
           patched_files = []
@@ -105,14 +113,12 @@ jobs:
               print("WARNING: Did not find is_valid_x86_target = false in any file.")
               print("This variable may not exist in this Chromium version,")
               print("or it may be defined elsewhere. GN gen will reveal if more patching is needed.")
-
           PYEOF
 
       - name: Write LASTCHANGE
         run: |
           cd ${{ github.workspace }}/chromium_source
           mkdir -p build/util
-          # GN expects "<git-hash>-refs/heads/<branch>@{#<number>}"
           echo "LASTCHANGE=0000000000000000000000000000000000000000-refs/heads/main@{#0}" > build/util/LASTCHANGE
           cat build/util/LASTCHANGE
 
@@ -141,7 +147,7 @@ jobs:
           echo "Starting compiler at $(date)..."
           echo "Disk space before build:"
           df -h
-          autoninja -C out/Release_x86 chrome
+          autoninja -C out/Release_x86 -j2 chrome
           echo "Build finished at $(date)"
           echo "Final disk space:"
           df -h
