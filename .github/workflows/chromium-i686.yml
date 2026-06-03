@@ -13,6 +13,12 @@ jobs:
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
+          
+      - name: Fix vpython environment
+        run: |
+          # Clear cache to ensure fresh virtual environment
+          rm -rf ~/.cache/.vpython-root
+          
           # Force initialization/bootstrap
           cd depot_tools
           ./gclient
@@ -38,14 +44,12 @@ jobs:
       - name: Install i386 Sysroot
         run: |
           cd chromium_source
-          # Ensure depot_tools is in PATH for this step
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
           
       - name: GN Gen
         run: |
           cd chromium_source
-          # Ensure depot_tools is in PATH for this step
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           mkdir -p out/Release_x86
           gn gen out/Release_x86 --args='target_cpu="x86" is_debug=false symbol_level=0'
@@ -53,6 +57,5 @@ jobs:
       - name: Build
         run: |
           cd chromium_source
-          # Ensure depot_tools is in PATH for this step
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           autoninja -C out/Release_x86 chrome
