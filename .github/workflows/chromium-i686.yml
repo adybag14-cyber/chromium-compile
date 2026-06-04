@@ -75,33 +75,12 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ github.workspace }}/chromium_source"
-          if [[ -f build/config/BUILD.gn ]]; then
-            candidate="build/config/BUILD.gn"
-          elif [[ -f build/config/gn/BUILD.gn ]]; then
-            candidate="build/config/gn/BUILD.gn"
-          elif [[ -f BUILD.gn ]]; then
-            candidate="BUILD.gn"
-          fi
-
-          if [[ -z "${candidate:-}" ]]; then
-            echo "No BUILD.gn candidate found"
-            exit 1
-          fi
-
-          echo "PATCH TARGET: $candidate"
-          sed -n '1,240p' "$candidate" | grep -n "is_valid_x86_target\|assert" || true
-
-          if grep -q "is_valid_x86_target = false" "$candidate"; then
-            sed -i "s/is_valid_x86_target = false/is_valid_x86_target = true/g" "$candidate"
-          fi
-
-          if grep -q "not supported for 'target_os=linux'" "$candidate"; then
-            sed -i "/is_valid_x86_target = true/a assert(true)  # patched for x86 linux" "$candidate"
-          fi
-
+          candidate="build/config/BUILD.gn"
+          echo "Patch target: $candidate"
+          sed -i "s/is_valid_x86_target = false/is_valid_x86_target = true/g" "$candidate"
+          sed -i "/'target_cpu=x86' is not supported for 'target_os=linux'/a assert(true)  # patched for x86 linux" "$candidate"
           echo "PATCHED SNIPPET:"
-          grep -n "is_valid_x86_target\|patched for x86 linux" "$candidate" || true
-
+          grep -n "is_valid_x86_target\|patched for x86 linux\|assert" "$candidate" || true
 
       - name: Write LASTCHANGE
         run: |
