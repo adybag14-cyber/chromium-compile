@@ -8,7 +8,7 @@ OUT_DIR="${CHROMIUM_SRC}/out/Release_x86"
 CHECKPOINT_DIR="${WORKSPACE}/checkpoints"
 CHECKPOINT_ARCHIVE="${CHECKPOINT_DIR}/out-Release_x86.tar.zst"
 export CCACHE_DIR="${CCACHE_DIR:-${WORKSPACE}/.ccache}"
-export PATH="${DEPOT_TOOLS}:${PATH}"
+export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
 
 maximize_runner_disk_space() {
   echo "=== Disk space BEFORE cleanup ==="
@@ -39,7 +39,8 @@ install_depot_tools() {
   rm -rf "${DEPOT_TOOLS}"
   git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "${DEPOT_TOOLS}"
   echo "${DEPOT_TOOLS}" >> "${GITHUB_PATH}"
-  export PATH="${DEPOT_TOOLS}:${PATH}"
+  echo "${DEPOT_TOOLS}/.cipd_bin" >> "${GITHUB_PATH}"
+  export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
   "${DEPOT_TOOLS}/update_depot_tools"
 }
 
@@ -174,7 +175,7 @@ run_build_until_checkpoint() {
   fi
 
   cd "${CHROMIUM_SRC}"
-  export PATH="${DEPOT_TOOLS}:${PATH}"
+  export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
   export CCACHE_DIR
 
   echo "Starting compiler slice at $(date)."
