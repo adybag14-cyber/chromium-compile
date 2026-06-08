@@ -6,186 +6,123 @@ on:
 
 permissions:
   contents: write
+  actions: read
+
+env:
+  JOB_CHECKPOINT_MINUTES: "330"
+  CHECKPOINT_RETENTION_DAYS: "2"
+  CCACHE_MAX_SIZE: 8G
 
 jobs:
-  experimental_build:
+  resolve_version:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
-
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Maximize Runner Disk Space
-        run: |
-          echo "=== Disk space BEFORE cleanup ==="
-          df -h
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo apt-get purge -y '^mysql-' '^mongodb-' '^postgresql-' '^dotnet-' '^android-sdk-' || true
-          sudo apt-get autoremove -y || true
-          sudo apt-get clean || true
-          echo "=== Disk space AFTER cleanup ==="
-          df -h
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            git python3 python3-pip curl jq xz-utils \
-            build-essential pkg-config \
-            libgtk-3-dev libnss3-dev libasound2-dev libxss-dev libxtst-dev libxrandr-dev \
-            libxcomposite-dev libxdamage-dev libxfixes-dev libxrender-dev libxkbcommon-dev \
-            libdrm-dev libgbm-dev libpango1.0-dev libcups2-dev libatk1.0-dev \
-            libatspi2.0-dev libatk-bridge2.0-dev || true
-
-      - name: Install depot_tools
-        run: |
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ${{ github.workspace }}/depot_tools
-          echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
-          export PATH="${{ github.workspace }}/depot_tools:$PATH"
-          ${{ github.workspace }}/depot_tools/update_depot_tools
+      - name: Checkout Workflow Helpers
+        uses: actions/checkout@v4
 
       - name: Get Latest Version String
         id: version
         run: |
-          VERSION=$(curl -s "https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions" | jq -r '.versions[0].version')
-          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-             echo "::error::Failed to resolve latest Chromium version"
-             exit 1
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Target Version: $VERSION"
+          source .github/scripts/chromium_i686_common.sh
+          VERSION="$(resolve_latest_version)"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Target Version: ${VERSION}"
 
-      - name: Stream Extract Chromium Tarball
+  build_stage_1:
+    name: Build Stage 1
+    needs: resolve_version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    outputs:
+      complete: ${{ steps.compile.outputs.complete }}
+    env:
+      VERSION: ${{ needs.resolve_version.outputs.version }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - name: Checkout Workflow Helpers
+        uses: actions/checkout@v4
+
+      - name: Mark Job Start
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Maximize Runner Disk Space
         run: |
-          mkdir -p ${{ github.workspace }}/chromium_source
-          echo "Streaming download and extracting simultaneously..."
-          curl --retry 5 --retry-delay 5 -sL "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${{ env.VERSION }}.tar.xz" \
-            | tar -xJ -C ${{ github.workspace }}/chromium_source --strip-components=1
-          echo "Extraction complete. Size:"
-          du -sh ${{ github.workspace }}/chromium_source
+          source .github/scripts/chromium_i686_common.sh
+          maximize_runner_disk_space
 
-      - name: Install Chromium Clang Toolchain
+      - name: Install System Dependencies
         run: |
-          cd ${{ github.workspace }}/chromium_source
-          export PATH="${{ github.workspace }}/depot_tools:$PATH"
-          python3 tools/clang/scripts/update.py
-          test -x third_party/llvm-build/Release+Asserts/bin/clang
-          test -s third_party/llvm-build/Release+Asserts/cr_build_revision
-          echo "Chromium clang revision:"
-          cat third_party/llvm-build/Release+Asserts/cr_build_revision
+          source .github/scripts/chromium_i686_common.sh
+          install_system_dependencies
 
-      - name: Install i386 Sysroot
+      - name: Install depot_tools
         run: |
-          cd ${{ github.workspace }}/chromium_source
-          export PATH="${{ github.workspace }}/depot_tools:$PATH"
-          python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
+          source .github/scripts/chromium_i686_common.sh
+          install_depot_tools
 
-      - name: Patch BUILD.gn for x86 Linux
-        id: patch
-        shell: bash -e {0}
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-1
+          restore-keys: |
+            chromium-i686-ccache-${{ env.VERSION }}-
+
+      - name: Prepare Chromium Source
         run: |
-          set -euo pipefail
-          cd "${{ github.workspace }}/chromium_source"
-          candidate="BUILD.gn"
-          echo "Patch target: $candidate"
-          python3 - <<'PY'
-          from pathlib import Path
+          source .github/scripts/chromium_i686_common.sh
+          prepare_chromium_source "${VERSION}"
+          install_chromium_clang
+          install_i386_sysroot
+          patch_build_gn_for_x86_linux
+          write_lastchange
+          configure_ccache
+          restore_out_checkpoint ""
+          configure_gn
 
-          path = Path("BUILD.gn")
-          text = path.read_text()
-          old = 'is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm",'
-          new = (
-              'is_valid_x86_target || target_cpu != "x86" || '
-              'v8_target_cpu == "arm" || target_os == "linux",'
-          )
-          if new not in text:
-              if old not in text:
-                  raise SystemExit("Could not find x86 target assertion predicate in BUILD.gn")
-              text = text.replace(old, new, 1)
-              path.write_text(text)
-          PY
-          echo "PATCHED SNIPPET:"
-          grep -n -A4 -B2 "target_cpu=x86.*target_os=linux\|is_valid_x86_target" "$candidate" || true
-
-      - name: Write LASTCHANGE
+      - name: Compile Until Checkpoint
+        id: compile
         run: |
-          cd ${{ github.workspace }}/chromium_source
-          mkdir -p build/util
-          echo "LASTCHANGE=0000000000000000000000000000000000000000-refs/heads/main@{#0}" > build/util/LASTCHANGE
-          cat build/util/LASTCHANGE
+          source .github/scripts/chromium_i686_common.sh
+          run_build_until_checkpoint "${GITHUB_OUTPUT}"
 
-      - name: GN Project Gen
-        run: |
-          cd ${{ github.workspace }}/chromium_source
-          export PATH="${{ github.workspace }}/depot_tools:$PATH"
-          mkdir -p out/Release_x86
-          gn gen out/Release_x86 --args='
-            target_os="linux"
-            target_cpu="x86"
-            is_debug=false
-            symbol_level=0
-            blink_symbol_level=0
-            enable_nacl=false
-            is_official_build=false
-            use_thin_lto=false
-            use_reclient=false
-            treat_warnings_as_errors=false
-          '
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-1
 
-      - name: The 6-Hour Max Compile Battle
+      - name: Create Stage 1 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
         run: |
-          cd ${{ github.workspace }}/chromium_source
-          export PATH="${{ github.workspace }}/depot_tools:$PATH"
-          echo "Starting compiler at $(date)..."
-          echo "Disk space before build:"
-          df -h
-          autoninja -C out/Release_x86 -j2 chrome
-          echo "Build finished at $(date)"
-          echo "Final disk space:"
-          df -h
+          source .github/scripts/chromium_i686_common.sh
+          create_out_checkpoint
+
+      - name: Upload Stage 1 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-1
+          path: ${{ github.workspace }}/checkpoints/out-Release_x86.tar.zst
+          retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+          compression-level: 0
+          if-no-files-found: error
 
       - name: Package Chromium i686 Build
-        if: success()
+        if: steps.compile.outputs.complete == 'true'
         run: |
-          set -euo pipefail
-          cd ${{ github.workspace }}/chromium_source/out/Release_x86
-          package="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz"
-          manifest="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt"
-          {
-            echo "version=${{ env.VERSION }}"
-            echo "target_cpu=x86"
-            echo "target_os=linux"
-            echo "source_tarball=https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${{ env.VERSION }}.tar.xz"
-            echo "github_sha=${{ github.sha }}"
-            echo
-            find . -maxdepth 1 -type f -printf '%P\n' | sort
-          } > "$manifest"
-          shopt -s nullglob
-          files=(chrome)
-          for optional in chrome_sandbox locales; do
-            if [ -e "$optional" ]; then
-              files+=("$optional")
-            fi
-          done
-          extra_runtime=(*.pak *.bin *.dat)
-          files+=("${extra_runtime[@]}")
-          {
-            echo
-            echo "packaged_files:"
-            printf '%s\n' "${files[@]}"
-          } >> "$manifest"
-          tar -cJf "$package" "${files[@]}" || {
-            echo "::error::Failed to package Chromium runtime files"
-            find . -maxdepth 1 -type f -printf '%P\n' | sort
-            exit 1
-          }
-          sha256sum "$package" > "${package}.sha256"
-          ls -lh "$package" "${package}.sha256" "$manifest"
+          source .github/scripts/chromium_i686_common.sh
+          package_chromium_i686 "${VERSION}"
 
-      - name: Upload Build Artifact (if successful)
-        if: success()
+      - name: Upload Build Artifact
+        if: steps.compile.outputs.complete == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: chromium-${{ env.VERSION }}-linux-i686
@@ -195,20 +132,610 @@ jobs:
             ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt
 
       - name: Publish GitHub Release
-        if: success()
+        if: steps.compile.outputs.complete == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: chromium-${{ env.VERSION }}-linux-i686
         run: |
-          set -euo pipefail
-          package="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz"
-          checksum="${package}.sha256"
-          manifest="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt"
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$package" "$checksum" "$manifest" --clobber
-          else
-            gh release create "$RELEASE_TAG" "$package" "$checksum" "$manifest" \
-              --target "${{ github.sha }}" \
-              --title "Chromium ${{ env.VERSION }} Linux i686" \
-              --notes "Chromium ${{ env.VERSION }} Linux i686 build from GitHub Actions run ${{ github.run_id }}."
-          fi
+          source .github/scripts/chromium_i686_common.sh
+          publish_chromium_release "${VERSION}"
+
+  build_stage_2:
+    name: Build Stage 2
+    needs: [resolve_version, build_stage_1]
+    if: ${{ always() && needs.build_stage_1.result == 'success' && needs.build_stage_1.outputs.complete != 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    outputs:
+      complete: ${{ steps.compile.outputs.complete }}
+    env:
+      VERSION: ${{ needs.resolve_version.outputs.version }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - name: Checkout Workflow Helpers
+        uses: actions/checkout@v4
+
+      - name: Mark Job Start
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Maximize Runner Disk Space
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          maximize_runner_disk_space
+
+      - name: Install System Dependencies
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_system_dependencies
+
+      - name: Install depot_tools
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_depot_tools
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-2
+          restore-keys: |
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-1
+            chromium-i686-ccache-${{ env.VERSION }}-
+
+      - name: Download Stage 1 Checkpoint
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-1
+          path: ${{ github.workspace }}/resume
+
+      - name: Prepare Chromium Source
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          prepare_chromium_source "${VERSION}"
+          install_chromium_clang
+          install_i386_sysroot
+          patch_build_gn_for_x86_linux
+          write_lastchange
+          configure_ccache
+          restore_out_checkpoint "${GITHUB_WORKSPACE}/resume/out-Release_x86.tar.zst"
+          configure_gn
+
+      - name: Compile Until Checkpoint
+        id: compile
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          run_build_until_checkpoint "${GITHUB_OUTPUT}"
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-2
+
+      - name: Create Stage 2 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          create_out_checkpoint
+
+      - name: Upload Stage 2 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-2
+          path: ${{ github.workspace }}/checkpoints/out-Release_x86.tar.zst
+          retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Package Chromium i686 Build
+        if: steps.compile.outputs.complete == 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          package_chromium_i686 "${VERSION}"
+
+      - name: Upload Build Artifact
+        if: steps.compile.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-${{ env.VERSION }}-linux-i686
+          path: |
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz.sha256
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt
+
+      - name: Publish GitHub Release
+        if: steps.compile.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          publish_chromium_release "${VERSION}"
+
+  build_stage_3:
+    name: Build Stage 3
+    needs: [resolve_version, build_stage_2]
+    if: ${{ always() && needs.build_stage_2.result == 'success' && needs.build_stage_2.outputs.complete != 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    outputs:
+      complete: ${{ steps.compile.outputs.complete }}
+    env:
+      VERSION: ${{ needs.resolve_version.outputs.version }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - name: Checkout Workflow Helpers
+        uses: actions/checkout@v4
+
+      - name: Mark Job Start
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Maximize Runner Disk Space
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          maximize_runner_disk_space
+
+      - name: Install System Dependencies
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_system_dependencies
+
+      - name: Install depot_tools
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_depot_tools
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-3
+          restore-keys: |
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-2
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-1
+            chromium-i686-ccache-${{ env.VERSION }}-
+
+      - name: Download Stage 2 Checkpoint
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-2
+          path: ${{ github.workspace }}/resume
+
+      - name: Prepare Chromium Source
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          prepare_chromium_source "${VERSION}"
+          install_chromium_clang
+          install_i386_sysroot
+          patch_build_gn_for_x86_linux
+          write_lastchange
+          configure_ccache
+          restore_out_checkpoint "${GITHUB_WORKSPACE}/resume/out-Release_x86.tar.zst"
+          configure_gn
+
+      - name: Compile Until Checkpoint
+        id: compile
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          run_build_until_checkpoint "${GITHUB_OUTPUT}"
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-3
+
+      - name: Create Stage 3 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          create_out_checkpoint
+
+      - name: Upload Stage 3 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-3
+          path: ${{ github.workspace }}/checkpoints/out-Release_x86.tar.zst
+          retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Package Chromium i686 Build
+        if: steps.compile.outputs.complete == 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          package_chromium_i686 "${VERSION}"
+
+      - name: Upload Build Artifact
+        if: steps.compile.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-${{ env.VERSION }}-linux-i686
+          path: |
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz.sha256
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt
+
+      - name: Publish GitHub Release
+        if: steps.compile.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          publish_chromium_release "${VERSION}"
+
+  build_stage_4:
+    name: Build Stage 4
+    needs: [resolve_version, build_stage_3]
+    if: ${{ always() && needs.build_stage_3.result == 'success' && needs.build_stage_3.outputs.complete != 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    outputs:
+      complete: ${{ steps.compile.outputs.complete }}
+    env:
+      VERSION: ${{ needs.resolve_version.outputs.version }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - name: Checkout Workflow Helpers
+        uses: actions/checkout@v4
+
+      - name: Mark Job Start
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Maximize Runner Disk Space
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          maximize_runner_disk_space
+
+      - name: Install System Dependencies
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_system_dependencies
+
+      - name: Install depot_tools
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_depot_tools
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-4
+          restore-keys: |
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-3
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-2
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-1
+            chromium-i686-ccache-${{ env.VERSION }}-
+
+      - name: Download Stage 3 Checkpoint
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-3
+          path: ${{ github.workspace }}/resume
+
+      - name: Prepare Chromium Source
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          prepare_chromium_source "${VERSION}"
+          install_chromium_clang
+          install_i386_sysroot
+          patch_build_gn_for_x86_linux
+          write_lastchange
+          configure_ccache
+          restore_out_checkpoint "${GITHUB_WORKSPACE}/resume/out-Release_x86.tar.zst"
+          configure_gn
+
+      - name: Compile Until Checkpoint
+        id: compile
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          run_build_until_checkpoint "${GITHUB_OUTPUT}"
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-4
+
+      - name: Create Stage 4 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          create_out_checkpoint
+
+      - name: Upload Stage 4 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-4
+          path: ${{ github.workspace }}/checkpoints/out-Release_x86.tar.zst
+          retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Package Chromium i686 Build
+        if: steps.compile.outputs.complete == 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          package_chromium_i686 "${VERSION}"
+
+      - name: Upload Build Artifact
+        if: steps.compile.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-${{ env.VERSION }}-linux-i686
+          path: |
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz.sha256
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt
+
+      - name: Publish GitHub Release
+        if: steps.compile.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          publish_chromium_release "${VERSION}"
+
+  build_stage_5:
+    name: Build Stage 5
+    needs: [resolve_version, build_stage_4]
+    if: ${{ always() && needs.build_stage_4.result == 'success' && needs.build_stage_4.outputs.complete != 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    outputs:
+      complete: ${{ steps.compile.outputs.complete }}
+    env:
+      VERSION: ${{ needs.resolve_version.outputs.version }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - name: Checkout Workflow Helpers
+        uses: actions/checkout@v4
+
+      - name: Mark Job Start
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Maximize Runner Disk Space
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          maximize_runner_disk_space
+
+      - name: Install System Dependencies
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_system_dependencies
+
+      - name: Install depot_tools
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_depot_tools
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-5
+          restore-keys: |
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-4
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-3
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-2
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-1
+            chromium-i686-ccache-${{ env.VERSION }}-
+
+      - name: Download Stage 4 Checkpoint
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-4
+          path: ${{ github.workspace }}/resume
+
+      - name: Prepare Chromium Source
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          prepare_chromium_source "${VERSION}"
+          install_chromium_clang
+          install_i386_sysroot
+          patch_build_gn_for_x86_linux
+          write_lastchange
+          configure_ccache
+          restore_out_checkpoint "${GITHUB_WORKSPACE}/resume/out-Release_x86.tar.zst"
+          configure_gn
+
+      - name: Compile Until Checkpoint
+        id: compile
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          run_build_until_checkpoint "${GITHUB_OUTPUT}"
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-5
+
+      - name: Create Stage 5 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          create_out_checkpoint
+
+      - name: Upload Stage 5 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-5
+          path: ${{ github.workspace }}/checkpoints/out-Release_x86.tar.zst
+          retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Package Chromium i686 Build
+        if: steps.compile.outputs.complete == 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          package_chromium_i686 "${VERSION}"
+
+      - name: Upload Build Artifact
+        if: steps.compile.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-${{ env.VERSION }}-linux-i686
+          path: |
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz.sha256
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt
+
+      - name: Publish GitHub Release
+        if: steps.compile.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          publish_chromium_release "${VERSION}"
+
+  build_stage_6:
+    name: Build Stage 6
+    needs: [resolve_version, build_stage_5]
+    if: ${{ always() && needs.build_stage_5.result == 'success' && needs.build_stage_5.outputs.complete != 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    outputs:
+      complete: ${{ steps.compile.outputs.complete }}
+    env:
+      VERSION: ${{ needs.resolve_version.outputs.version }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - name: Checkout Workflow Helpers
+        uses: actions/checkout@v4
+
+      - name: Mark Job Start
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Maximize Runner Disk Space
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          maximize_runner_disk_space
+
+      - name: Install System Dependencies
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_system_dependencies
+
+      - name: Install depot_tools
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          install_depot_tools
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-6
+          restore-keys: |
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-5
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-4
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-3
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-2
+            chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-1
+            chromium-i686-ccache-${{ env.VERSION }}-
+
+      - name: Download Stage 5 Checkpoint
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-5
+          path: ${{ github.workspace }}/resume
+
+      - name: Prepare Chromium Source
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          prepare_chromium_source "${VERSION}"
+          install_chromium_clang
+          install_i386_sysroot
+          patch_build_gn_for_x86_linux
+          write_lastchange
+          configure_ccache
+          restore_out_checkpoint "${GITHUB_WORKSPACE}/resume/out-Release_x86.tar.zst"
+          configure_gn
+
+      - name: Compile Until Checkpoint
+        id: compile
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          run_build_until_checkpoint "${GITHUB_OUTPUT}"
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: chromium-i686-ccache-${{ env.VERSION }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-6
+
+      - name: Create Stage 6 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          create_out_checkpoint
+
+      - name: Upload Stage 6 Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: chromium-i686-out-stage-6
+          path: ${{ github.workspace }}/checkpoints/out-Release_x86.tar.zst
+          retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Package Chromium i686 Build
+        if: steps.compile.outputs.complete == 'true'
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          package_chromium_i686 "${VERSION}"
+
+      - name: Upload Build Artifact
+        if: steps.compile.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-${{ env.VERSION }}-linux-i686
+          path: |
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz.sha256
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt
+
+      - name: Publish GitHub Release
+        if: steps.compile.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source .github/scripts/chromium_i686_common.sh
+          publish_chromium_release "${VERSION}"
+
+      - name: Stop After Final Checkpoint
+        if: steps.compile.outputs.complete != 'true'
+        run: |
+          echo "::error::Chromium did not finish after six staged build jobs. Add more stages or move to a larger/self-hosted runner."
+          exit 1
