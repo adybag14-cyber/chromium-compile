@@ -142,25 +142,23 @@ restore_out_checkpoint() {
   fi
 }
 
-bootstrap_gn_for_tarball() {
+install_gn_from_cipd() {
   cd "${CHROMIUM_SRC}"
   if [ -x "${GN_BINARY}" ]; then
     "${GN_BINARY}" --version || true
     return 0
   fi
 
-  echo "Bootstrapping GN from the Chromium source tarball..."
-  python3 tools/gn/bootstrap/bootstrap.py \
-    --skip-generate-buildfiles \
-    -o "${GN_BINARY}" \
-    -j2
+  echo "Installing prebuilt GN from CIPD..."
+  mkdir -p "$(dirname "${GN_BINARY}")"
+  cipd install gn/gn/linux-amd64 latest -root "$(dirname "${GN_BINARY}")"
   test -x "${GN_BINARY}"
   "${GN_BINARY}" --version || true
 }
 
 configure_gn() {
   cd "${CHROMIUM_SRC}"
-  bootstrap_gn_for_tarball
+  install_gn_from_cipd
   mkdir -p out/Release_x86
   "${GN_BINARY}" gen out/Release_x86 --args='
     target_os="linux"
