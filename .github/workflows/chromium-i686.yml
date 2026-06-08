@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   experimental_build:
     runs-on: ubuntu-22.04
@@ -75,12 +78,26 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ github.workspace }}/chromium_source"
-          candidate="build/config/BUILD.gn"
+          candidate="BUILD.gn"
           echo "Patch target: $candidate"
-          sed -i "s/is_valid_x86_target = false/is_valid_x86_target = true/g" "$candidate"
-          sed -i "/'target_cpu=x86' is not supported for 'target_os=linux'/a assert(true)  # patched for x86 linux" "$candidate"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("BUILD.gn")
+          text = path.read_text()
+          old = 'is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm",'
+          new = (
+              'is_valid_x86_target || target_cpu != "x86" || '
+              'v8_target_cpu == "arm" || target_os == "linux",'
+          )
+          if new not in text:
+              if old not in text:
+                  raise SystemExit("Could not find x86 target assertion predicate in BUILD.gn")
+              text = text.replace(old, new, 1)
+              path.write_text(text)
+          PY
           echo "PATCHED SNIPPET:"
-          grep -n "is_valid_x86_target\|patched for x86 linux\|assert" "$candidate" || true
+          grep -n -A4 -B2 "target_cpu=x86.*target_os=linux\|is_valid_x86_target" "$candidate" || true
 
       - name: Write LASTCHANGE
         run: |
@@ -119,9 +136,69 @@ jobs:
           echo "Final disk space:"
           df -h
 
+      - name: Package Chromium i686 Build
+        if: success()
+        run: |
+          set -euo pipefail
+          cd ${{ github.workspace }}/chromium_source/out/Release_x86
+          package="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz"
+          manifest="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt"
+          {
+            echo "version=${{ env.VERSION }}"
+            echo "target_cpu=x86"
+            echo "target_os=linux"
+            echo "source_tarball=https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${{ env.VERSION }}.tar.xz"
+            echo "github_sha=${{ github.sha }}"
+            echo
+            find . -maxdepth 1 -type f -printf '%P\n' | sort
+          } > "$manifest"
+          shopt -s nullglob
+          files=(chrome)
+          for optional in chrome_sandbox locales; do
+            if [ -e "$optional" ]; then
+              files+=("$optional")
+            fi
+          done
+          extra_runtime=(*.pak *.bin *.dat)
+          files+=("${extra_runtime[@]}")
+          {
+            echo
+            echo "packaged_files:"
+            printf '%s\n' "${files[@]}"
+          } >> "$manifest"
+          tar -cJf "$package" "${files[@]}" || {
+            echo "::error::Failed to package Chromium runtime files"
+            find . -maxdepth 1 -type f -printf '%P\n' | sort
+            exit 1
+          }
+          sha256sum "$package" > "${package}.sha256"
+          ls -lh "$package" "${package}.sha256" "$manifest"
+
       - name: Upload Build Artifact (if successful)
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: chromium-i686
-          path: ${{ github.workspace }}/chromium_source/out/Release_x86/chrome
+          name: chromium-${{ env.VERSION }}-linux-i686
+          path: |
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz.sha256
+            ${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt
+
+      - name: Publish GitHub Release
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: chromium-${{ env.VERSION }}-linux-i686
+        run: |
+          set -euo pipefail
+          package="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686.tar.xz"
+          checksum="${package}.sha256"
+          manifest="${{ github.workspace }}/chromium-${{ env.VERSION }}-linux-i686-manifest.txt"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$package" "$checksum" "$manifest" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$package" "$checksum" "$manifest" \
+              --target "${{ github.sha }}" \
+              --title "Chromium ${{ env.VERSION }} Linux i686" \
+              --notes "Chromium ${{ env.VERSION }} Linux i686 build from GitHub Actions run ${{ github.run_id }}."
+          fi
