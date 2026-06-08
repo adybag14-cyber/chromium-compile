@@ -66,6 +66,16 @@ jobs:
           echo "Extraction complete. Size:"
           du -sh ${{ github.workspace }}/chromium_source
 
+      - name: Install Chromium Clang Toolchain
+        run: |
+          cd ${{ github.workspace }}/chromium_source
+          export PATH="${{ github.workspace }}/depot_tools:$PATH"
+          python3 tools/clang/scripts/update.py
+          test -x third_party/llvm-build/Release+Asserts/bin/clang
+          test -s third_party/llvm-build/Release+Asserts/cr_build_revision
+          echo "Chromium clang revision:"
+          cat third_party/llvm-build/Release+Asserts/cr_build_revision
+
       - name: Install i386 Sysroot
         run: |
           cd ${{ github.workspace }}/chromium_source
