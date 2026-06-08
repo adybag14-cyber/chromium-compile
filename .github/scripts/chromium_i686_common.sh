@@ -4,6 +4,7 @@ set -euo pipefail
 WORKSPACE="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
 CHROMIUM_SRC="${WORKSPACE}/chromium_source"
 DEPOT_TOOLS="${WORKSPACE}/depot_tools"
+GN_BINARY="${CHROMIUM_SRC}/third_party/gn/gn"
 OUT_DIR="${CHROMIUM_SRC}/out/Release_x86"
 CHECKPOINT_DIR="${WORKSPACE}/checkpoints"
 CHECKPOINT_ARCHIVE="${CHECKPOINT_DIR}/out-Release_x86.tar.zst"
@@ -141,10 +142,27 @@ restore_out_checkpoint() {
   fi
 }
 
+bootstrap_gn_for_tarball() {
+  cd "${CHROMIUM_SRC}"
+  if [ -x "${GN_BINARY}" ]; then
+    "${GN_BINARY}" --version || true
+    return 0
+  fi
+
+  echo "Bootstrapping GN from the Chromium source tarball..."
+  python3 tools/gn/bootstrap/bootstrap.py \
+    --skip-generate-buildfiles \
+    -o "${GN_BINARY}" \
+    -j2
+  test -x "${GN_BINARY}"
+  "${GN_BINARY}" --version || true
+}
+
 configure_gn() {
   cd "${CHROMIUM_SRC}"
+  bootstrap_gn_for_tarball
   mkdir -p out/Release_x86
-  gn gen out/Release_x86 --args='
+  "${GN_BINARY}" gen out/Release_x86 --args='
     target_os="linux"
     target_cpu="x86"
     is_debug=false
