@@ -21,8 +21,23 @@ maximize_runner_disk_space() {
   sudo apt-get purge -y '^mysql-' '^mongodb-' '^postgresql-' '^dotnet-' '^android-sdk-' || true
   sudo apt-get autoremove -y || true
   sudo apt-get clean || true
+  ensure_swap
   echo "=== Disk space AFTER cleanup ==="
   df -h
+}
+
+ensure_swap() {
+  if swapon --show | grep -q '/swapfile'; then
+    echo "Swap already enabled"
+    swapon --show
+    return 0
+  fi
+  echo "Adding 8G swap file to reduce OOM risk during Chromium linking..."
+  sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  swapon --show
 }
 
 install_system_dependencies() {
@@ -67,12 +82,21 @@ PY
 
 prepare_chromium_source() {
   local version="${1:?version is required}"
+  local cache_dir="${WORKSPACE}/.chromium-source-cache"
+  local tarball="${cache_dir}/chromium-${version}.tar.xz"
   rm -rf "${CHROMIUM_SRC}"
-  mkdir -p "${CHROMIUM_SRC}"
-  echo "Streaming Chromium ${version} source download and extraction..."
-  curl --fail --retry 5 --retry-delay 10 -L \
-    "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz" \
-    | tar -xJ -C "${CHROMIUM_SRC}" --strip-components=1
+  mkdir -p "${CHROMIUM_SRC}" "${cache_dir}"
+  if [ -s "${tarball}" ]; then
+    echo "Using cached Chromium ${version} source tarball at ${tarball}"
+  else
+    echo "Downloading Chromium ${version} source tarball..."
+    curl --fail --retry 5 --retry-delay 10 -L \
+      "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz" \
+      -o "${tarball}.partial"
+    mv "${tarball}.partial" "${tarball}"
+  fi
+  echo "Extracting Chromium ${version} source..."
+  tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1
   echo "Extraction complete. Source size:"
   du -sh "${CHROMIUM_SRC}"
 }
@@ -199,7 +223,7 @@ run_build_until_checkpoint() {
   echo "Disk space before build:"
   df -h
   set +e
-  timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j2 chrome
+  timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j3 chrome
   local status=$?
   set -e
 
