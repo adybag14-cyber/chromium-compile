@@ -1,0 +1,232 @@
+name: Chromium i686 staged build attempt
+description: Runs one resumable Chromium i686 compiler slice and publishes a stable checkpoint.
+inputs:
+  stage:
+    description: Stage number.
+    required: true
+  attempt:
+    description: Attempt label, such as primary or retry.
+    required: true
+  version:
+    description: Chromium version.
+    required: true
+  preferred-checkpoint-artifact:
+    description: First checkpoint artifact to try.
+    required: false
+    default: ""
+  preferred-checkpoint-run-id:
+    description: Run ID containing the preferred checkpoint.
+    required: false
+    default: ""
+  fallback-checkpoint-artifact:
+    description: Checkpoint artifact to use when the preferred artifact is unavailable.
+    required: false
+    default: ""
+  fallback-checkpoint-run-id:
+    description: Run ID containing the fallback checkpoint.
+    required: false
+    default: ""
+  final-stage:
+    description: Fail after checkpointing when this is the final allowed stage and the build is incomplete.
+    required: false
+    default: "false"
+outputs:
+  complete:
+    description: Whether Chromium finished compiling.
+    value: ${{ steps.compile.outputs.complete }}
+
+runs:
+  using: composite
+  steps:
+    - name: Mark Job Start
+      shell: bash
+      run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+    - name: Log Initial Runner Storage
+      shell: bash
+      run: |
+        source .github/scripts/runner_diagnostics.sh
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} initial"
+
+    - name: Maximize Runner Disk Space
+      shell: bash
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        maximize_runner_disk_space
+
+    - name: Log Storage After Cleanup
+      shell: bash
+      run: |
+        source .github/scripts/runner_diagnostics.sh
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after cleanup"
+
+    - name: Install System Dependencies
+      shell: bash
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        install_system_dependencies
+
+    - name: Install depot_tools
+      shell: bash
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        install_depot_tools
+
+    - name: Restore ccache
+      uses: actions/cache/restore@v4
+      continue-on-error: true
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: chromium-i686-ccache-${{ inputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-${{ inputs.stage }}-${{ inputs.attempt }}
+        restore-keys: |
+          chromium-i686-ccache-${{ inputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}-
+          chromium-i686-ccache-${{ inputs.version }}-
+
+    - name: Try Preferred Checkpoint
+      id: preferred_checkpoint
+      if: ${{ inputs.preferred-checkpoint-artifact != '' }}
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: ${{ inputs.preferred-checkpoint-artifact }}
+        path: ${{ github.workspace }}/resume
+        run-id: ${{ inputs.preferred-checkpoint-run-id }}
+        github-token: ${{ github.token }}
+
+    - name: Try Fallback Checkpoint
+      id: fallback_checkpoint
+      if: ${{ inputs.fallback-checkpoint-artifact != '' && (inputs.preferred-checkpoint-artifact == '' || steps.preferred_checkpoint.outcome != 'success') }}
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: ${{ inputs.fallback-checkpoint-artifact }}
+        path: ${{ github.workspace }}/resume
+        run-id: ${{ inputs.fallback-checkpoint-run-id }}
+        github-token: ${{ github.token }}
+
+    - name: Restore Chromium source tarball cache
+      uses: actions/cache/restore@v4
+      continue-on-error: true
+      with:
+        path: ${{ github.workspace }}/.chromium-source-cache
+        key: chromium-src-${{ inputs.version }}-${{ github.run_id }}
+        restore-keys: |
+          chromium-src-${{ inputs.version }}-
+
+    - name: Prepare Chromium Source
+      id: prepare
+      shell: bash
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        source .github/scripts/runner_diagnostics.sh
+
+        prepare_chromium_source "${{ inputs.version }}"
+        install_chromium_clang
+        install_i386_sysroot
+        patch_build_gn_for_x86_linux
+        write_lastchange
+        configure_ccache
+
+        resume_archive="${GITHUB_WORKSPACE}/resume/out-Release_x86.tar.zst"
+        if [ -s "${resume_archive}" ]; then
+          restore_out_checkpoint "${resume_archive}"
+          echo "Deleting restored checkpoint archive immediately after extraction: ${resume_archive}"
+          rm -f "${resume_archive}"
+          rmdir "${GITHUB_WORKSPACE}/resume" 2>/dev/null || true
+        else
+          restore_out_checkpoint ""
+          rm -rf "${GITHUB_WORKSPACE}/resume"
+        fi
+
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after source/checkpoint extraction"
+        configure_gn
+
+    - name: Save Chromium source tarball cache
+      if: ${{ always() && steps.prepare.outcome == 'success' }}
+      uses: actions/cache/save@v4
+      continue-on-error: true
+      with:
+        path: ${{ github.workspace }}/.chromium-source-cache
+        key: chromium-src-${{ inputs.version }}-${{ github.run_id }}
+
+    - name: Log Storage Before Compile
+      if: ${{ steps.prepare.outcome == 'success' }}
+      shell: bash
+      run: |
+        source .github/scripts/runner_diagnostics.sh
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} before compile"
+
+    - name: Compile Until Checkpoint
+      id: compile
+      if: ${{ steps.prepare.outcome == 'success' }}
+      shell: bash
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        run_build_until_checkpoint "${GITHUB_OUTPUT}"
+
+    - name: Log Storage After Compile
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        source .github/scripts/runner_diagnostics.sh
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after compile"
+
+    - name: Save ccache
+      if: ${{ always() }}
+      uses: actions/cache/save@v4
+      continue-on-error: true
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: chromium-i686-ccache-${{ inputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}-stage-${{ inputs.stage }}-${{ inputs.attempt }}
+
+    - name: Create Stage Checkpoint
+      id: checkpoint
+      if: ${{ always() && steps.prepare.outcome == 'success' && steps.compile.outputs.complete != 'true' }}
+      shell: bash
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        create_out_checkpoint
+
+    - name: Upload Stable Stage Checkpoint
+      if: ${{ always() && steps.checkpoint.outcome == 'success' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: chromium-i686-out-stage-${{ inputs.stage }}
+        path: ${{ github.workspace }}/checkpoints/out-Release_x86.tar.zst
+        retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+        compression-level: 0
+        overwrite: true
+        if-no-files-found: error
+
+    - name: Package Chromium i686 Build
+      if: ${{ steps.compile.outputs.complete == 'true' }}
+      shell: bash
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        package_chromium_i686 "${{ inputs.version }}"
+
+    - name: Upload Build Artifact
+      if: ${{ steps.compile.outputs.complete == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: chromium-${{ inputs.version }}-linux-i686
+        path: |
+          ${{ github.workspace }}/chromium-${{ inputs.version }}-linux-i686.tar.xz
+          ${{ github.workspace }}/chromium-${{ inputs.version }}-linux-i686.tar.xz.sha256
+          ${{ github.workspace }}/chromium-${{ inputs.version }}-linux-i686-manifest.txt
+
+    - name: Publish GitHub Release
+      if: ${{ steps.compile.outputs.complete == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        source .github/scripts/chromium_i686_common.sh
+        publish_chromium_release "${{ inputs.version }}"
+
+    - name: Fail When Final Stage Is Still Incomplete
+      if: ${{ always() && inputs.final-stage == 'true' && steps.prepare.outcome == 'success' && steps.compile.outputs.complete != 'true' }}
+      shell: bash
+      run: |
+        echo "::error::Chromium is still incomplete after the final configured compiler stage. The latest checkpoint was preserved."
+        exit 1
