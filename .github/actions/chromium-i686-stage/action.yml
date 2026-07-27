@@ -118,6 +118,7 @@ runs:
       shell: bash
       run: |
         source .github/scripts/chromium_i686_common.sh
+        source .github/scripts/chromium_i686_resume.sh
         source .github/scripts/runner_diagnostics.sh
 
         prepare_chromium_source "${{ inputs.version }}"
@@ -126,10 +127,14 @@ runs:
         patch_build_gn_for_x86_linux
         write_lastchange
         configure_ccache
+        install_gn_from_cipd
+        normalize_chromium_resume_inputs
 
+        checkpoint_restored=false
         resume_archive="${GITHUB_WORKSPACE}/resume/out-Release_x86.tar.zst"
         if [ -s "${resume_archive}" ]; then
           restore_out_checkpoint "${resume_archive}"
+          checkpoint_restored=true
           echo "Deleting restored checkpoint archive immediately after extraction: ${resume_archive}"
           rm -f "${resume_archive}"
           rmdir "${GITHUB_WORKSPACE}/resume" 2>/dev/null || true
@@ -139,7 +144,10 @@ runs:
         fi
 
         log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after source/checkpoint extraction"
-        configure_gn
+        configure_gn_from_checkpoint_or_fresh "${checkpoint_restored}"
+        if [ "${checkpoint_restored}" = "true" ]; then
+          report_ninja_resume_state
+        fi
 
     - name: Save Chromium source tarball cache
       if: ${{ always() && steps.prepare.outcome == 'success' }}
@@ -185,6 +193,7 @@ runs:
       shell: bash
       run: |
         source .github/scripts/chromium_i686_common.sh
+        source .github/scripts/chromium_i686_resume.sh
         create_out_checkpoint
 
     - name: Upload Stable Stage Checkpoint
