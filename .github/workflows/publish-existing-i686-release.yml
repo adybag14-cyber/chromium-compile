@@ -1,0 +1,59 @@
+name: Publish Existing Chromium i686 Artifact
+
+on:
+  push:
+    branches:
+      - fix/ninja-checkpoint-resume
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: ${{ contains(github.event.head_commit.message, '[publish-existing-i686]') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Download Completed Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: chromium-150.0.7871.186-linux-i686
+          path: release-assets
+          run-id: "30356636533"
+          github-token: ${{ github.token }}
+
+      - name: Verify Package Checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          ls -lh
+          expected="$(awk 'NR == 1 {print $1}' chromium-150.0.7871.186-linux-i686.tar.xz.sha256)"
+          actual="$(sha256sum chromium-150.0.7871.186-linux-i686.tar.xz | awk '{print $1}')"
+          echo "Expected package SHA-256: ${expected}"
+          echo "Actual package SHA-256:   ${actual}"
+          test "${actual}" = "${expected}"
+
+      - name: Publish GitHub Release From Main Target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="chromium-150.0.7871.186-linux-i686"
+          assets=(
+            release-assets/chromium-150.0.7871.186-linux-i686.tar.xz
+            release-assets/chromium-150.0.7871.186-linux-i686.tar.xz.sha256
+            release-assets/chromium-150.0.7871.186-linux-i686-manifest.txt
+          )
+
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${assets[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${tag}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target main \
+              --title "Chromium 150.0.7871.186 Linux i686" \
+              --notes "Chromium 150.0.7871.186 Linux i686 build produced by GitHub Actions run 30356636533."
+          fi
