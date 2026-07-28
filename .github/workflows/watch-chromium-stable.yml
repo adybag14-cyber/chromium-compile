@@ -27,7 +27,6 @@ concurrency:
 
 jobs:
   detect:
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.CHROMIUM_I686_AUTOMATION_ENABLED == 'true' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
