@@ -1,0 +1,93 @@
+name: Chromium i686 Compatibility Preflight
+run-name: Chromium i686 preflight ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact Chromium stable version"
+        required: true
+        type: string
+      dispatch_build:
+        description: "Dispatch stage 1 when compatibility checks pass"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: chromium-i686-preflight-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - name: Checkout port infrastructure
+        uses: actions/checkout@v4
+
+      - name: Validate requested version
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::version must use the form 150.0.7871.186"
+            exit 1
+          }
+
+      - name: Prepare source and toolchain
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          source .github/scripts/chromium_i686_port.sh
+
+          maximize_runner_disk_space
+          install_system_dependencies
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y patch file binutils
+          install_depot_tools
+          prepare_chromium_source "${VERSION}"
+          install_chromium_clang
+          install_i386_sysroot
+          apply_i686_port_patches "${VERSION}"
+          write_lastchange
+          configure_ccache
+          install_gn_from_cipd
+          configure_gn
+          run_i686_compatibility_preflight
+
+      - name: Upload preflight evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-${{ inputs.version }}-linux-i686-preflight
+          path: i686-preflight-ninja-query.txt
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Dispatch resumable build
+        if: ${{ inputs.dispatch_build }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run chromium-i686.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${DEFAULT_BRANCH}" \
+            -f stage=1 \
+            -f version="${VERSION}" \
+            -f preferred_checkpoint_run_id="" \
+            -f fallback_checkpoint_run_id="" \
+            -f retry_count=0
