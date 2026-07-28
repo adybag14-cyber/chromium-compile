@@ -64,7 +64,7 @@ def fetch_stable_versions(api_url: str, minimum: str, timeout: int = 60) -> list
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.load(response)
-        except Exception as exc:  # noqa: BLE001 - preserve the network error context
+        except Exception as exc:  # noqa: BLE001 - preserve network context
             raise WatcherError(f"VersionHistory request failed: {exc}") from exc
 
         for item in payload.get("versions", []):
@@ -81,13 +81,17 @@ def fetch_stable_versions(api_url: str, minimum: str, timeout: int = 60) -> list
 
 def run_gh(args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     command = ["gh", *args]
-    return subprocess.run(
-        command,
-        check=check,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        return subprocess.run(
+            command,
+            check=check,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "unknown GitHub CLI error").strip()
+        raise WatcherError(f"{' '.join(command)} failed: {detail}") from exc
 
 
 def gh_json(args: Sequence[str]) -> object:
@@ -157,9 +161,18 @@ def list_active_versions(repository: str) -> set[str]:
         [
             "api",
             f"repos/{repository}/actions/runs?per_page=100",
+            "--paginate",
+            "--slurp",
         ]
     )
-    runs = payload.get("workflow_runs", []) if isinstance(payload, dict) else []
+    pages = payload if isinstance(payload, list) else [payload]
+    runs: list[object] = []
+    for page in pages:
+        if isinstance(page, dict):
+            page_runs = page.get("workflow_runs", [])
+            if isinstance(page_runs, list):
+                runs.extend(page_runs)
+
     found: set[str] = set()
     pattern = re.compile(r"Chromium i686(?: preflight)? (\d+\.\d+\.\d+\.\d+)")
     for run in runs:
@@ -178,10 +191,6 @@ class PortState:
     blocked: set[str]
     active: set[str]
 
-    @property
-    def processed(self) -> set[str]:
-        return self.known | self.released | self.blocked | self.active
-
 
 def select_candidates(
     versions: Iterable[str],
@@ -192,8 +201,7 @@ def select_candidates(
     if limit < 1:
         raise ValueError("limit must be at least 1")
 
-    # Large Chromium builds are deliberately serialised. A queued or running
-    # preflight/build owns the port queue until it completes.
+    # A queued or running preflight/build/publisher owns the port queue.
     if state.active:
         return []
 
@@ -258,6 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     minimum, known = load_baseline(args.baseline)
+    state = PortState(known=known, released=set(), blocked=set(), active=set())
 
     if args.force_version:
         version_key(args.force_version)
@@ -281,8 +290,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "",
         f"- Baseline: `{minimum}`",
         f"- Stable versions above baseline observed: `{len(versions)}`",
-        f"- Active port runs: `{len(state.active) if not args.force_version else 0}`",
-        f"- Open maintenance issues: `{len(state.blocked) if not args.force_version else 0}`",
+        f"- Active port runs: `{len(state.active)}`",
+        f"- Open maintenance issues: `{len(state.blocked)}`",
         f"- Candidate builds dispatched: `{len(candidates)}`",
     ]
     if candidates:
