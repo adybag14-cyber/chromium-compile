@@ -1,168 +1,97 @@
-# Chromium i686 on GitHub Actions
+# Chromium Linux i686 — Unofficial Port
 
-A reproducible, resumable GitHub Actions pipeline for compiling upstream Chromium as a 32-bit Linux (`i686`) build on standard GitHub-hosted Ubuntu runners.
+A resumable GitHub Actions pipeline for maintaining unofficial 32-bit Linux (`i686`) builds of current Chromium stable releases.
 
-## Proven result
+Chromium upstream no longer supports or tests desktop Linux i686. This repository therefore treats each stable release as a downstream-port compatibility event: detect it, run a fast preflight, apply maintained patches, compile through resumable stages, validate the resulting ELF32 binary, and publish or record the failure.
 
-This repository successfully compiled and linked Chromium on GitHub Actions:
+## Proven baseline
+
+The pipeline successfully compiled and linked:
 
 ```text
 Chromium version: 150.0.7871.186
 Target OS:        Linux
 Target CPU:       x86 / i686
 Final Ninja step: [21/21] LINK ./chrome
-Result:           Build completed successfully
+Result:           Successful
 ```
 
-The completed runtime package was uploaded as a GitHub Actions artifact:
+Verified build artifact:
 
 ```text
-Artifact: chromium-150.0.7871.186-linux-i686
+Name:        chromium-150.0.7871.186-linux-i686
 Artifact ID: 8688377641
-Size: 155,797,042 bytes
+Size:        155,797,042 bytes
 ```
 
-The important result is not only that Chromium compiled, but that the build survived GitHub Actions job limits and continued correctly across fresh runners.
+The build resumed on fresh GitHub-hosted runners without losing completed Ninja work.
 
-## Why the build is staged
+## Long-term support model
 
-A full Chromium build can run longer than one GitHub-hosted job. This project splits the build into timed stages:
+For every newly observed Linux stable version, the automation aims to produce one of these durable states:
 
-1. Prepare the Chromium source, toolchain and i386 sysroot.
-2. Compile for up to 350 minutes.
-3. Stop before the GitHub job limit.
-4. Archive `out/Release_x86` as a checkpoint.
-5. Upload the checkpoint as an Actions artifact.
-6. Restore it on a fresh runner.
-7. Continue the same Ninja build.
-8. Repeat until `chrome` links successfully.
+1. an unofficial GitHub Release containing a validated Linux i686 build;
+2. an active compatibility preflight or staged build; or
+3. an open maintenance issue describing the upstream breakage.
 
-The workflow supports up to 12 stages and can automatically retry a failed stage on a fresh runner.
+Only one automatic version is processed at a time. A failed version is not repeatedly dispatched, but later stable versions still receive their own compatibility attempt.
 
-## Repository structure
+This process cannot guarantee that every future source release remains portable to i686 without additional work. It guarantees detection, an attempted port, validation, and visible failure reporting.
+
+## Pipeline
 
 ```text
-.github/
-├── workflows/
-│   └── chromium-i686.yml
-├── actions/
-│   └── chromium-i686-stage/
-│       └── action.yml
-└── scripts/
-    ├── chromium_i686_common.sh
-    ├── chromium_i686_resume.sh
-    └── runner_diagnostics.sh
+Google stable version feed
+          │
+          ▼
+Stable release watcher
+          │
+          ▼
+Compatibility preflight
+  ├─ download exact source version
+  ├─ install Chromium toolchain and i386 sysroot
+  ├─ apply common and major-specific port patches
+  ├─ generate the Linux x86 GN graph
+  └─ confirm the Ninja chrome target exists
+          │
+          ▼
+Resumable staged build
+  ├─ compile for a bounded time
+  ├─ preserve out/Release_x86
+  ├─ restore on a fresh runner
+  └─ repeat until chrome links
+          │
+          ▼
+Trusted release workflow
+  ├─ verify package SHA-256
+  ├─ extract the runtime
+  ├─ require ELF32 / Intel 80386
+  └─ publish the unofficial release
 ```
 
-| File | Responsibility |
-|---|---|
-| `.github/workflows/chromium-i686.yml` | Controls stages, retries and checkpoint hand-off |
-| `.github/actions/chromium-i686-stage/action.yml` | Runs one complete compiler stage |
-| `.github/scripts/chromium_i686_common.sh` | Source download, toolchain setup, GN, build and packaging |
-| `.github/scripts/chromium_i686_resume.sh` | Preserves and restores Ninja state correctly |
-| `.github/scripts/runner_diagnostics.sh` | Reports storage, inode and swap usage |
-
-## Build configuration
-
-The pipeline generates an x86 Linux build with these core GN arguments:
-
-```gn
-target_os="linux"
-target_cpu="x86"
-is_debug=false
-symbol_level=0
-blink_symbol_level=0
-enable_nacl=false
-is_official_build=false
-use_thin_lto=false
-use_reclient=false
-treat_warnings_as_errors=false
-cc_wrapper="ccache"
-```
-
-Chromium currently contains a source guard that blocks this x86 Linux target. The pipeline applies a small local patch before generating the GN graph.
-
-Each compiler stage runs:
-
-```bash
-autoninja -C out/Release_x86 -j3 chrome
-```
-
-## The checkpoint problem that had to be solved
-
-The first staged implementation restored `out/Release_x86`, but Ninja repeatedly returned to roughly:
+Failures after automatic retries create or update an issue named:
 
 ```text
-[1/57146]
+[i686-port] Chromium <version> requires maintenance
 ```
 
-The archive existed, but the restored outputs looked stale. Three fixes made the checkpoints genuinely resumable.
+## Why checkpoint restoration works
 
-### 1. Preserve nanosecond timestamps
+A normal archive was not sufficient. Ninja initially restarted at approximately `[1/57146]` after every runner change because restored outputs appeared stale.
 
-Ninja records high-resolution timestamps in `.ninja_log` and `.ninja_deps`. A normal tar archive can round modification times, making restored outputs appear older than their inputs.
+The working implementation:
 
-Checkpoints are therefore created with POSIX/PAX metadata:
+- stores checkpoints with POSIX/PAX metadata so subsecond mtimes survive;
+- normalises recreated source, symlink and directory mtimes;
+- restores `.ninja_log`, `.ninja_deps`, `build.ninja` and `args.gn`;
+- avoids unconditional `gn gen` after a valid restore;
+- reports Ninja dirty-state explanations before continuing.
 
-```bash
-tar \
-  --format=posix \
-  --pax-option='delete=atime,delete=ctime' \
-  -C "${CHROMIUM_SRC}/out" \
-  -I 'zstd -T0 -1' \
-  -cf "${CHECKPOINT_ARCHIVE}" \
-  Release_x86
-```
+After these fixes, the final build resumed with only 21 operations remaining.
 
-This preserves subsecond modification times across compression and extraction.
+## i386 host requirements
 
-### 2. Stabilise recreated input timestamps
-
-Every fresh runner recreates the source tree, Clang toolchain and sysroot. Fresh mtimes can make those inputs appear newer than valid restored outputs.
-
-Before restoring the checkpoint, the pipeline normalises all non-output:
-
-- files;
-- symbolic links;
-- directories.
-
-Directories are included because Ninja can track them as regeneration inputs.
-
-### 3. Reuse the restored GN graph
-
-The workflow no longer runs `gn gen` unconditionally after every restore. It reuses:
-
-```text
-out/Release_x86/build.ninja
-out/Release_x86/args.gn
-```
-
-when they are present in the checkpoint.
-
-A bounded dry run is also used to explain remaining dirty targets:
-
-```bash
-ninja -C out/Release_x86 -n -d explain chrome
-```
-
-After these fixes, the final recovery resumed with only 21 operations instead of restarting tens of thousands.
-
-## The final i386 runtime issue
-
-Near completion, Chromium executed a generated 32-bit build tool:
-
-```text
-v8_context_snapshot_generator
-```
-
-The runner initially lacked its 32-bit shared libraries. The observed failures were:
-
-```text
-libglib-2.0.so.0: cannot open shared object file
-libexpat.so.1 => not found
-```
-
-The pipeline now enables i386 multiarch and installs:
+Some Chromium build tools generated near the end of compilation are themselves 32-bit executables. GitHub's 64-bit Ubuntu runner therefore installs:
 
 ```text
 libc6:i386
@@ -172,115 +101,115 @@ libglib2.0-0:i386
 libexpat1:i386
 ```
 
-Before compilation, it validates the restored generator with `file` and `ldd`. The stage fails early when the binary is non-executable or any dependency is unresolved.
+The restored V8 context snapshot generator is checked with `file` and `ldd`. A missing library or non-executable generator fails early.
 
-## Verified final stage
-
-With checkpoint restoration and i386 runtime support fixed, the last stage completed as expected:
+## Repository layout
 
 ```text
-[1/21] ACTION //tools/v8_context_snapshot:generate_v8_context_snapshot
-...
-[20/21] CXX obj/chrome/chrome_initial/chrome_main_delegate.o
-[21/21] LINK ./chrome
-Build finished successfully
+.github/
+├── actions/chromium-i686-stage/action.yml
+├── scripts/
+│   ├── chromium_i686_common.sh
+│   ├── chromium_i686_port.sh
+│   ├── chromium_i686_resume.sh
+│   └── runner_diagnostics.sh
+└── workflows/
+    ├── chromium-i686-preflight.yml
+    ├── chromium-i686.yml
+    ├── publish-i686-release.yml
+    ├── report-i686-build-failure.yml
+    ├── validate-port-infrastructure.yml
+    └── watch-chromium-stable.yml
+
+patches/
+├── common/
+└── versions/<major>/
+
+scripts/chromium_stable_watcher.py
+support/baseline.json
+tests/
+docs/MAINTENANCE.md
 ```
 
-This verified that:
+## Patch policy
 
-- the Ninja checkpoint was restored correctly;
-- completed work was retained across runners;
-- the generated 32-bit V8 tool executed successfully;
-- Chromium linked successfully;
-- the final runtime package and checksum were produced;
-- the build artifact uploaded successfully.
+`patches/common` contains strict semantic changes that are expected to apply across supported releases. The current common patch enables the guarded Linux x86 GN target only when the exact expected upstream expression is present.
 
-## Reproduce this in another repository
-
-### 1. Copy the pipeline files
-
-Copy these paths:
+Major-specific unified patches belong under:
 
 ```text
-.github/workflows/chromium-i686.yml
-.github/actions/chromium-i686-stage/action.yml
-.github/scripts/chromium_i686_common.sh
-.github/scripts/chromium_i686_resume.sh
-.github/scripts/runner_diagnostics.sh
+patches/versions/<major>/*.patch
 ```
 
-### 2. Enable Actions permissions
+They are checked with `git apply --check` before being applied. If upstream changes the expected source, preflight stops before the expensive build begins.
 
-Open:
+## Safe activation
+
+Scheduled discovery is disabled unless this repository variable is set:
 
 ```text
-Settings → Actions → General → Workflow permissions
+CHROMIUM_I686_AUTOMATION_ENABLED=true
 ```
 
-Select **Read and write permissions**.
+Recommended rollout after merging the infrastructure:
 
-The workflow requests:
+1. Run **Watch Chromium Stable for i686** manually with `dry_run=true`.
+2. Run **Chromium i686 Compatibility Preflight** with an exact version and `dispatch_build=false`.
+3. Confirm the preflight evidence artifact.
+4. Confirm repository workflow permissions permit Actions dispatch and release publication.
+5. Set `CHROMIUM_I686_AUTOMATION_ENABLED=true`.
 
-```yaml
-permissions:
-  contents: write
-  actions: write
-```
-
-`actions: write` is required because one stage dispatches the next stage.
-
-### 3. Start a fresh build
-
-Open:
+Optional repository variables:
 
 ```text
-Actions → Chromium i686 Build (Cloud Experiment) → Run workflow
+CHROMIUM_I686_MAX_STAGES=20
+CHROMIUM_RUNNER_RETRIES=2
 ```
+
+The watcher checks every six hours when enabled.
+
+## Manual compatibility test
+
+Open **Actions → Chromium i686 Compatibility Preflight → Run workflow**.
 
 Use:
 
 ```text
-stage: 1
-version: leave empty
-preferred_checkpoint_run_id: leave empty
-fallback_checkpoint_run_id: leave empty
-retry_count: 0
+version:        exact four-part Chromium version
+dispatch_build: false
 ```
 
-Stage 1 resolves and pins the Chromium version. Later stages are dispatched automatically with the same version.
+When preflight passes, rerun it with `dispatch_build=true` to start stage 1.
 
-### 4. Resume a failed stage manually
+## Manual build or recovery
 
-Provide:
+Open **Actions → Chromium i686 Build (Unofficial Port) → Run workflow**.
+
+Fresh build:
 
 ```text
-stage: failed stage number
-version: exact pinned Chromium version
-preferred_checkpoint_run_id: run containing the same-stage checkpoint
-retry_count: 1 or 2
+stage:                         1
+version:                       exact pinned version
+preferred_checkpoint_run_id:  empty
+fallback_checkpoint_run_id:   empty
+retry_count:                   0
 ```
 
-For a new stage starting from the previous completed stage, use that previous run as `fallback_checkpoint_run_id`.
-
-### 5. Confirm that resume is real
-
-A healthy restore should show:
+Same-stage recovery:
 
 ```text
-Reusing build.ninja and args.gn from the restored checkpoint.
+stage:                         failed stage number
+version:                       identical pinned version
+preferred_checkpoint_run_id:  run containing that stage checkpoint
+fallback_checkpoint_run_id:   previous-stage run when available
+retry_count:                   1 or 2
 ```
 
-The remaining target count should fall, for example:
+Stages automatically dispatch their successor until the build completes or reaches the configured limit.
 
-```text
-[1/24]
-```
+## Release validation
 
-It should not return to the original full count such as `[1/57146]`.
-
-## Output
-
-A successful run creates:
+A successful compiler workflow uploads:
 
 ```text
 chromium-<version>-linux-i686.tar.xz
@@ -288,39 +217,38 @@ chromium-<version>-linux-i686.tar.xz.sha256
 chromium-<version>-linux-i686-manifest.txt
 ```
 
-These files are uploaded as a GitHub Actions artifact. GitHub Release publication is attempted separately and is non-fatal so a release-permission issue cannot invalidate a successful build.
+A separate default-branch workflow then:
 
-## Replication checklist
+- downloads the exact build artifact;
+- verifies the package checksum;
+- extracts `chrome`;
+- checks it with `file` and `readelf`;
+- requires `ELF32` and `Intel 80386`;
+- creates or updates `chromium-<version>-linux-i686`.
 
-- [ ] Pin one Chromium version across all stages.
-- [ ] Keep GN arguments identical across runners.
-- [ ] Apply the same x86 Linux source patch each time.
-- [ ] Install Chromium's i386 sysroot.
-- [ ] Install the required host i386 runtime libraries.
-- [ ] Preserve nanosecond mtimes in checkpoint archives.
-- [ ] Normalise recreated source, symlink and directory mtimes.
-- [ ] Reuse restored `build.ninja` and `args.gn`.
-- [ ] Validate `v8_context_snapshot_generator` with `ldd`.
-- [ ] Keep checkpoint artifacts available until the next stage completes.
-- [ ] Monitor disk, inode and swap capacity before linking.
+Release publication is separated from compilation so a permissions or publishing problem cannot erase the successful build artifact.
+
+## Maintenance
+
+See [docs/MAINTENANCE.md](docs/MAINTENANCE.md) for:
+
+- handling newly broken stable releases;
+- deciding between common and major-specific patches;
+- retry and issue behaviour;
+- safe automation activation;
+- the release trust boundary.
 
 ## Limitations
 
-This is an experimental, unofficial Chromium build:
+This is an unofficial downstream port:
 
 - it is not Google Chrome;
-- it is not an official Chromium release binary;
-- the x86 Linux source guard is patched locally;
-- GitHub runner images and package repositories can change;
-- checkpoint artifacts are temporary;
-- the output should be tested before production use.
+- it is not an upstream Chromium release binary;
+- Linux i686 is unsupported and untested by Chromium upstream;
+- future releases may require source, V8, Rust, sandbox, graphics or dependency patches;
+- GitHub-hosted runner images and Ubuntu repositories can change;
+- generated releases must be tested on real 32-bit Linux systems before production use.
 
-For long-term reproducibility, pin the Chromium version, runner image, GN arguments, source patch, toolchain revision and i386 package set.
+## Project goal
 
-## Final outcome
-
-The project achieved its goal:
-
-> Chromium was compiled for Linux i686 entirely on GitHub-hosted Actions runners, despite job time limits and fresh-runner state loss.
-
-The decisive improvements were exact Ninja timestamp preservation, stable recreated-input mtimes, restored GN graph reuse and complete i386 runtime validation. Together they changed the pipeline from repeatedly restarting tens of thousands of operations to restoring the final 21 operations and successfully linking `chrome`.
+> Continue attempting every future Chromium stable release for Linux i686, publish every successful validated port, and make every upstream incompatibility visible and maintainable.
