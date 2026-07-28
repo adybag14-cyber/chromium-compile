@@ -2,6 +2,7 @@ import importlib.util
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "scripts" / "chromium_stable_watcher.py"
 SPEC = importlib.util.spec_from_file_location("chromium_stable_watcher", MODULE_PATH)
@@ -45,6 +46,24 @@ class StableWatcherTests(unittest.TestCase):
             watcher.select_candidates(["155.0.0.2", "155.0.0.1"], "150.0.0.0", empty, 1),
             ["155.0.0.1"],
         )
+
+    def test_active_versions_include_paginated_publisher_title(self):
+        payload = [
+            {"workflow_runs": [{"status": "completed", "display_title": "old"}]},
+            {
+                "workflow_runs": [
+                    {
+                        "status": "in_progress",
+                        "display_title": "Publish Chromium i686 155.0.1.2 · stage 7 · attempt 0",
+                    }
+                ]
+            },
+        ]
+        with mock.patch.object(watcher, "gh_json", return_value=payload):
+            self.assertEqual(
+                watcher.list_active_versions("owner/repository"),
+                {"155.0.1.2"},
+            )
 
     def test_baseline_and_older_versions_are_ignored(self):
         empty = watcher.PortState(set(), set(), set(), set())
