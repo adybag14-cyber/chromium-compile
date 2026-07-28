@@ -67,7 +67,7 @@ jobs:
           run_i686_compatibility_preflight
 
       - name: Upload preflight evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chromium-${{ inputs.version }}-linux-i686-preflight
           path: i686-preflight-ninja-query.txt
