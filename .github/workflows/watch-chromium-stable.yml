@@ -15,11 +15,6 @@ on:
         required: false
         default: true
         type: boolean
-      max_new_builds:
-        description: "Maximum number of previously unseen stable versions to dispatch"
-        required: false
-        default: "1"
-        type: string
 
 permissions:
   contents: read
@@ -44,7 +39,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FORCE_VERSION: ${{ inputs.force_version }}
           MANUAL_DRY_RUN: ${{ inputs.dry_run }}
-          MAX_NEW_BUILDS: ${{ inputs.max_new_builds || '1' }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
@@ -58,7 +52,7 @@ jobs:
             --repository "${GITHUB_REPOSITORY}"
             --ref "${DEFAULT_BRANCH}"
             --baseline support/baseline.json
-            --max-new-builds "${MAX_NEW_BUILDS}"
+            --max-new-builds 1
           )
           if [ -n "${FORCE_VERSION}" ]; then
             args+=(--force-version "${FORCE_VERSION}")
