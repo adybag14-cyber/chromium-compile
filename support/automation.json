@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "automation_enabled": true,
+  "stable_watcher_cron": "17 */6 * * *",
+  "max_compiler_stages": 20,
+  "runner_retries": 2,
+  "bootstrap_version": "150.0.7871.186",
+  "bootstrap_reason": "Exercise the production preflight, staged build and release publisher after activation"
+}
