@@ -1,20 +1,17 @@
-name: Chromium i686 Build (Cloud Experiment)
+name: Chromium i686 Build (Unofficial Port)
+run-name: Chromium i686 ${{ inputs.version }} · stage ${{ inputs.stage || '1' }} · attempt ${{ inputs.retry_count || '0' }}
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       stage:
-        description: "Compiler stage to run (1-12)"
+        description: "Compiler stage to run"
         required: false
         default: "1"
         type: string
       version:
-        description: "Pinned Chromium version; leave empty only for stage 1"
-        required: false
-        default: ""
+        description: "Exact pinned Chromium version"
+        required: true
         type: string
       preferred_checkpoint_run_id:
         description: "Run containing a same-stage partial checkpoint"
@@ -33,18 +30,19 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
   actions: write
 
 concurrency:
-  group: chromium-i686-${{ github.ref }}
+  group: chromium-i686-${{ inputs.version }}
   cancel-in-progress: false
 
 env:
   JOB_CHECKPOINT_MINUTES: "350"
   CHECKPOINT_RETENTION_DAYS: "14"
   CCACHE_MAX_SIZE: 8G
-  MAX_RUNNER_RETRIES: "2"
+  MAX_RUNNER_RETRIES: ${{ vars.CHROMIUM_RUNNER_RETRIES || '2' }}
+  MAX_COMPILER_STAGES: ${{ vars.CHROMIUM_I686_MAX_STAGES || '20' }}
 
 jobs:
   build:
@@ -53,58 +51,70 @@ jobs:
     timeout-minutes: 360
     outputs:
       stage: ${{ steps.control.outputs.stage }}
+      max_stage: ${{ steps.control.outputs.max_stage }}
       version: ${{ steps.control.outputs.version }}
       retry_count: ${{ steps.control.outputs.retry_count }}
       complete: ${{ steps.compiler.outputs.complete }}
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
-      - name: Checkout Workflow Helpers
+      - name: Checkout workflow helpers
         uses: actions/checkout@v4
 
-      - name: Resolve Stage Controls
+      - name: Resolve stage controls
         id: control
-        shell: bash
         env:
           REQUESTED_STAGE: ${{ inputs.stage }}
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_RETRY_COUNT: ${{ inputs.retry_count }}
+        shell: bash
         run: |
+          set -euo pipefail
           stage="${REQUESTED_STAGE:-1}"
           retry_count="${REQUESTED_RETRY_COUNT:-0}"
           version="${REQUESTED_VERSION:-}"
+          max_stage="${MAX_COMPILER_STAGES}"
 
-          case "${stage}" in
-            1|2|3|4|5|6|7|8|9|10|11|12) ;;
-            *) echo "::error::stage must be an integer from 1 through 12"; exit 1 ;;
-          esac
-          case "${retry_count}" in
-            0|1|2) ;;
-            *) echo "::error::retry_count must be 0, 1, or 2"; exit 1 ;;
-          esac
-
-          if [ -z "${version}" ]; then
-            if [ "${stage}" != "1" ]; then
-              echo "::error::A pinned version is required when starting after stage 1"
-              exit 1
-            fi
-            source .github/scripts/chromium_i686_common.sh
-            version="$(resolve_latest_version)"
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::version must use the form 150.0.7871.186"
+            exit 1
+          }
+          [[ "${stage}" =~ ^[0-9]+$ ]] || {
+            echo "::error::stage must be an integer"
+            exit 1
+          }
+          [[ "${max_stage}" =~ ^[0-9]+$ ]] || {
+            echo "::error::CHROMIUM_I686_MAX_STAGES must be an integer"
+            exit 1
+          }
+          if [ "${stage}" -lt 1 ] || [ "${stage}" -gt "${max_stage}" ]; then
+            echo "::error::stage must be between 1 and ${max_stage}"
+            exit 1
+          fi
+          [[ "${retry_count}" =~ ^[0-9]+$ ]] || {
+            echo "::error::retry_count must be an integer"
+            exit 1
+          }
+          if [ "${retry_count}" -lt 0 ] || [ "${retry_count}" -gt "${MAX_RUNNER_RETRIES}" ]; then
+            echo "::error::retry_count must be between 0 and ${MAX_RUNNER_RETRIES}"
+            exit 1
           fi
 
           echo "stage=${stage}" >> "${GITHUB_OUTPUT}"
+          echo "max_stage=${max_stage}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "retry_count=${retry_count}" >> "${GITHUB_OUTPUT}"
-          echo "Stage: ${stage}; Chromium: ${version}; runner attempt: ${retry_count}"
+          echo "Stage: ${stage}/${max_stage}; Chromium: ${version}; runner attempt: ${retry_count}"
 
-      - name: Resolve Checkpoint Sources
+      - name: Resolve checkpoint sources
         id: checkpoint
-        shell: bash
         env:
           STAGE: ${{ steps.control.outputs.stage }}
           PREFERRED_RUN_ID: ${{ inputs.preferred_checkpoint_run_id }}
           FALLBACK_RUN_ID: ${{ inputs.fallback_checkpoint_run_id }}
+        shell: bash
         run: |
+          set -euo pipefail
           preferred_artifact=""
           fallback_artifact=""
 
@@ -120,7 +130,7 @@ jobs:
           echo "Preferred checkpoint: ${preferred_artifact:-none} from ${PREFERRED_RUN_ID:-none}"
           echo "Fallback checkpoint: ${fallback_artifact:-none} from ${FALLBACK_RUN_ID:-none}"
 
-      - name: Run Resumable Compiler Stage
+      - name: Run resumable compiler stage
         id: compiler
         uses: ./.github/actions/chromium-i686-stage
         with:
@@ -131,27 +141,35 @@ jobs:
           preferred-checkpoint-run-id: ${{ inputs.preferred_checkpoint_run_id }}
           fallback-checkpoint-artifact: ${{ steps.checkpoint.outputs.fallback_artifact }}
           fallback-checkpoint-run-id: ${{ inputs.fallback_checkpoint_run_id }}
-          final-stage: ${{ steps.control.outputs.stage == '12' && 'true' || 'false' }}
+          final-stage: ${{ steps.control.outputs.stage == steps.control.outputs.max_stage && 'true' || 'false' }}
+          publish-release: "false"
 
   continue_pipeline:
-    name: Dispatch Next Compiler Stage
+    name: Dispatch next compiler stage
     needs: build
-    if: ${{ needs.build.result == 'success' && needs.build.outputs.complete != 'true' && fromJSON(needs.build.outputs.stage) < 12 }}
+    if: >-
+      ${{
+        needs.build.result == 'success' &&
+        needs.build.outputs.complete != 'true' &&
+        fromJSON(needs.build.outputs.stage) < fromJSON(needs.build.outputs.max_stage)
+      }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-      - name: Start Next Stage On A Fresh Runner
-        shell: bash
+      - name: Start next stage on a fresh runner
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_STAGE: ${{ needs.build.outputs.stage }}
           VERSION: ${{ needs.build.outputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
         run: |
+          set -euo pipefail
           next_stage=$((CURRENT_STAGE + 1))
           echo "Dispatching stage ${next_stage} with checkpoint from run ${GITHUB_RUN_ID}."
           gh workflow run chromium-i686.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref "${GITHUB_REF_NAME}" \
+            --ref "${DEFAULT_BRANCH}" \
             -f stage="${next_stage}" \
             -f version="${VERSION}" \
             -f preferred_checkpoint_run_id="" \
@@ -159,27 +177,34 @@ jobs:
             -f retry_count="0"
 
   recover_bad_runner:
-    name: Recover Stage On A Fresh Runner
+    name: Recover stage on a fresh runner
     needs: build
-    if: ${{ always() && (needs.build.result == 'failure' || needs.build.result == 'cancelled') && fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(vars.CHROMIUM_RUNNER_RETRIES || '2') }}
+    if: >-
+      ${{
+        always() &&
+        (needs.build.result == 'failure' || needs.build.result == 'cancelled') &&
+        fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(vars.CHROMIUM_RUNNER_RETRIES || '2')
+      }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-      - name: Redispatch Failed Stage
-        shell: bash
+      - name: Redispatch failed stage
         env:
           GH_TOKEN: ${{ github.token }}
           STAGE: ${{ needs.build.outputs.stage || inputs.stage || '1' }}
           VERSION: ${{ needs.build.outputs.version || inputs.version }}
           RETRY_COUNT: ${{ needs.build.outputs.retry_count || inputs.retry_count || '0' }}
           FALLBACK_RUN_ID: ${{ inputs.fallback_checkpoint_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
         run: |
+          set -euo pipefail
           next_retry=$((RETRY_COUNT + 1))
           echo "Runner failed during stage ${STAGE}; dispatching recovery attempt ${next_retry}."
           echo "The recovery run will first try a same-stage checkpoint from run ${GITHUB_RUN_ID}, then fall back to ${FALLBACK_RUN_ID:-a fresh stage}."
           gh workflow run chromium-i686.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref "${GITHUB_REF_NAME}" \
+            --ref "${DEFAULT_BRANCH}" \
             -f stage="${STAGE}" \
             -f version="${VERSION}" \
             -f preferred_checkpoint_run_id="${GITHUB_RUN_ID}" \
