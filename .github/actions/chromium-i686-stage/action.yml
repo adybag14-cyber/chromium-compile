@@ -23,13 +23,17 @@ inputs:
     required: false
     default: ""
   fallback-checkpoint-run-id:
-    description: Run ID containing the fallback checkpoint.
+    description: Checkpoint run ID containing the fallback checkpoint.
     required: false
     default: ""
   final-stage:
     description: Fail after checkpointing when this is the final allowed stage and the build is incomplete.
     required: false
     default: "false"
+  publish-release:
+    description: Attempt to publish the completed package as a GitHub Release.
+    required: false
+    default: "true"
 outputs:
   complete:
     description: Whether Chromium finished compiling.
@@ -65,6 +69,18 @@ runs:
       run: |
         source .github/scripts/chromium_i686_common.sh
         install_system_dependencies
+
+    - name: Install i386 Runtime Libraries
+      shell: bash
+      run: |
+        sudo dpkg --add-architecture i386
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          libc6:i386 \
+          libgcc-s1:i386 \
+          libstdc++6:i386 \
+          libglib2.0-0:i386 \
+          libexpat1:i386
 
     - name: Install depot_tools
       shell: bash
@@ -148,6 +164,7 @@ runs:
         if [ "${checkpoint_restored}" = "true" ]; then
           report_ninja_resume_state
         fi
+        verify_i386_runtime_dependencies
 
     - name: Save Chromium source tarball cache
       if: ${{ always() && steps.prepare.outcome == 'success' }}
@@ -225,7 +242,8 @@ runs:
           ${{ github.workspace }}/chromium-${{ inputs.version }}-linux-i686-manifest.txt
 
     - name: Publish GitHub Release
-      if: ${{ steps.compile.outputs.complete == 'true' }}
+      if: ${{ steps.compile.outputs.complete == 'true' && inputs.publish-release == 'true' }}
+      continue-on-error: true
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

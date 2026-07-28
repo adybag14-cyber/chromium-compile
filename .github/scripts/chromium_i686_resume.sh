@@ -27,6 +27,13 @@ normalize_chromium_resume_inputs() {
     -type l -print0 \
     | xargs -0 -r -n 512 touch -h -d "@${epoch}" --
 
+  # Ninja can track directories as regeneration inputs. Touch them last so
+  # extraction-created directory mtimes do not invalidate build.ninja.stamp.
+  find "${CHROMIUM_SRC}" \
+    -path "${CHROMIUM_SRC}/out" -prune -o \
+    -type d -print0 \
+    | xargs -0 -r -n 512 touch -d "@${epoch}" --
+
   echo "Timestamp normalization finished in $(( $(date +%s) - started_at )) seconds."
 }
 
@@ -65,6 +72,36 @@ report_ninja_resume_state() {
     timeout 45s ninja -C "${OUT_DIR}" -n -d explain chrome 2>&1 | head -n 120
     exit 0
   )
+}
+
+verify_i386_runtime_dependencies() {
+  local binary="${OUT_DIR}/v8_context_snapshot_generator"
+
+  if [ ! -e "${binary}" ]; then
+    echo "The i386 V8 snapshot generator is not present yet; runtime verification will occur in a later stage."
+    return 0
+  fi
+
+  if [ ! -x "${binary}" ]; then
+    echo "::error::The restored i386 snapshot generator is not executable."
+    return 1
+  fi
+
+  echo "Checking runtime dependencies for ${binary}:"
+  file "${binary}" || true
+
+  local ldd_output
+  local ldd_status
+  set +e
+  ldd_output="$(ldd "${binary}" 2>&1)"
+  ldd_status=$?
+  set -e
+  printf '%s\n' "${ldd_output}"
+
+  if [ "${ldd_status}" -ne 0 ] || grep -q 'not found' <<<"${ldd_output}"; then
+    echo "::error::The restored i386 snapshot generator still has unresolved runtime libraries."
+    return 1
+  fi
 }
 
 # Override the common implementation after this file is sourced. GNU tar's
