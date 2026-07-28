@@ -26,7 +26,7 @@ class StableWatcherTests(unittest.TestCase):
             [],
         )
 
-    def test_oldest_blocked_version_gates_later_versions(self):
+    def test_blocked_version_does_not_hide_later_versions(self):
         state = watcher.PortState(
             known={"151.0.0.1"},
             released={"152.0.0.1"},
@@ -36,7 +36,7 @@ class StableWatcherTests(unittest.TestCase):
         versions = ["155.0.0.2", "151.0.0.1", "154.0.0.1", "153.0.0.1", "152.0.0.1"]
         self.assertEqual(
             watcher.select_candidates(versions, "150.0.0.0", state, 1),
-            [],
+            ["154.0.0.1"],
         )
 
     def test_candidates_are_oldest_first(self):
