@@ -1,4 +1,5 @@
 name: Report Chromium i686 Port Failure
+run-name: Report ${{ github.event.workflow_run.display_title }}
 
 on:
   workflow_run:
