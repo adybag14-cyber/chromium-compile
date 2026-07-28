@@ -54,7 +54,7 @@ jobs:
 
           maximize_runner_disk_space
           install_system_dependencies
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y patch file binutils
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y file binutils
           install_depot_tools
           prepare_chromium_source "${VERSION}"
           install_chromium_clang
