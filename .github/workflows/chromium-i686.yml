@@ -53,6 +53,7 @@ jobs:
       max_stage: ${{ steps.control.outputs.max_stage }}
       version: ${{ steps.control.outputs.version }}
       retry_count: ${{ steps.control.outputs.retry_count }}
+      max_retries: ${{ steps.control.outputs.max_retries }}
       complete: ${{ steps.compiler.outputs.complete }}
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -107,6 +108,7 @@ jobs:
           echo "max_stage=${max_stage}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "retry_count=${retry_count}" >> "${GITHUB_OUTPUT}"
+          echo "max_retries=${MAX_RUNNER_RETRIES}" >> "${GITHUB_OUTPUT}"
           echo "Stage: ${stage}/${max_stage}; Chromium: ${version}; runner attempt: ${retry_count}"
 
       - name: Resolve checkpoint sources
@@ -190,7 +192,7 @@ jobs:
       ${{
         always() &&
         (needs.build.result == 'failure' || needs.build.result == 'cancelled') &&
-        fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(vars.CHROMIUM_RUNNER_RETRIES || '2')
+        fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(needs.build.outputs.max_retries || '0')
       }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
