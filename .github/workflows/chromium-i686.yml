@@ -34,7 +34,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: chromium-i686-${{ inputs.version }}
+  group: chromium-i686-port-queue
   cancel-in-progress: false
 
 env:
