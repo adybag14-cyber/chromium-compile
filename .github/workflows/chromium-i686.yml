@@ -31,7 +31,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: chromium-i686-port-queue
@@ -91,6 +90,10 @@ jobs:
             echo "::error::stage must be between 1 and ${max_stage}"
             exit 1
           fi
+          [[ "${MAX_RUNNER_RETRIES}" =~ ^[0-9]+$ ]] || {
+            echo "::error::CHROMIUM_RUNNER_RETRIES must be an integer"
+            exit 1
+          }
           [[ "${retry_count}" =~ ^[0-9]+$ ]] || {
             echo "::error::retry_count must be an integer"
             exit 1
@@ -145,6 +148,8 @@ jobs:
           publish-release: "false"
 
   continue_pipeline:
+    permissions:
+      actions: write
     name: Dispatch next compiler stage
     needs: build
     if: >-
@@ -177,6 +182,8 @@ jobs:
             -f retry_count="0"
 
   recover_bad_runner:
+    permissions:
+      actions: write
     name: Recover stage on a fresh runner
     needs: build
     if: >-
