@@ -34,16 +34,18 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          CHROMIUM_MAX_RETRIES: ${{ vars.CHROMIUM_RUNNER_RETRIES || '2' }}
         shell: bash
         run: |
           set -euo pipefail
           version="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<<"${DISPLAY_TITLE}" | head -n1 || true)"
           if [ "${WORKFLOW_NAME}" = "Chromium i686 Build (Unofficial Port)" ]; then
-            attempt="$(sed -nE 's/.*attempt ([0-9]+).*/\1/p' <<<"${DISPLAY_TITLE}")"
-            max_retries="${CHROMIUM_MAX_RETRIES:-2}"
-            if [ -n "${attempt}" ] && [ "${attempt}" -lt "${max_retries}" ]; then
-              echo "Automatic recovery attempts remain (${attempt}/${max_retries}); deferring maintenance issue."
+            recovery_conclusion="$(
+              gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?filter=latest&per_page=100" \
+                --jq '.jobs[] | select(.name == "Recover stage on a fresh runner") | .conclusion' \
+                | tail -n1
+            )"
+            if [ "${recovery_conclusion}" = "success" ]; then
+              echo "A fresh-runner recovery was dispatched successfully; deferring maintenance issue."
               exit 0
             fi
           fi
