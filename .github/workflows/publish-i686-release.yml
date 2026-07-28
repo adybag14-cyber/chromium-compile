@@ -1,0 +1,158 @@
+name: Publish Chromium i686 Release
+
+on:
+  workflow_run:
+    workflows:
+      - Chromium i686 Build (Unofficial Port)
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+
+concurrency:
+  group: chromium-i686-release-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted release helpers
+        uses: actions/checkout@v4
+
+      - name: Install release validation tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y file binutils xz-utils
+
+      - name: Discover completed build artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          names="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[].name')"
+          mapfile -t matches < <(grep -E '^chromium-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-linux-i686$' <<<"${names}" || true)
+
+          if [ "${#matches[@]}" -eq 0 ]; then
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            echo "This compiler stage did not produce the final runtime artifact."
+            exit 0
+          fi
+          if [ "${#matches[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one final Chromium artifact; found ${#matches[@]}."
+            printf '%s\n' "${matches[@]}"
+            exit 1
+          fi
+
+          artifact_name="${matches[0]}"
+          version="${artifact_name#chromium-}"
+          version="${version%-linux-i686}"
+          echo "found=true" >> "${GITHUB_OUTPUT}"
+          echo "name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download completed artifact
+        if: ${{ steps.artifact.outputs.found == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "${RUN_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${ARTIFACT_NAME}" \
+            --dir release-assets
+
+      - name: Verify checksum and ELF32 architecture
+        if: ${{ steps.artifact.outputs.found == 'true' }}
+        env:
+          VERSION: ${{ steps.artifact.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="release-assets/chromium-${VERSION}-linux-i686.tar.xz"
+          checksum="${package}.sha256"
+          manifest="release-assets/chromium-${VERSION}-linux-i686-manifest.txt"
+          test -s "${package}"
+          test -s "${checksum}"
+          test -s "${manifest}"
+
+          expected="$(awk 'NR == 1 {print $1}' "${checksum}")"
+          actual="$(sha256sum "${package}" | awk '{print $1}')"
+          echo "Expected package SHA-256: ${expected}"
+          echo "Actual package SHA-256:   ${actual}"
+          test "${actual}" = "${expected}"
+
+          mkdir release-runtime
+          tar -xJf "${package}" -C release-runtime
+          source .github/scripts/chromium_i686_port.sh
+          validate_i686_chrome_binary release-runtime/chrome
+
+      - name: Create or update unofficial release
+        if: ${{ steps.artifact.outputs.found == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.artifact.outputs.version }}
+          BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="chromium-${VERSION}-linux-i686"
+          assets=(
+            "release-assets/chromium-${VERSION}-linux-i686.tar.xz"
+            "release-assets/chromium-${VERSION}-linux-i686.tar.xz.sha256"
+            "release-assets/chromium-${VERSION}-linux-i686-manifest.txt"
+          )
+
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${assets[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${tag}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${DEFAULT_BRANCH}" \
+              --title "Chromium ${VERSION} Linux i686 (Unofficial)" \
+              --notes "Unofficial downstream Linux i686 build of Chromium ${VERSION}. Chromium upstream does not support or test this target. Built and ELF32-validated by GitHub Actions run ${BUILD_RUN_ID} from commit ${BUILD_SHA}."
+          fi
+
+          title="[i686-port] Chromium ${VERSION} requires maintenance"
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --json number,title --jq ".[] | select(.title == \"${title}\") | .number" | head -n1)"
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "Resolved by successful unofficial i686 release \`${tag}\`."
+            gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --reason completed
+          fi
+
+      - name: Report release publication failure
+        if: ${{ failure() && steps.artifact.outputs.found == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.artifact.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[i686-port] Chromium ${VERSION} requires maintenance"
+          body="The build artifact passed to the release workflow, but release validation or publication failed. Release workflow: ${RUN_URL}"
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --json number,title --jq ".[] | select(.title == \"${title}\") | .number" | head -n1)"
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+          fi
