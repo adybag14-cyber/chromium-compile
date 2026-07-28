@@ -30,7 +30,7 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - name: Checkout port infrastructure
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate requested version
         env:
