@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
@@ -17,15 +17,62 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-      - name: Dispatch production compatibility preflight
+      - name: Dispatch or locate production compatibility preflight
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: "150.0.7871.186"
         shell: bash
         run: |
           set -euo pipefail
-          gh workflow run chromium-i686-preflight.yml \
-            --repo "${GITHUB_REPOSITORY}" \
-            --ref main \
-            -f version="150.0.7871.186" \
-            -f dispatch_build="true"
-          echo "Dispatched Chromium 150.0.7871.186 through the production preflight and staged build pipeline."
+
+          find_run() {
+            gh run list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --workflow chromium-i686-preflight.yml \
+              --limit 50 \
+              --json displayTitle,status,conclusion,createdAt,url \
+              --jq ".[] | select(.displayTitle == \"Chromium i686 preflight ${VERSION}\")" \
+              | head -n 1
+          }
+
+          run_json="$(find_run || true)"
+          dispatched=false
+          if [ -z "${run_json}" ]; then
+            gh workflow run chromium-i686-preflight.yml \
+              --repo "${GITHUB_REPOSITORY}" \
+              --ref main \
+              -f version="${VERSION}" \
+              -f dispatch_build="true"
+            dispatched=true
+            sleep 12
+            run_json="$(find_run || true)"
+          fi
+
+          if [ -z "${run_json}" ]; then
+            run_json='{"displayTitle":"not yet visible","status":"requested","conclusion":null,"createdAt":null,"url":null}'
+          fi
+
+          jq -n \
+            --arg version "${VERSION}" \
+            --argjson dispatched "${dispatched}" \
+            --arg timestamp "$(date --iso-8601=seconds)" \
+            --argjson run "${run_json}" \
+            '{schema:1,version:$version,dispatched_by_this_run:$dispatched,recorded_at:$timestamp,preflight:$run}' \
+            > bootstrap-status.json
+
+          encoded="$(base64 -w0 bootstrap-status.json)"
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/support/bootstrap-status.json" --jq .sha 2>/dev/null || true)"
+          args=(
+            --method PUT
+            -H "Accept: application/vnd.github+json"
+            "repos/${GITHUB_REPOSITORY}/contents/support/bootstrap-status.json"
+            -f message="Record live Chromium i686 bootstrap status"
+            -f content="${encoded}"
+            -f branch="main"
+          )
+          if [ -n "${existing_sha}" ]; then
+            args+=(-f sha="${existing_sha}")
+          fi
+          gh api "${args[@]}" >/dev/null
+
+          cat bootstrap-status.json
