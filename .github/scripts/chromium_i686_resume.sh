@@ -77,9 +77,14 @@ report_ninja_resume_state() {
 verify_i386_runtime_dependencies() {
   local binary="${OUT_DIR}/v8_context_snapshot_generator"
 
-  if [ ! -x "${binary}" ]; then
+  if [ ! -e "${binary}" ]; then
     echo "The i386 V8 snapshot generator is not present yet; runtime verification will occur in a later stage."
     return 0
+  fi
+
+  if [ ! -x "${binary}" ]; then
+    echo "::error::The restored i386 snapshot generator is not executable."
+    return 1
   fi
 
   echo "Checking runtime dependencies for ${binary}:"
