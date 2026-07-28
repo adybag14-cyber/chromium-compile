@@ -1,0 +1,31 @@
+name: Bootstrap Chromium i686 Live Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/bootstrap-i686-live.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Dispatch production compatibility preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run chromium-i686-preflight.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            -f version="150.0.7871.186" \
+            -f dispatch_build="true"
+          echo "Dispatched Chromium 150.0.7871.186 through the production preflight and staged build pipeline."
