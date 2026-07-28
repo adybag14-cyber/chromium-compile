@@ -203,10 +203,10 @@ def select_candidates(
             continue
         if version in state.known or version in state.released:
             continue
-        # The oldest blocked release is a maintenance gate. Do not create a
-        # cascade of identical failures for every later stable patch release.
+        # An open maintenance issue records this exact version as processed.
+        # Later stable versions must still receive their own compatibility attempt.
         if version in state.blocked:
-            break
+            continue
         selected.append(version)
         if len(selected) >= limit:
             break
@@ -282,7 +282,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"- Baseline: `{minimum}`",
         f"- Stable versions above baseline observed: `{len(versions)}`",
         f"- Active port runs: `{len(state.active) if not args.force_version else 0}`",
-        f"- Open maintenance gates: `{len(state.blocked) if not args.force_version else 0}`",
+        f"- Open maintenance issues: `{len(state.blocked) if not args.force_version else 0}`",
         f"- Candidate builds dispatched: `{len(candidates)}`",
     ]
     if candidates:
