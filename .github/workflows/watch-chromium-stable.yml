@@ -1,0 +1,64 @@
+name: Watch Chromium Stable for i686
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: "Optional exact Chromium version to preflight regardless of recorded state"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Report what would be dispatched without starting a build"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+  issues: read
+
+concurrency:
+  group: chromium-i686-stable-watcher
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CHROMIUM_I686_AUTOMATION_ENABLED == 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout port metadata
+        uses: actions/checkout@v4
+
+      - name: Detect unprocessed stable releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_VERSION: ${{ inputs.force_version }}
+          MANUAL_DRY_RUN: ${{ inputs.dry_run }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dry_run=false
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${MANUAL_DRY_RUN}" = "true" ]; then
+            dry_run=true
+          fi
+
+          args=(
+            --repository "${GITHUB_REPOSITORY}"
+            --ref "${DEFAULT_BRANCH}"
+            --baseline support/baseline.json
+            --max-new-builds 1
+          )
+          if [ -n "${FORCE_VERSION}" ]; then
+            args+=(--force-version "${FORCE_VERSION}")
+          fi
+          if [ "${dry_run}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+
+          python3 scripts/chromium_stable_watcher.py "${args[@]}"

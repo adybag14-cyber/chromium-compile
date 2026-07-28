@@ -1,0 +1,56 @@
+name: Validate i686 Port Infrastructure
+
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+      - "docs/MAINTENANCE.md"
+      - "patches/**"
+      - "scripts/**"
+      - "support/**"
+      - "tests/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Python and unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q scripts patches tests
+          python3 -m unittest discover -s tests -v
+          python3 -m json.tool support/baseline.json >/dev/null
+
+      - name: Validate shell helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in .github/scripts/*.sh; do
+            bash -n "${script}"
+          done
+
+      - name: Smoke-test semantic patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "${temp}"' EXIT
+          cat > "${temp}/BUILD.gn" <<'EOF'
+          assert(
+            is_valid_x86_target || target_cpu != "x86" || v8_target_cpu == "arm",
+            "unsupported",
+          )
+          EOF
+          python3 patches/common/enable_linux_i686.py \
+            --source-root "${temp}" \
+            --version 150.0.7871.186
+          grep -q 'target_os == "linux"' "${temp}/BUILD.gn"

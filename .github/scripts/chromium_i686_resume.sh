@@ -74,6 +74,27 @@ report_ninja_resume_state() {
   )
 }
 
+# Override the original one-off BUILD.gn edit with the maintained downstream
+# patch layer. The source version is read from Chromium itself so existing
+# composite-action callers do not need another input.
+patch_build_gn_for_x86_linux() {
+  local version_file="${CHROMIUM_SRC}/chrome/VERSION"
+  if [ ! -s "${version_file}" ]; then
+    echo "::error::Cannot determine Chromium version from ${version_file}."
+    return 1
+  fi
+
+  local major minor build patch version
+  major="$(awk -F= '$1 == "MAJOR" {print $2}' "${version_file}")"
+  minor="$(awk -F= '$1 == "MINOR" {print $2}' "${version_file}")"
+  build="$(awk -F= '$1 == "BUILD" {print $2}' "${version_file}")"
+  patch="$(awk -F= '$1 == "PATCH" {print $2}' "${version_file}")"
+  version="${major}.${minor}.${build}.${patch}"
+
+  source "${GITHUB_WORKSPACE}/.github/scripts/chromium_i686_port.sh"
+  apply_i686_port_patches "${version}"
+}
+
 verify_i386_runtime_dependencies() {
   local binary="${OUT_DIR}/v8_context_snapshot_generator"
 

@@ -1,0 +1,31 @@
+name: Chromium i686 port breakage
+description: Track an upstream change that blocks the unofficial Linux i686 port
+title: "[i686-port] "
+labels: []
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Chromium version
+      placeholder: 151.0.0.0
+    validations:
+      required: true
+  - type: input
+    id: workflow
+    attributes:
+      label: Workflow run
+      description: Link to the failed preflight or build run
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: First relevant failure
+      description: Include the first architecture or compatibility error, not the final generic Ninja failure.
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Proposed downstream fix
+      description: Identify whether the change belongs in the common patch layer or a major-specific patch series.

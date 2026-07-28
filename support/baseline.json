@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "minimum_version": "150.0.7871.186",
+  "verified_builds": [
+    {
+      "version": "150.0.7871.186",
+      "status": "verified",
+      "workflow_run_id": 30356636533,
+      "artifact_id": 8688377641,
+      "artifact_sha256": "28505b0d34da800dba87c068a65557b5e32418479e3fb4b1ac859e573409d137",
+      "result": "Chromium linked successfully at [21/21] LINK ./chrome"
+    }
+  ]
+}
