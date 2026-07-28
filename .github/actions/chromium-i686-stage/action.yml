@@ -66,6 +66,17 @@ runs:
         source .github/scripts/chromium_i686_common.sh
         install_system_dependencies
 
+    - name: Install i386 Runtime Libraries
+      shell: bash
+      run: |
+        sudo dpkg --add-architecture i386
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          libc6:i386 \
+          libgcc-s1:i386 \
+          libstdc++6:i386 \
+          libglib2.0-0:i386
+
     - name: Install depot_tools
       shell: bash
       run: |
@@ -148,6 +159,7 @@ runs:
         if [ "${checkpoint_restored}" = "true" ]; then
           report_ninja_resume_state
         fi
+        verify_i386_runtime_dependencies
 
     - name: Save Chromium source tarball cache
       if: ${{ always() && steps.prepare.outcome == 'success' }}
