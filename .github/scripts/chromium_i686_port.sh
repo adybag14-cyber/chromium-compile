@@ -23,8 +23,8 @@ apply_i686_port_patches() {
     echo "Checking downstream patch ${patch_file}"
     (
       cd "${source_root}"
-      patch --batch --forward --dry-run -p1 < "${patch_file}"
-      patch --batch --forward -p1 < "${patch_file}"
+      git apply --check "${patch_file}"
+      git apply "${patch_file}"
     )
   done
 }
