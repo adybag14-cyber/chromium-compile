@@ -19,7 +19,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: chromium-i686-preflight-${{ inputs.version }}
+  group: chromium-i686-port-queue
   cancel-in-progress: false
 
 jobs:
