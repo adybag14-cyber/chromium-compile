@@ -194,6 +194,7 @@ configure_gn() {
     is_official_build=false
     use_thin_lto=false
     use_reclient=false
+    generate_location_tags=false
     treat_warnings_as_errors=false
     cc_wrapper="ccache"
   '
