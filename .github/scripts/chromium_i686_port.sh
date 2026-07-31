@@ -37,6 +37,7 @@ run_i686_compatibility_preflight() {
   test -s "${out_dir}/build.ninja"
   grep -Eq 'target_cpu[[:space:]]*=[[:space:]]*"x86"' "${out_dir}/args.gn"
   grep -Eq 'target_os[[:space:]]*=[[:space:]]*"linux"' "${out_dir}/args.gn"
+  grep -Eq 'generate_location_tags[[:space:]]*=[[:space:]]*false' "${out_dir}/args.gn"
 
   local sysroot
   sysroot="$(find "${source_root}/build/linux" -maxdepth 1 -type d -name '*_i386-sysroot' -print -quit)"

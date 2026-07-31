@@ -50,7 +50,21 @@ jobs:
             "unsupported",
           )
           EOF
+          mkdir -p "${temp}/tools/metrics"
+          cat > "${temp}/tools/metrics/BUILD.gn" <<'EOF'
+          if (path_exists("//.git")) {
+            action("histograms_xml") {
+            }
+          }
+          group("metrics_metadata") {
+            if (generate_location_tags) {
+              deps += [ ":histograms_xml" ]
+            }
+          }
+          EOF
           python3 patches/common/enable_linux_i686.py \
             --source-root "${temp}" \
             --version 150.0.7871.186
           grep -q 'target_os == "linux"' "${temp}/BUILD.gn"
+          grep -q 'if (path_exists("//.git"))' "${temp}/tools/metrics/BUILD.gn"
+          ! grep -q 'if (generate_location_tags)' "${temp}/tools/metrics/BUILD.gn"
