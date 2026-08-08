@@ -99,6 +99,16 @@ libgcc-s1:i386
 libstdc++6:i386
 libglib2.0-0:i386
 libexpat1:i386
+libnspr4:i386
+libnss3:i386
+libdbus-1-3:i386
+libx11-6:i386
+libxext6:i386
+libgbm1:i386
+libxcb1:i386
+libxkbcommon0:i386
+libudev1:i386
+libasound2:i386
 ```
 
 The restored V8 context snapshot generator is checked with `file` and `ldd`. A missing library or non-executable generator fails early.
