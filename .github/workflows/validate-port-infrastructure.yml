@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate Python and unit tests
         shell: bash
@@ -37,6 +37,20 @@ jobs:
           for script in .github/scripts/*.sh; do
             bash -n "${script}"
           done
+
+      - name: Smoke-test failure classification
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          temp="$(mktemp -d)"
+          trap 'rm -rf "${temp}"' EXIT
+          echo 'error while loading shared libraries: libfuture.so: cannot open shared object file' > "${temp}/runtime.log"
+          echo 'fatal error: no member named future_api' > "${temp}/deterministic.log"
+          echo 'No space left on device' > "${temp}/infrastructure.log"
+          test "$(classify_build_failure "${temp}/runtime.log")" = runtime_environment
+          test "$(classify_build_failure "${temp}/deterministic.log")" = deterministic_build
+          test "$(classify_build_failure "${temp}/infrastructure.log")" = infrastructure
 
       - name: Smoke-test semantic patch
         shell: bash
@@ -68,3 +82,43 @@ jobs:
           grep -q 'target_os == "linux"' "${temp}/BUILD.gn"
           grep -q 'if (path_exists("//.git"))' "${temp}/tools/metrics/BUILD.gn"
           ! grep -q 'if (generate_location_tags)' "${temp}/tools/metrics/BUILD.gn"
+
+
+  validate_i386_runtime:
+    name: Validate i386 host runtime
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install and verify i386 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          install_i386_runtime_libraries
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-multilib file binutils
+
+          cat > "${RUNNER_TEMP}/i386-canary.c" <<'EOF'
+          #include <stdio.h>
+          int main(void) {
+            puts("i386 runtime canary ok");
+            return 0;
+          }
+          EOF
+          gcc -m32 "${RUNNER_TEMP}/i386-canary.c" -o "${RUNNER_TEMP}/i386-canary"
+          file "${RUNNER_TEMP}/i386-canary"
+          readelf -h "${RUNNER_TEMP}/i386-canary"
+          ldd "${RUNNER_TEMP}/i386-canary"
+          ! ldd "${RUNNER_TEMP}/i386-canary" | grep -q 'not found'
+          "${RUNNER_TEMP}/i386-canary"
+
+      - name: Reject floating first-party action tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R -nE 'uses:[[:space:]]+actions/[^@]+@v[0-9]' .github; then
+            echo "::error::First-party GitHub Actions must be pinned to immutable commit SHAs."
+            exit 1
+          fi
