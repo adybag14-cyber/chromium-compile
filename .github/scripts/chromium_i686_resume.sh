@@ -116,8 +116,12 @@ checkpoint_bundle_is_usable() {
   zstd -q -t "${archive}"
 
   if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
-    echo "::warning::Legacy checkpoint has no integrity manifest; accepting once for migration and regenerating metadata on the next checkpoint."
-    return 0
+    if [ "${ALLOW_LEGACY_CHECKPOINT_VERSION:-}" = "${expected_version}" ]; then
+      echo "::warning::Legacy checkpoint accepted only because ALLOW_LEGACY_CHECKPOINT_VERSION explicitly permits Chromium ${expected_version}; the next checkpoint will regenerate integrity metadata."
+      return 0
+    fi
+    echo "::error::Legacy checkpoint lacks integrity metadata and no version-scoped migration opt-in is active."
+    return 1
   fi
 
   (
@@ -176,6 +180,7 @@ restore_out_checkpoint() {
   local archive="${1:-}"
   local expected_version="${2:-}"
   local current_stage="${3:-1}"
+  local already_validated="${4:-false}"
   mkdir -p "${CHROMIUM_SRC}/out"
 
   if [ -z "${archive}" ] || [ ! -s "${archive}" ]; then
@@ -184,7 +189,9 @@ restore_out_checkpoint() {
     return 0
   fi
 
-  checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
+  if [ "${already_validated}" != "true" ]; then
+    checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
+  fi
   echo "Restoring previous Ninja output checkpoint from ${archive}"
   rm -rf "${OUT_DIR}"
   tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"

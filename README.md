@@ -273,7 +273,7 @@ The staged builder now treats the GitHub-hosted runner as an untrusted, replacea
 - Compiler failures are classified as `runtime_environment`, `infrastructure`, or `deterministic_build`. Deterministic compiler/source failures do not consume fresh-runner retries.
 - Checkpoints include a SHA-256 sidecar and JSON manifest recording Chromium version, stage, source checksum, clang revision, GN/patch configuration hash, Ninja metadata hashes, workflow commit, and runner image metadata.
 - Restores verify the compression stream, checksum, target/version/stage compatibility, source/toolchain/configuration identity, and extracted `args.gn` / `build.ninja` hashes before reuse.
-- Legacy checkpoints without manifests are accepted only as a migration path so builds already in flight when the hardening landed can finish; the next checkpoint automatically gains the new metadata.
+- Legacy checkpoints without manifests are rejected by default. A single in-flight Chromium version can be temporarily opted in with `CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION=<version>`; the next checkpoint automatically gains the new metadata.
 - The validation workflow performs a real 32-bit compile-and-execute canary on Ubuntu 22.04.
 - First-party GitHub Actions are upgraded and pinned to immutable commit SHAs.
 - Disk-space guards trim expendable caches before compilation/checkpoint creation and fail before a near-full runner can destroy resumable state.

@@ -414,20 +414,6 @@ configure_ccache() {
   ccache -s || true
 }
 
-restore_out_checkpoint() {
-  local archive="${1:-}"
-  mkdir -p "${CHROMIUM_SRC}/out"
-  if [ -n "${archive}" ] && [ -s "${archive}" ]; then
-    echo "Restoring previous ninja output checkpoint from ${archive}"
-    rm -rf "${OUT_DIR}"
-    tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"
-    du -sh "${OUT_DIR}" || true
-  else
-    echo "No previous output checkpoint found; continuing with ccache and a fresh out directory."
-    mkdir -p "${OUT_DIR}"
-  fi
-}
-
 install_gn_from_cipd() {
   cd "${CHROMIUM_SRC}"
   if [ -x "${GN_BINARY}" ]; then
@@ -454,7 +440,7 @@ run_build_until_checkpoint() {
   local started_at="${JOB_STARTED_AT:-$(date +%s)}"
   local checkpoint_minutes="${JOB_CHECKPOINT_MINUTES:-330}"
   local cutoff=$((started_at + checkpoint_minutes * 60))
-  local now remaining status failure_class pass
+  local now remaining status failure_class pass pass_log_start pass_log
   local repaired_runtime=false
 
   if ! ensure_build_disk_space 20; then
@@ -482,12 +468,15 @@ run_build_until_checkpoint() {
     echo "Job checkpoint cutoff is ${checkpoint_minutes} minutes after job start; build timeout for this pass is ${remaining} seconds."
     df -h
 
+    pass_log_start="$(wc -c < "${BUILD_LOG}")"
+    pass_log="${WORKSPACE}/build-stage-pass-${pass}.log"
     set +e
     set +o pipefail
     timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j3 chrome 2>&1 | tee -a "${BUILD_LOG}"
     status=${PIPESTATUS[0]}
     set -o pipefail
     set -e
+    tail -c "+$((pass_log_start + 1))" "${BUILD_LOG}" > "${pass_log}"
 
     if [ "${status}" -eq 0 ]; then
       echo "Build finished at $(date)"
@@ -515,7 +504,7 @@ run_build_until_checkpoint() {
       return "${status}"
     fi
 
-    failure_class="$(classify_build_failure "${BUILD_LOG}")"
+    failure_class="$(classify_build_failure "${pass_log}")"
     echo "Failure class: ${failure_class}"
 
     if [ "${failure_class}" = "runtime_environment" ] && [ "${repaired_runtime}" = "false" ]; then

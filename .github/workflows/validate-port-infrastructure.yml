@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate Python and unit tests
         shell: bash
@@ -37,6 +39,15 @@ jobs:
           for script in .github/scripts/*.sh; do
             bash -n "${script}"
           done
+
+      - name: Reject floating first-party action tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R -nE 'uses:[[:space:]]+actions/[^@]+@v[0-9]' .github; then
+            echo "::error::First-party GitHub Actions must be pinned to immutable commit SHAs."
+            exit 1
+          fi
 
       - name: Smoke-test failure classification
         shell: bash
@@ -91,6 +102,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install and verify i386 runtime
         shell: bash
@@ -113,12 +126,3 @@ jobs:
           ldd "${RUNNER_TEMP}/i386-canary"
           ! ldd "${RUNNER_TEMP}/i386-canary" | grep -q 'not found'
           "${RUNNER_TEMP}/i386-canary"
-
-      - name: Reject floating first-party action tags
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -R -nE 'uses:[[:space:]]+actions/[^@]+@v[0-9]' .github; then
-            echo "::error::First-party GitHub Actions must be pinned to immutable commit SHAs."
-            exit 1
-          fi

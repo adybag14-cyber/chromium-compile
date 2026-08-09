@@ -106,17 +106,6 @@ runs:
         run-id: ${{ inputs.preferred-checkpoint-run-id }}
         github-token: ${{ github.token }}
 
-    - name: Try Fallback Checkpoint
-      id: fallback_checkpoint
-      if: ${{ inputs.fallback-checkpoint-artifact != '' }}
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      continue-on-error: true
-      with:
-        name: ${{ inputs.fallback-checkpoint-artifact }}
-        path: ${{ github.workspace }}/resume/fallback
-        run-id: ${{ inputs.fallback-checkpoint-run-id }}
-        github-token: ${{ github.token }}
-
     - name: Restore Chromium source tarball cache
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       continue-on-error: true
@@ -129,6 +118,8 @@ runs:
     - name: Prepare Chromium Source
       id: prepare
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         source .github/scripts/chromium_i686_common.sh
         source .github/scripts/chromium_i686_resume.sh
@@ -145,20 +136,33 @@ runs:
 
         checkpoint_restored=false
         resume_archive=""
-        for candidate in \
-          "${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst" \
-          "${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"; do
-          if [ -s "${candidate}" ]; then
-            if checkpoint_bundle_is_usable "${candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
-              resume_archive="${candidate}"
-              break
-            fi
-            echo "::warning::Rejecting unusable checkpoint bundle: ${candidate}"
+        preferred_candidate="${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst"
+        if [ -s "${preferred_candidate}" ]; then
+          if checkpoint_bundle_is_usable "${preferred_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
+            resume_archive="${preferred_candidate}"
+          else
+            echo "::warning::Rejecting unusable preferred checkpoint bundle: ${preferred_candidate}"
+            rm -rf "${GITHUB_WORKSPACE}/resume/preferred"
           fi
-        done
+        fi
+
+        if [ -z "${resume_archive}" ] && [ -n "${{ inputs.fallback-checkpoint-artifact }}" ]; then
+          echo "Preferred checkpoint unavailable or invalid; downloading fallback checkpoint on demand."
+          mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"
+          gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${{ inputs.fallback-checkpoint-artifact }}" \
+            --dir "${GITHUB_WORKSPACE}/resume/fallback"
+          fallback_candidate="${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"
+          if [ -s "${fallback_candidate}" ] && checkpoint_bundle_is_usable "${fallback_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
+            resume_archive="${fallback_candidate}"
+          else
+            echo "::warning::Rejecting unusable fallback checkpoint bundle: ${fallback_candidate}"
+          fi
+        fi
 
         if [ -n "${resume_archive}" ]; then
-          restore_out_checkpoint "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}"
+          restore_out_checkpoint "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true
           checkpoint_restored=true
           echo "Checkpoint restored from ${resume_archive}"
         else

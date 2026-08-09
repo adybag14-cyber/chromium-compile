@@ -25,6 +25,8 @@ Optional repository variables:
 ```text
 CHROMIUM_I686_MAX_STAGES=20
 CHROMIUM_RUNNER_RETRIES=2
+# Temporary migration only; omit normally:
+CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION=<exact-version>
 ```
 
 ## Release lifecycle
@@ -73,4 +75,4 @@ out-Release_x86.tar.zst.sha256
 checkpoint-manifest.json
 ```
 
-Do not remove manifest compatibility checks merely to make a stale checkpoint restore. If build-affecting GN arguments or downstream patches change, starting from a compatible older-stage checkpoint or a fresh output directory is safer than reusing mismatched Ninja state.
+Legacy checkpoints without the manifest/checksum bundle are rejected by default. During a one-version migration, set `CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION` to that exact Chromium version and remove or change it after the in-flight chain has produced a manifest-bearing checkpoint. Do not remove manifest compatibility checks merely to make a stale checkpoint restore. If build-affecting GN arguments or downstream patches change, starting from a compatible older-stage checkpoint or a fresh output directory is safer than reusing mismatched Ninja state.
