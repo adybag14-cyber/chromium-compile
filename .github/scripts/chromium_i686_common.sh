@@ -107,27 +107,32 @@ install_i386_runtime_libraries() {
 }
 
 verify_i386_host_runtime() {
-  local soname
+  local package soname
   local missing=0
-  local cache
-  cache="$(ldconfig -p 2>/dev/null || true)"
-  for soname in "${!I386_SONAME_PACKAGES[@]}"; do
-    if ! grep -Fq "${soname} (libc6,x86-32)" <<<"${cache}"; then
-      case "${soname}" in
-        libc.so.6|libdl.so.2|libpthread.so.0|libm.so.6|libgcc_s.so.1|libstdc++.so.6|libglib-2.0.so.0|libgobject-2.0.so.0|libgio-2.0.so.0|libgmodule-2.0.so.0)
-          if grep -Eq "[[:space:]]${soname//./\\.}[[:space:]].*(x86-32|i386)" <<<"${cache}"; then
-            continue
-          fi
-          ;;
-      esac
-      echo "::error::Required i386 runtime SONAME is unavailable on the runner: ${soname}"
+
+  for package in "${I386_RUNTIME_PACKAGES[@]}"; do
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
+      echo "::error::Required i386 runtime package is not installed: ${package}"
       missing=1
     fi
   done
+
+  if [ ! -x /lib/ld-linux.so.2 ]; then
+    echo "::error::The i386 dynamic loader /lib/ld-linux.so.2 is unavailable."
+    missing=1
+  fi
+
+  for soname in "${!I386_SONAME_PACKAGES[@]}"; do
+    if [ ! -e "/lib/i386-linux-gnu/${soname}" ]         && [ ! -e "/usr/lib/i386-linux-gnu/${soname}" ]; then
+      echo "::error::Required i386 runtime SONAME is not installed: ${soname}"
+      missing=1
+    fi
+  done
+
   if [ "${missing}" -ne 0 ]; then
     return 1
   fi
-  echo "Verified required i386 host runtime SONAMEs."
+  echo "Verified required i386 packages, loader, and runtime SONAME files."
 }
 
 repair_missing_i386_runtime_for_binary() {
