@@ -53,3 +53,24 @@ CHROMIUM_RUNNER_RETRIES=2
 ## Security boundary
 
 The release workflow accepts artifacts only from a successful build on the repository's default branch and from the same repository. It validates the package checksum and confirms that `chrome` is an ELF32 Intel 80386 executable before publishing.
+
+
+## Failure classification and retries
+
+Compiler failures are classified before the workflow decides whether a fresh runner is useful:
+
+- `infrastructure`: runner storage, OOM, network or similar transient host failures. These may consume a runner retry.
+- `runtime_environment`: a generated ELF32 tool cannot load a host shared library. Known SONAMEs are repaired in-place first; an unrepaired environment failure may consume a runner retry.
+- `deterministic_build`: compiler, linker, GN, API or source incompatibilities. These do **not** consume fresh-runner retries and should become maintenance issues immediately.
+
+When adding a new known host runtime dependency, update both `I386_RUNTIME_PACKAGES` and `I386_SONAME_PACKAGES` in `.github/scripts/chromium_i686_common.sh`. The validation workflow must remain green on `ubuntu-22.04`.
+
+New checkpoints are a three-file bundle:
+
+```text
+out-Release_x86.tar.zst
+out-Release_x86.tar.zst.sha256
+checkpoint-manifest.json
+```
+
+Do not remove manifest compatibility checks merely to make a stale checkpoint restore. If build-affecting GN arguments or downstream patches change, starting from a compatible older-stage checkpoint or a fresh output directory is safer than reusing mismatched Ninja state.

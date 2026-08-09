@@ -30,7 +30,7 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - name: Checkout port infrastructure
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate requested version
         env:
@@ -55,6 +55,7 @@ jobs:
           maximize_runner_disk_space
           install_system_dependencies
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y file binutils
+          install_i386_runtime_libraries
           install_depot_tools
           prepare_chromium_source "${VERSION}"
           install_chromium_clang
@@ -67,7 +68,7 @@ jobs:
           run_i686_compatibility_preflight
 
       - name: Upload preflight evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: chromium-${{ inputs.version }}-linux-i686-preflight
           path: i686-preflight-ninja-query.txt

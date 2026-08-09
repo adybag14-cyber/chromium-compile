@@ -1,5 +1,5 @@
 name: Chromium i686 Build (Unofficial Port)
-run-name: Chromium i686 ${{ inputs.version }} · stage ${{ inputs.stage || '1' }} · attempt ${{ inputs.retry_count || '0' }}
+run-name: Chromium i686 ${{ inputs.version }} - stage ${{ inputs.stage || '1' }} - attempt ${{ inputs.retry_count || '0' }}
 
 on:
   workflow_dispatch:
@@ -55,11 +55,12 @@ jobs:
       retry_count: ${{ steps.control.outputs.retry_count }}
       max_retries: ${{ steps.control.outputs.max_retries }}
       complete: ${{ steps.compiler.outputs.complete }}
+      failure_class: ${{ steps.compiler.outputs.failure_class }}
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - name: Checkout workflow helpers
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve stage controls
         id: control
@@ -192,6 +193,7 @@ jobs:
       ${{
         always() &&
         (needs.build.result == 'failure' || needs.build.result == 'cancelled') &&
+        needs.build.outputs.failure_class != 'deterministic_build' &&
         fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(needs.build.outputs.max_retries || '0')
       }}
     runs-on: ubuntu-22.04
@@ -209,7 +211,7 @@ jobs:
         run: |
           set -euo pipefail
           next_retry=$((RETRY_COUNT + 1))
-          echo "Runner failed during stage ${STAGE}; dispatching recovery attempt ${next_retry}."
+          echo "Runner/environment failure during stage ${STAGE}; dispatching recovery attempt ${next_retry}."
           echo "The recovery run will first try a same-stage checkpoint from run ${GITHUB_RUN_ID}, then fall back to ${FALLBACK_RUN_ID:-a fresh stage}."
           gh workflow run chromium-i686.yml \
             --repo "${GITHUB_REPOSITORY}" \

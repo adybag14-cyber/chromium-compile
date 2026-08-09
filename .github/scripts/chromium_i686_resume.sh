@@ -96,32 +96,112 @@ patch_build_gn_for_x86_linux() {
 }
 
 verify_i386_runtime_dependencies() {
-  local binary="${OUT_DIR}/v8_context_snapshot_generator"
+  verify_or_repair_i386_runtime_dependencies
+}
 
-  if [ ! -e "${binary}" ]; then
-    echo "The i386 V8 snapshot generator is not present yet; runtime verification will occur in a later stage."
+checkpoint_bundle_is_usable() {
+  local archive="${1:?checkpoint archive is required}"
+  local expected_version="${2:?expected version is required}"
+  local current_stage="${3:?current stage is required}"
+  local bundle_dir
+  bundle_dir="$(dirname "${archive}")"
+  local checksum="${bundle_dir}/$(basename "${CHECKPOINT_SHA256}")"
+  local manifest="${bundle_dir}/$(basename "${CHECKPOINT_MANIFEST}")"
+
+  if [ ! -s "${archive}" ]; then
+    return 1
+  fi
+
+  echo "Validating checkpoint compression stream: ${archive}"
+  zstd -q -t "${archive}"
+
+  if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
+    echo "::warning::Legacy checkpoint has no integrity manifest; accepting once for migration and regenerating metadata on the next checkpoint."
     return 0
   fi
 
-  if [ ! -x "${binary}" ]; then
-    echo "::error::The restored i386 snapshot generator is not executable."
+  (
+    cd "${bundle_dir}"
+    sha256sum -c "$(basename "${checksum}")"
+  )
+
+  EXPECTED_VERSION="${expected_version}" CURRENT_STAGE="${current_stage}" \
+  CHECKPOINT_MANIFEST_PATH="${manifest}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+manifest = json.loads(Path(os.environ["CHECKPOINT_MANIFEST_PATH"]).read_text())
+if manifest.get("schema_version") != 1:
+    raise SystemExit("Unsupported checkpoint manifest schema")
+if manifest.get("chromium_version") != os.environ["EXPECTED_VERSION"]:
+    raise SystemExit("Checkpoint Chromium version does not match requested version")
+stage = int(manifest.get("checkpoint_stage", -1))
+current = int(os.environ["CURRENT_STAGE"])
+if stage not in {current, max(1, current - 1)}:
+    raise SystemExit(f"Checkpoint stage {stage} is incompatible with current stage {current}")
+if manifest.get("target_os") != "linux" or manifest.get("target_cpu") != "x86":
+    raise SystemExit("Checkpoint target tuple is not linux/x86")
+PY
+
+  local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${expected_version}.tar.xz.sha256"
+  if [ -s "${source_checksum_file}" ]; then
+    local current_source_sha manifest_source_sha
+    current_source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"
+    manifest_source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_tar_sha256"])' "${manifest}")"
+    if [ "${current_source_sha}" != "${manifest_source_sha}" ]; then
+      echo "::error::Checkpoint source tarball checksum does not match the prepared Chromium source."
+      return 1
+    fi
+  fi
+
+  local current_clang manifest_clang
+  current_clang="$(cat "${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision")"
+  manifest_clang="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["clang_revision"])' "${manifest}")"
+  if [ "${current_clang}" != "${manifest_clang}" ]; then
+    echo "::error::Checkpoint clang revision does not match the prepared Chromium toolchain."
     return 1
   fi
 
-  echo "Checking runtime dependencies for ${binary}:"
-  file "${binary}" || true
-
-  local ldd_output
-  local ldd_status
-  set +e
-  ldd_output="$(ldd "${binary}" 2>&1)"
-  ldd_status=$?
-  set -e
-  printf '%s\n' "${ldd_output}"
-
-  if [ "${ldd_status}" -ne 0 ] || grep -q 'not found' <<<"${ldd_output}"; then
-    echo "::error::The restored i386 snapshot generator still has unresolved runtime libraries."
+  local current_port_hash manifest_port_hash
+  current_port_hash="$(compute_port_config_sha256 "${expected_version}")"
+  manifest_port_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port_config_sha256"])' "${manifest}")"
+  if [ "${current_port_hash}" != "${manifest_port_hash}" ]; then
+    echo "::error::Checkpoint port configuration differs from the current GN/patch configuration."
     return 1
+  fi
+}
+
+restore_out_checkpoint() {
+  local archive="${1:-}"
+  local expected_version="${2:-}"
+  local current_stage="${3:-1}"
+  mkdir -p "${CHROMIUM_SRC}/out"
+
+  if [ -z "${archive}" ] || [ ! -s "${archive}" ]; then
+    echo "No previous output checkpoint found; continuing with ccache and a fresh out directory."
+    mkdir -p "${OUT_DIR}"
+    return 0
+  fi
+
+  checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
+  echo "Restoring previous Ninja output checkpoint from ${archive}"
+  rm -rf "${OUT_DIR}"
+  tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"
+  du -sh "${OUT_DIR}" || true
+
+  local bundle_dir manifest
+  bundle_dir="$(dirname "${archive}")"
+  manifest="${bundle_dir}/$(basename "${CHECKPOINT_MANIFEST}")"
+  if [ -s "${manifest}" ]; then
+    local args_hash ninja_hash expected_args_hash expected_ninja_hash
+    args_hash="$(sha256sum "${OUT_DIR}/args.gn" | awk '{print $1}')"
+    ninja_hash="$(sha256sum "${OUT_DIR}/build.ninja" | awk '{print $1}')"
+    expected_args_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["args_gn_sha256"])' "${manifest}")"
+    expected_ninja_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_ninja_sha256"])' "${manifest}")"
+    test "${args_hash}" = "${expected_args_hash}"
+    test "${ninja_hash}" = "${expected_ninja_hash}"
+    echo "Checkpoint manifest matches extracted Ninja metadata."
   fi
 }
 
@@ -131,13 +211,22 @@ verify_i386_runtime_dependencies() {
 # restored outputs can make valid work look stale. POSIX/PAX archives retain
 # subsecond mtimes.
 create_out_checkpoint() {
+  local version="${1:?Chromium version is required for checkpoint metadata}"
+  local stage="${2:?Checkpoint stage is required}"
+
   if [ ! -d "${OUT_DIR}" ]; then
     echo "::error::Expected build output directory not found: ${OUT_DIR}"
-    exit 1
+    return 1
+  fi
+  test -s "${OUT_DIR}/build.ninja"
+  test -s "${OUT_DIR}/args.gn"
+
+  if ! ensure_build_disk_space 10; then
+    return 1
   fi
 
   mkdir -p "${CHECKPOINT_DIR}"
-  rm -f "${CHECKPOINT_ARCHIVE}"
+  rm -f "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}"
 
   echo "Creating nanosecond-preserving Ninja output checkpoint..."
   du -sh "${OUT_DIR}" || true
@@ -154,5 +243,58 @@ create_out_checkpoint() {
     -cf "${CHECKPOINT_ARCHIVE}" \
     Release_x86
 
-  ls -lh "${CHECKPOINT_ARCHIVE}"
+  zstd -q -t "${CHECKPOINT_ARCHIVE}"
+  (
+    cd "${CHECKPOINT_DIR}"
+    sha256sum "$(basename "${CHECKPOINT_ARCHIVE}")" > "$(basename "${CHECKPOINT_SHA256}")"
+    sha256sum -c "$(basename "${CHECKPOINT_SHA256}")"
+  )
+
+  local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${version}.tar.xz.sha256"
+  test -s "${source_checksum_file}"
+  local source_sha clang_revision port_hash args_hash ninja_hash
+  source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"
+  clang_revision="$(cat "${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision")"
+  port_hash="$(compute_port_config_sha256 "${version}")"
+  args_hash="$(sha256sum "${OUT_DIR}/args.gn" | awk '{print $1}')"
+  ninja_hash="$(sha256sum "${OUT_DIR}/build.ninja" | awk '{print $1}')"
+
+  CHECKPOINT_VERSION="${version}" \
+  CHECKPOINT_STAGE="${stage}" \
+  CHECKPOINT_SOURCE_SHA="${source_sha}" \
+  CHECKPOINT_CLANG="${clang_revision}" \
+  CHECKPOINT_PORT_HASH="${port_hash}" \
+  CHECKPOINT_ARGS_HASH="${args_hash}" \
+  CHECKPOINT_NINJA_HASH="${ninja_hash}" \
+  CHECKPOINT_MANIFEST_PATH="${CHECKPOINT_MANIFEST}" \
+  python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+payload = {
+    "schema_version": 1,
+    "chromium_version": os.environ["CHECKPOINT_VERSION"],
+    "checkpoint_stage": int(os.environ["CHECKPOINT_STAGE"]),
+    "target_os": "linux",
+    "target_cpu": "x86",
+    "source_tar_sha256": os.environ["CHECKPOINT_SOURCE_SHA"],
+    "clang_revision": os.environ["CHECKPOINT_CLANG"],
+    "port_config_sha256": os.environ["CHECKPOINT_PORT_HASH"],
+    "args_gn_sha256": os.environ["CHECKPOINT_ARGS_HASH"],
+    "build_ninja_sha256": os.environ["CHECKPOINT_NINJA_HASH"],
+    "workflow_sha": os.environ.get("GITHUB_SHA", "unknown"),
+    "runner_os": os.environ.get("RUNNER_OS", "unknown"),
+    "runner_image": os.environ.get("ImageOS", "unknown"),
+    "runner_image_version": os.environ.get("ImageVersion", "unknown"),
+    "created_at_utc": datetime.now(timezone.utc).isoformat(),
+}
+Path(os.environ["CHECKPOINT_MANIFEST_PATH"]).write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n"
+)
+PY
+
+  python3 -m json.tool "${CHECKPOINT_MANIFEST}" >/dev/null
+  ls -lh "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}"
 }
