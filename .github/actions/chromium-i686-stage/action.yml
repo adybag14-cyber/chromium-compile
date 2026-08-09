@@ -149,15 +149,19 @@ runs:
         if [ -z "${resume_archive}" ] && [ -n "${{ inputs.fallback-checkpoint-artifact }}" ]; then
           echo "Preferred checkpoint unavailable or invalid; downloading fallback checkpoint on demand."
           mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"
-          gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
+          if gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --name "${{ inputs.fallback-checkpoint-artifact }}" \
-            --dir "${GITHUB_WORKSPACE}/resume/fallback"
-          fallback_candidate="${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"
-          if [ -s "${fallback_candidate}" ] && checkpoint_bundle_is_usable "${fallback_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
-            resume_archive="${fallback_candidate}"
+            --dir "${GITHUB_WORKSPACE}/resume/fallback"; then
+            fallback_candidate="${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"
+            if [ -s "${fallback_candidate}" ] && checkpoint_bundle_is_usable "${fallback_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
+              resume_archive="${fallback_candidate}"
+            else
+              echo "::warning::Rejecting unusable fallback checkpoint bundle: ${fallback_candidate}"
+            fi
           else
-            echo "::warning::Rejecting unusable fallback checkpoint bundle: ${fallback_candidate}"
+            echo "::warning::Fallback checkpoint download failed; continuing with fresh output/ccache instead of failing the stage."
+            rm -rf "${GITHUB_WORKSPACE}/resume/fallback"
           fi
         fi
 

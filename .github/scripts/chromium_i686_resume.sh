@@ -113,7 +113,10 @@ checkpoint_bundle_is_usable() {
   fi
 
   echo "Validating checkpoint compression stream: ${archive}"
-  zstd -q -t "${archive}"
+  if ! zstd -q -t "${archive}"; then
+    echo "::error::Checkpoint compression stream is corrupt: ${archive}"
+    return 1
+  fi
 
   if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
     if [ "${ALLOW_LEGACY_CHECKPOINT_VERSION:-}" = "${expected_version}" ]; then
@@ -124,12 +127,15 @@ checkpoint_bundle_is_usable() {
     return 1
   fi
 
-  (
+  if ! (
     cd "${bundle_dir}"
     sha256sum -c "$(basename "${checksum}")"
-  )
+  ); then
+    echo "::error::Checkpoint archive SHA-256 verification failed."
+    return 1
+  fi
 
-  EXPECTED_VERSION="${expected_version}" CURRENT_STAGE="${current_stage}" \
+  if ! EXPECTED_VERSION="${expected_version}" CURRENT_STAGE="${current_stage}" \
   CHECKPOINT_MANIFEST_PATH="${manifest}" python3 - <<'PY'
 import json
 import os
@@ -147,6 +153,10 @@ if stage not in {current, max(1, current - 1)}:
 if manifest.get("target_os") != "linux" or manifest.get("target_cpu") != "x86":
     raise SystemExit("Checkpoint target tuple is not linux/x86")
 PY
+  then
+    echo "::error::Checkpoint manifest compatibility validation failed."
+    return 1
+  fi
 
   local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${expected_version}.tar.xz.sha256"
   if [ -s "${source_checksum_file}" ]; then

@@ -100,8 +100,19 @@ class PipelineHardeningTests(unittest.TestCase):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         self.assertNotIn("- name: Try Fallback Checkpoint", action)
         self.assertIn("Preferred checkpoint unavailable or invalid; downloading fallback checkpoint on demand.", action)
-        self.assertIn('restore_out_checkpoint "${resume_archive}"', action)
-        self.assertIn(" true", action)
+        self.assertIn('restore_out_checkpoint "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true', action)
+        self.assertIn("Fallback checkpoint download failed; continuing with fresh output/ccache", action)
+
+    def test_checkpoint_integrity_failures_return_immediately(self):
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        self.assertIn('if ! zstd -q -t "${archive}"', resume)
+        self.assertIn('Checkpoint archive SHA-256 verification failed.', resume)
+        self.assertIn('Checkpoint manifest compatibility validation failed.', resume)
+
+    def test_static_pin_policy_rejects_mutable_refs(self):
+        workflow = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("@[0-9a-f]{40}", workflow)
+        self.assertNotIn("@v[0-9]", workflow)
 
 
 if __name__ == "__main__":

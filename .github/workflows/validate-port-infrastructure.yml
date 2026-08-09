@@ -44,8 +44,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -R -nE 'uses:[[:space:]]+actions/[^@]+@v[0-9]' .github; then
-            echo "::error::First-party GitHub Actions must be pinned to immutable commit SHAs."
+          invalid_refs="$(grep -R -nE 'uses:[[:space:]]+actions/[^@]+@[^[:space:]#]+' .github \
+            | grep -Ev 'uses:[[:space:]]+actions/[^@]+@[0-9a-f]{40}([[:space:]]*#.*)?$' || true)"
+          if [ -n "${invalid_refs}" ]; then
+            printf '%s\n' "${invalid_refs}"
+            echo "::error::First-party GitHub Actions must be pinned to exact 40-character commit SHAs."
             exit 1
           fi
 
