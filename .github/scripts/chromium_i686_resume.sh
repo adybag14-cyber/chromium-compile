@@ -113,19 +113,29 @@ checkpoint_bundle_is_usable() {
   fi
 
   echo "Validating checkpoint compression stream: ${archive}"
-  zstd -q -t "${archive}"
-
-  if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
-    echo "::warning::Legacy checkpoint has no integrity manifest; accepting once for migration and regenerating metadata on the next checkpoint."
-    return 0
+  if ! zstd -q -t "${archive}"; then
+    echo "::error::Checkpoint compression stream is corrupt: ${archive}"
+    return 1
   fi
 
-  (
+  if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
+    if [ "${ALLOW_LEGACY_CHECKPOINT_VERSION:-}" = "${expected_version}" ]; then
+      echo "::warning::Legacy checkpoint accepted only because ALLOW_LEGACY_CHECKPOINT_VERSION explicitly permits Chromium ${expected_version}; the next checkpoint will regenerate integrity metadata."
+      return 0
+    fi
+    echo "::error::Legacy checkpoint lacks integrity metadata and no version-scoped migration opt-in is active."
+    return 1
+  fi
+
+  if ! (
     cd "${bundle_dir}"
     sha256sum -c "$(basename "${checksum}")"
-  )
+  ); then
+    echo "::error::Checkpoint archive SHA-256 verification failed."
+    return 1
+  fi
 
-  EXPECTED_VERSION="${expected_version}" CURRENT_STAGE="${current_stage}" \
+  if ! EXPECTED_VERSION="${expected_version}" CURRENT_STAGE="${current_stage}" \
   CHECKPOINT_MANIFEST_PATH="${manifest}" python3 - <<'PY'
 import json
 import os
@@ -143,6 +153,10 @@ if stage not in {current, max(1, current - 1)}:
 if manifest.get("target_os") != "linux" or manifest.get("target_cpu") != "x86":
     raise SystemExit("Checkpoint target tuple is not linux/x86")
 PY
+  then
+    echo "::error::Checkpoint manifest compatibility validation failed."
+    return 1
+  fi
 
   local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${expected_version}.tar.xz.sha256"
   if [ -s "${source_checksum_file}" ]; then
@@ -176,6 +190,7 @@ restore_out_checkpoint() {
   local archive="${1:-}"
   local expected_version="${2:-}"
   local current_stage="${3:-1}"
+  local already_validated="${4:-false}"
   mkdir -p "${CHROMIUM_SRC}/out"
 
   if [ -z "${archive}" ] || [ ! -s "${archive}" ]; then
@@ -184,7 +199,9 @@ restore_out_checkpoint() {
     return 0
   fi
 
-  checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
+  if [ "${already_validated}" != "true" ]; then
+    checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
+  fi
   echo "Restoring previous Ninja output checkpoint from ${archive}"
   rm -rf "${OUT_DIR}"
   tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"

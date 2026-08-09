@@ -31,6 +31,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: chromium-i686-port-queue
@@ -42,6 +43,7 @@ env:
   CCACHE_MAX_SIZE: 8G
   MAX_RUNNER_RETRIES: ${{ vars.CHROMIUM_RUNNER_RETRIES || '2' }}
   MAX_COMPILER_STAGES: ${{ vars.CHROMIUM_I686_MAX_STAGES || '20' }}
+  ALLOW_LEGACY_CHECKPOINT_VERSION: ${{ vars.CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION || '' }}
 
 jobs:
   build:
@@ -61,6 +63,8 @@ jobs:
     steps:
       - name: Checkout workflow helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Resolve stage controls
         id: control
