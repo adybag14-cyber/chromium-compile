@@ -214,9 +214,11 @@ compute_port_config_sha256() {
   local major="${version%%.*}"
   {
     chromium_i686_gn_args
-    local file
+    local file relative hash
     while IFS= read -r file; do
-      sha256sum "${file}"
+      relative="${file#${GITHUB_WORKSPACE}/}"
+      hash="$(sha256sum "${file}" | awk '{print $1}')"
+      printf '%s  %s\n' "${hash}" "${relative}"
     done < <(
       {
         find "${GITHUB_WORKSPACE}/patches/common" -maxdepth 1 -type f -print 2>/dev/null || true
@@ -496,13 +498,21 @@ run_build_until_checkpoint() {
       return 0
     fi
 
-    if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ] || [ "${status}" -eq 143 ]; then
+    now=$(date +%s)
+    if [ "${status}" -eq 124 ]         || { { [ "${status}" -eq 137 ] || [ "${status}" -eq 143 ]; } && [ "${now}" -ge "${cutoff}" ]; }; then
       echo "Compiler slice reached the checkpoint cutoff at $(date); preserving work for the next job."
       echo "complete=false" >> "${output_file}"
       echo "failure_class=" >> "${output_file}"
       df -h
       ccache -s || true
       return 0
+    fi
+
+    if [ "${status}" -eq 137 ] || [ "${status}" -eq 143 ]; then
+      echo "complete=false" >> "${output_file}"
+      echo "failure_class=infrastructure" >> "${output_file}"
+      echo "::error::Compiler was terminated before the checkpoint cutoff (status ${status}); treating this as an infrastructure failure."
+      return "${status}"
     fi
 
     failure_class="$(classify_build_failure "${BUILD_LOG}")"

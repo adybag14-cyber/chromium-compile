@@ -60,6 +60,12 @@ class PipelineHardeningTests(unittest.TestCase):
         ):
             self.assertIn(f"[{soname}]", common)
 
+    def test_early_termination_is_not_mistaken_for_checkpoint_timeout(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn('status}" -eq 137', common)
+        self.assertIn('now}" -ge "${cutoff}', common)
+        self.assertIn('failure_class=infrastructure', common)
+
     def test_preflight_checks_i386_host_runtime(self):
         preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
         self.assertIn("install_i386_runtime_libraries", preflight)
