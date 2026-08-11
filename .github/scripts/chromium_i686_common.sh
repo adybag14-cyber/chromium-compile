@@ -167,7 +167,7 @@ ensure_apt_file_i386_metadata() {
       return 1
     fi
   fi
-  if ! sudo apt-file -a i386 update; then
+  if ! sudo apt-file -o APT::Architecture=i386 -o APT::Architectures::=i386 update; then
     I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
     return 1
   fi

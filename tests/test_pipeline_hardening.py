@@ -70,6 +70,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("resolve_i386_package_for_soname()", common)
         self.assertIn("ensure_apt_file_i386_metadata()", common)
         self.assertIn("apt-file --filter-origins Ubuntu -a i386", common)
+        self.assertIn("APT::Architecture=i386", common)
+        self.assertIn("APT::Architectures::=i386", common)
         self.assertIn("Multiple Ubuntu i386 packages provide", common)
         self.assertIn("No installable Ubuntu i386 package provides", common)
         self.assertIn("for round in 1 2 3", common)
