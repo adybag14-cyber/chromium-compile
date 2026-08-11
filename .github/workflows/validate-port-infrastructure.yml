@@ -40,6 +40,12 @@ jobs:
             bash -n "${script}"
           done
 
+      - name: Exercise i386 runtime repair contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_i386_runtime_repair.sh
+
       - name: Reject floating first-party action tags
         shell: bash
         run: |
@@ -101,7 +107,7 @@ jobs:
   validate_i386_runtime:
     name: Validate i386 host runtime
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,6 +121,17 @@ jobs:
           source .github/scripts/chromium_i686_common.sh
           install_i386_runtime_libraries
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-multilib file binutils
+
+          resolve_i386_package_for_soname libQt5Core.so.5
+          test "${I386_RESOLVED_PACKAGE}" = libqt5core5a:i386
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${I386_RESOLVED_PACKAGE}"
+          test -e /usr/lib/i386-linux-gnu/libQt5Core.so.5
+
+          # Exercise generic SONAME-derived discovery with a library deliberately
+          # absent from I386_SONAME_PACKAGES. It must resolve without Contents indexes.
+          resolve_i386_package_for_soname libQt5Widgets.so.5
+          test "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386
+          test ! -e "${RUNNER_TEMP}/chromium-i686-apt-file-i386-ready"
 
           cat > "${RUNNER_TEMP}/i386-canary.c" <<'EOF'
           #include <stdio.h>

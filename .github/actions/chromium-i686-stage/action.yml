@@ -180,7 +180,7 @@ runs:
           report_ninja_resume_state
         fi
         if ! verify_i386_runtime_dependencies; then
-          echo "failure_class=runtime_environment" >> "${GITHUB_OUTPUT}"
+          echo "failure_class=${I386_RUNTIME_REPAIR_FAILURE_CLASS:-runtime_environment}" >> "${GITHUB_OUTPUT}"
           exit 1
         fi
 
