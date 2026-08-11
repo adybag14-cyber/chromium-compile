@@ -124,13 +124,19 @@ jobs:
 
           resolve_i386_package_for_soname libQt5Core.so.5
           test "${I386_RESOLVED_PACKAGE}" = libqt5core5a:i386
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${I386_RESOLVED_PACKAGE}"
+          resolve_i386_package_for_soname libQt5Gui.so.5
+          test "${I386_RESOLVED_PACKAGE}" = libqt5gui5:i386
+          resolve_i386_package_for_soname libQt5Widgets.so.5
+          test "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libqt5widgets5:i386
           test -e /usr/lib/i386-linux-gnu/libQt5Core.so.5
+          test -e /usr/lib/i386-linux-gnu/libQt5Gui.so.5
+          test -e /usr/lib/i386-linux-gnu/libQt5Widgets.so.5
 
           # Exercise generic SONAME-derived discovery with a library deliberately
           # absent from I386_SONAME_PACKAGES. It must resolve without Contents indexes.
-          resolve_i386_package_for_soname libQt5Widgets.so.5
-          test "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386
+          resolve_i386_package_for_soname libQt5Network.so.5
+          test "${I386_RESOLVED_PACKAGE}" = libqt5network5:i386
           test ! -e "${RUNNER_TEMP}/chromium-i686-apt-file-i386-ready"
 
           cat > "${RUNNER_TEMP}/i386-canary.c" <<'EOF'

@@ -61,6 +61,8 @@ class PipelineHardeningTests(unittest.TestCase):
             "libudev.so.1",
             "libasound.so.2",
             "libQt5Core.so.5",
+            "libQt5Gui.so.5",
+            "libQt5Widgets.so.5",
         ):
             self.assertIn(f"[{soname}]", common)
 
@@ -96,6 +98,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("libqt5core5a:i386", workflow)
         self.assertIn("resolve_i386_package_for_soname libQt5Widgets.so.5", workflow)
         self.assertIn("libqt5widgets5:i386", workflow)
+        self.assertIn("resolve_i386_package_for_soname libQt5Network.so.5", workflow)
+        self.assertIn("libqt5network5:i386", workflow)
 
     def test_early_termination_is_not_mistaken_for_checkpoint_timeout(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
