@@ -96,6 +96,7 @@ declare -A I386_SONAME_PACKAGES=(
   [libxkbcommon.so.0]=libxkbcommon0:i386
   [libudev.so.1]=libudev1:i386
   [libasound.so.2]=libasound2:i386
+  [libQt5Core.so.5]=libqt5core5a:i386
 )
 
 install_i386_runtime_libraries() {
@@ -104,6 +105,16 @@ install_i386_runtime_libraries() {
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     "${I386_RUNTIME_PACKAGES[@]}"
   verify_i386_host_runtime
+}
+
+i386_runtime_package_is_baseline() {
+  local needle="${1:?package is required}" package
+  for package in "${I386_RUNTIME_PACKAGES[@]}"; do
+    if [ "${package}" = "${needle}" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 verify_i386_host_runtime() {
@@ -123,8 +134,13 @@ verify_i386_host_runtime() {
   fi
 
   for soname in "${!I386_SONAME_PACKAGES[@]}"; do
-    if [ ! -e "/lib/i386-linux-gnu/${soname}" ]         && [ ! -e "/usr/lib/i386-linux-gnu/${soname}" ]; then
-      echo "::error::Required i386 runtime SONAME is not installed: ${soname}"
+    package="${I386_SONAME_PACKAGES[${soname}]}"
+    if ! i386_runtime_package_is_baseline "${package}"; then
+      continue
+    fi
+    if [ ! -e "/lib/i386-linux-gnu/${soname}" ] \
+        && [ ! -e "/usr/lib/i386-linux-gnu/${soname}" ]; then
+      echo "::error::Required baseline i386 runtime SONAME is not installed: ${soname}"
       missing=1
     fi
   done
@@ -135,38 +151,151 @@ verify_i386_host_runtime() {
   echo "Verified required i386 packages, loader, and runtime SONAME files."
 }
 
-repair_missing_i386_runtime_for_binary() {
-  local binary="${1:?binary is required}"
-  local ldd_output
-  ldd_output="$(ldd "${binary}" 2>&1 || true)"
-  printf '%s\n' "${ldd_output}"
+I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+I386_RESOLVED_PACKAGE=""
 
-  mapfile -t missing_sonames < <(awk '/=> not found/ {print $1}' <<<"${ldd_output}" | sort -u)
-  if [ "${#missing_sonames[@]}" -eq 0 ]; then
+ensure_apt_file_i386_metadata() {
+  local marker="${RUNNER_TEMP:-/tmp}/chromium-i686-apt-file-i386-ready"
+  if [ -s "${marker}" ]; then
     return 0
   fi
 
-  local -a packages=()
-  local soname package
-  for soname in "${missing_sonames[@]}"; do
-    package="${I386_SONAME_PACKAGES[${soname}]:-}"
-    if [ -z "${package}" ]; then
-      echo "::error::No automatic i386 package mapping is known for missing SONAME ${soname}."
+  echo "Preparing apt-file metadata for automatic i386 SONAME resolution."
+  if ! command -v apt-file >/dev/null 2>&1; then
+    if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apt-file; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
       return 1
     fi
-    packages+=("${package}")
+  fi
+  if ! sudo apt-file update; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+    return 1
+  fi
+  printf 'ready\n' > "${marker}"
+}
+
+resolve_i386_package_for_soname() {
+  local soname="${1:?SONAME is required}"
+  I386_RESOLVED_PACKAGE="${I386_SONAME_PACKAGES[${soname}]:-}"
+  if [ -n "${I386_RESOLVED_PACKAGE}" ]; then
+    echo "Known i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE}"
+    return 0
+  fi
+
+  if ! ensure_apt_file_i386_metadata; then
+    return 1
+  fi
+
+  local path candidate
+  local -a candidates=()
+  for path in \
+    "usr/lib/i386-linux-gnu/${soname}" \
+    "lib/i386-linux-gnu/${soname}" \
+    "usr/lib32/${soname}" \
+    "lib32/${soname}"; do
+    while IFS= read -r candidate; do
+      [ -n "${candidate}" ] || continue
+      candidate="${candidate%:i386}"
+      if apt-cache show "${candidate}:i386" >/dev/null 2>&1; then
+        candidates+=("${candidate}:i386")
+      fi
+    done < <(apt-file --filter-origins Ubuntu -a i386 -l -F search "${path}" 2>/dev/null || true)
   done
-  mapfile -t packages < <(printf '%s\n' "${packages[@]}" | sort -u)
-  echo "Repairing missing i386 runtime dependencies: ${packages[*]}"
-  sudo apt-get update
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+
+  mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
+  if [ "${#candidates[@]}" -eq 1 ]; then
+    I386_RESOLVED_PACKAGE="${candidates[0]}"
+    echo "Discovered i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE}"
+    return 0
+  fi
+
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+  if [ "${#candidates[@]}" -eq 0 ]; then
+    echo "::error::No installable Ubuntu i386 package provides ${soname}; a fresh runner retry will not help."
+  else
+    echo "::error::Multiple Ubuntu i386 packages provide ${soname}; refusing to choose one automatically: ${candidates[*]}"
+  fi
+  return 1
+}
+
+repair_missing_i386_runtime_for_binary() {
+  local binary="${1:?binary is required}"
+  local ldd_output soname package round
+  local -a missing_sonames=() packages=()
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=runtime_environment
+
+  for round in 1 2 3; do
+    ldd_output="$(ldd "${binary}" 2>&1 || true)"
+    printf '%s\n' "${ldd_output}"
+    mapfile -t missing_sonames < <(awk '/=> not found/ {print $1}' <<<"${ldd_output}" | sort -u)
+    if [ "${#missing_sonames[@]}" -eq 0 ]; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+      return 0
+    fi
+
+    packages=()
+    for soname in "${missing_sonames[@]}"; do
+      if ! resolve_i386_package_for_soname "${soname}"; then
+        return 1
+      fi
+      packages+=("${I386_RESOLVED_PACKAGE}")
+    done
+    mapfile -t packages < <(printf '%s\n' "${packages[@]}" | sort -u)
+    echo "Repair round ${round}: installing i386 runtime dependencies: ${packages[*]}"
+    if ! sudo apt-get update; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+      return 1
+    fi
+    if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+      return 1
+    fi
+  done
 
   ldd_output="$(ldd "${binary}" 2>&1 || true)"
   printf '%s\n' "${ldd_output}"
-  ! grep -q '=> not found' <<<"${ldd_output}"
+  if grep -q '=> not found' <<<"${ldd_output}"; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+    echo "::error::The ELF32 runtime is still unresolved after three package-repair rounds; a fresh runner retry will not help."
+    return 1
+  fi
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+}
+
+repair_i386_runtime_from_build_log() {
+  local log_file="${1:?build log is required}"
+  local reported path file_output
+  local repaired=0
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=runtime_environment
+
+  while IFS= read -r reported; do
+    [ -n "${reported}" ] || continue
+    case "${reported}" in
+      /*) path="${reported}" ;;
+      out/*) path="${CHROMIUM_SRC}/${reported}" ;;
+      ./*) path="${OUT_DIR}/${reported#./}" ;;
+      *) path="${OUT_DIR}/${reported}" ;;
+    esac
+    if [ ! -x "${path}" ]; then
+      continue
+    fi
+    file_output="$(file "${path}" 2>/dev/null || true)"
+    if ! grep -Eq 'ELF 32-bit.*Intel (80386|i386)' <<<"${file_output}"; then
+      continue
+    fi
+    echo "Repairing runtime for failed ELF32 build tool reported by Ninja: ${path}"
+    repair_missing_i386_runtime_for_binary "${path}" || return 1
+    repaired=1
+  done < <(awk -F': error while loading shared libraries:' 'NF > 1 {print $1}' "${log_file}" | sort -u)
+
+  if [ "${repaired}" -eq 1 ]; then
+    return 0
+  fi
+  return 2
 }
 
 verify_or_repair_i386_runtime_dependencies() {
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
   if [ ! -d "${OUT_DIR}" ]; then
     return 0
   fi
@@ -178,7 +307,7 @@ verify_or_repair_i386_runtime_dependencies() {
     if grep -Eq 'ELF 32-bit.*Intel (80386|i386)' <<<"${file_output}"; then
       candidates+=("${binary}")
     fi
-  done < <(find "${OUT_DIR}" -maxdepth 1 -type f -perm -111 -print0)
+  done < <(find "${OUT_DIR}" -maxdepth 2 -type f -perm -111 -print0)
 
   if [ "${#candidates[@]}" -eq 0 ]; then
     echo "No generated ELF32 build-time executables are present yet."
@@ -190,6 +319,7 @@ verify_or_repair_i386_runtime_dependencies() {
     echo "Runtime check: ${binary}"
     repair_missing_i386_runtime_for_binary "${binary}" || return 1
   done
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
 }
 
 chromium_i686_gn_args() {
@@ -441,7 +571,7 @@ run_build_until_checkpoint() {
   local checkpoint_minutes="${JOB_CHECKPOINT_MINUTES:-330}"
   local cutoff=$((started_at + checkpoint_minutes * 60))
   local now remaining status failure_class pass pass_log_start pass_log
-  local repaired_runtime=false
+  local runtime_repairs=0
 
   if ! ensure_build_disk_space 20; then
     echo "complete=false" >> "${output_file}"
@@ -454,7 +584,7 @@ run_build_until_checkpoint() {
   export CCACHE_DIR
   : > "${BUILD_LOG}"
 
-  for pass in 1 2; do
+  for pass in 1 2 3; do
     now=$(date +%s)
     remaining=$((cutoff - now))
     if [ "${remaining}" -le 300 ]; then
@@ -507,12 +637,20 @@ run_build_until_checkpoint() {
     failure_class="$(classify_build_failure "${pass_log}")"
     echo "Failure class: ${failure_class}"
 
-    if [ "${failure_class}" = "runtime_environment" ] && [ "${repaired_runtime}" = "false" ]; then
+    if [ "${failure_class}" = "runtime_environment" ] && [ "${runtime_repairs}" -lt 2 ]; then
       echo "::warning::A generated ELF32 tool is missing host runtime libraries; attempting in-job repair before consuming a runner retry."
-      if verify_or_repair_i386_runtime_dependencies; then
-        repaired_runtime=true
+      local repair_status=0
+      if repair_i386_runtime_from_build_log "${pass_log}"; then
+        runtime_repairs=$((runtime_repairs + 1))
+        continue
+      else
+        repair_status=$?
+      fi
+      if [ "${repair_status}" -ne 1 ] && verify_or_repair_i386_runtime_dependencies; then
+        runtime_repairs=$((runtime_repairs + 1))
         continue
       fi
+      failure_class="${I386_RUNTIME_REPAIR_FAILURE_CLASS:-${failure_class}}"
     fi
 
     echo "complete=false" >> "${output_file}"

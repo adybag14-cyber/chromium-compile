@@ -65,7 +65,7 @@ Compiler failures are classified before the workflow decides whether a fresh run
 - `runtime_environment`: a generated ELF32 tool cannot load a host shared library. Known SONAMEs are repaired in-place first; an unrepaired environment failure may consume a runner retry.
 - `deterministic_build`: compiler, linker, GN, API or source incompatibilities. These do **not** consume fresh-runner retries and should become maintenance issues immediately.
 
-When adding a new known host runtime dependency, update both `I386_RUNTIME_PACKAGES` and `I386_SONAME_PACKAGES` in `.github/scripts/chromium_i686_common.sh`. The validation workflow must remain green on `ubuntu-22.04`.
+Known host runtime dependencies live in `I386_SONAME_PACKAGES` in `.github/scripts/chromium_i686_common.sh`; baseline libraries also live in `I386_RUNTIME_PACKAGES`. Unknown SONAMEs are resolved lazily through Ubuntu i386 `apt-file` metadata only when there is exactly one installable provider. Add a permanent mapping after a dependency is observed in production, and keep the generic resolver/canary green on `ubuntu-22.04`.
 
 New checkpoints are a three-file bundle:
 

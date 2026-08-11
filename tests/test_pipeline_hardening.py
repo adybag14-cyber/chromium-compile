@@ -60,8 +60,40 @@ class PipelineHardeningTests(unittest.TestCase):
             "libxkbcommon.so.0",
             "libudev.so.1",
             "libasound.so.2",
+            "libQt5Core.so.5",
         ):
             self.assertIn(f"[{soname}]", common)
+
+
+    def test_runtime_repair_can_discover_future_i386_sonames(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("resolve_i386_package_for_soname()", common)
+        self.assertIn("ensure_apt_file_i386_metadata()", common)
+        self.assertIn("apt-file --filter-origins Ubuntu -a i386", common)
+        self.assertIn("Multiple Ubuntu i386 packages provide", common)
+        self.assertIn("No installable Ubuntu i386 package provides", common)
+        self.assertIn("for round in 1 2 3", common)
+        self.assertIn("i386_runtime_package_is_baseline()", common)
+        self.assertIn('if ! i386_runtime_package_is_baseline "${package}"', common)
+
+    def test_runtime_failure_uses_exact_failed_tool_before_scanning(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("repair_i386_runtime_from_build_log()", common)
+        self.assertIn("error while loading shared libraries", common)
+        self.assertIn('repair_i386_runtime_from_build_log "${pass_log}"', common)
+        self.assertIn("for pass in 1 2 3", common)
+        self.assertIn('runtime_repairs}" -lt 2', common)
+
+    def test_prepare_propagates_runtime_repair_failure_class(self):
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        self.assertIn("I386_RUNTIME_REPAIR_FAILURE_CLASS:-runtime_environment", action)
+
+    def test_linux_ci_exercises_generic_soname_discovery(self):
+        workflow = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("resolve_i386_package_for_soname libQt5Core.so.5", workflow)
+        self.assertIn("libqt5core5a:i386", workflow)
+        self.assertIn("resolve_i386_package_for_soname libQt5Widgets.so.5", workflow)
+        self.assertIn("libqt5widgets5:i386", workflow)
 
     def test_early_termination_is_not_mistaken_for_checkpoint_timeout(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
