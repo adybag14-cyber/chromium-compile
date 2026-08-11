@@ -16,16 +16,16 @@ ensure_apt_file_i386_metadata() { return 0; }
 
 apt-file() {
   case "$*" in
-    *libUnique.so*) printf '%s\n' libunique ;;
-    *libAmbiguous.so*) printf '%s\n' libalpha libbeta ;;
-    *libUnavailable.so*) printf '%s\n' libunavailable ;;
+    *libMysteryProvider.so.7*) printf '%s\n' libunique ;;
+    *libMysteryAmbiguous.so.7*) printf '%s\n' libalpha libbeta ;;
+    *libMysteryUnavailable.so.7*) printf '%s\n' libunavailable ;;
   esac
 }
 
 apt-cache() {
   [ "${1:-}" = policy ] || return 2
   case "${2:-}" in
-    libunique:i386|libalpha:i386|libbeta:i386)
+    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386)
       printf '%s\n' "${2}:" '  Candidate: 1.0' ;;
     libunavailable:i386)
       printf '%s\n' "${2}:" '  Candidate: (none)' ;;
@@ -34,18 +34,21 @@ apt-cache() {
   esac
 }
 
-resolve_i386_package_for_soname libUnique.so
-[ "${I386_RESOLVED_PACKAGE}" = libunique:i386 ] || fail "unique provider was not selected"
+resolve_i386_package_for_soname libQt5Widgets.so.5
+[ "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386 ] || fail "derived provider was not selected"
+
+resolve_i386_package_for_soname libMysteryProvider.so.7
+[ "${I386_RESOLVED_PACKAGE}" = libunique:i386 ] || fail "apt-file fallback provider was not selected"
 
 set +e
-resolve_i386_package_for_soname libAmbiguous.so >/dev/null 2>&1
+resolve_i386_package_for_soname libMysteryAmbiguous.so.7 >/dev/null 2>&1
 status=$?
 set -e
 [ "${status}" -eq 1 ] || fail "ambiguous provider should fail"
 [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] || fail "ambiguous provider should be deterministic"
 
 set +e
-resolve_i386_package_for_soname libUnavailable.so >/dev/null 2>&1
+resolve_i386_package_for_soname libMysteryUnavailable.so.7 >/dev/null 2>&1
 status=$?
 set -e
 [ "${status}" -eq 1 ] || fail "unavailable provider should fail"

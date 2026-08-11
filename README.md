@@ -275,7 +275,7 @@ The staged builder now treats the GitHub-hosted runner as an untrusted, replacea
 - Restores verify the compression stream, checksum, target/version/stage compatibility, source/toolchain/configuration identity, and extracted `args.gn` / `build.ninja` hashes before reuse.
 - Legacy checkpoints without manifests are rejected by default. A single in-flight Chromium version can be temporarily opted in with `CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION=<version>`; the next checkpoint automatically gains the new metadata.
 - The validation workflow performs a real 32-bit compile-and-execute canary on Ubuntu 22.04.
-- Missing generated-tool SONAMEs use a controlled i386 resolver: known libraries use pinned package mappings, while unknown libraries are discovered lazily from Ubuntu apt-file metadata only when exactly one installable i386 provider exists.
+- Missing generated-tool SONAMEs use a controlled i386 resolver: known libraries use pinned package mappings, while unknown libraries first use verified Debian/Ubuntu SONAME-to-package naming candidates, with Ubuntu i386 apt-file metadata reserved as a last-resort fallback when exactly one installable provider exists.
 - First-party GitHub Actions are upgraded and pinned to immutable commit SHAs.
 - Disk-space guards trim expendable caches before compilation/checkpoint creation and fail before a near-full runner can destroy resumable state.
 - Every compiler stage writes a compact GitHub job summary with progress, checkpoint size, failure classification, free disk and ccache statistics.

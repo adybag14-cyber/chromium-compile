@@ -176,6 +176,28 @@ ensure_apt_file_i386_metadata() {
   printf 'ready\n' > "${marker}"
 }
 
+i386_package_has_candidate() {
+  local package="${1:?package is required}"
+  apt-cache policy "${package}" 2>/dev/null \
+    | awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}'
+}
+
+guess_i386_packages_for_soname() {
+  local soname="${1:?SONAME is required}"
+  local stem lower major=""
+  stem="${soname%%.so*}"
+  lower="${stem,,}"
+  if [[ "${soname}" =~ \.so\.([0-9]+) ]]; then
+    major="${BASH_REMATCH[1]}"
+  fi
+
+  if [ -n "${major}" ]; then
+    printf '%s\n' "${lower}${major}:i386" "${lower}-${major}:i386"
+  else
+    printf '%s\n' "${lower}:i386"
+  fi
+}
+
 resolve_i386_package_for_soname() {
   local soname="${1:?SONAME is required}"
   I386_RESOLVED_PACKAGE="${I386_SONAME_PACKAGES[${soname}]:-}"
@@ -184,12 +206,27 @@ resolve_i386_package_for_soname() {
     return 0
   fi
 
+  local candidate
+  local -a candidates=() guessed=()
+  mapfile -t guessed < <(guess_i386_packages_for_soname "${soname}" | sort -u)
+  for candidate in "${guessed[@]}"; do
+    if i386_package_has_candidate "${candidate}"; then
+      candidates+=("${candidate}")
+    fi
+  done
+  mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
+  if [ "${#candidates[@]}" -eq 1 ]; then
+    I386_RESOLVED_PACKAGE="${candidates[0]}"
+    echo "Derived i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE}"
+    return 0
+  fi
+
   if ! ensure_apt_file_i386_metadata; then
     return 1
   fi
 
-  local path candidate
-  local -a candidates=()
+  local path
+  candidates=()
   for path in \
     "usr/lib/i386-linux-gnu/${soname}" \
     "lib/i386-linux-gnu/${soname}" \
@@ -198,8 +235,7 @@ resolve_i386_package_for_soname() {
     while IFS= read -r candidate; do
       [ -n "${candidate}" ] || continue
       candidate="${candidate%:i386}"
-      if apt-cache policy "${candidate}:i386" 2>/dev/null \
-          | awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}'; then
+      if i386_package_has_candidate "${candidate}:i386"; then
         candidates+=("${candidate}:i386")
       fi
     done < <(apt-file --filter-origins Ubuntu -a i386 -l -F search "${path}" 2>/dev/null || true)

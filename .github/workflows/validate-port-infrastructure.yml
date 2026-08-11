@@ -127,10 +127,11 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${I386_RESOLVED_PACKAGE}"
           test -e /usr/lib/i386-linux-gnu/libQt5Core.so.5
 
-          # Exercise the generic apt-file fallback with a SONAME that is deliberately
-          # not in I386_SONAME_PACKAGES. This guards future Chromium host-tool drift.
+          # Exercise generic SONAME-derived discovery with a library deliberately
+          # absent from I386_SONAME_PACKAGES. It must resolve without Contents indexes.
           resolve_i386_package_for_soname libQt5Widgets.so.5
           test "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386
+          test ! -e "${RUNNER_TEMP}/chromium-i686-apt-file-i386-ready"
 
           cat > "${RUNNER_TEMP}/i386-canary.c" <<'EOF'
           #include <stdio.h>
