@@ -96,6 +96,7 @@ declare -A I386_SONAME_PACKAGES=(
   [libxkbcommon.so.0]=libxkbcommon0:i386
   [libudev.so.1]=libudev1:i386
   [libasound.so.2]=libasound2:i386
+  # Qt is intentionally lazy: generated build tools pull it in only when ldd proves it is needed.
   [libQt5Core.so.5]=libqt5core5a:i386
 )
 
@@ -152,6 +153,7 @@ verify_i386_host_runtime() {
 }
 
 I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+I386_RUNTIME_REPAIR_CHANGED=false
 I386_RESOLVED_PACKAGE=""
 
 ensure_apt_file_i386_metadata() {
@@ -196,7 +198,8 @@ resolve_i386_package_for_soname() {
     while IFS= read -r candidate; do
       [ -n "${candidate}" ] || continue
       candidate="${candidate%:i386}"
-      if apt-cache show "${candidate}:i386" >/dev/null 2>&1; then
+      if apt-cache policy "${candidate}:i386" 2>/dev/null \
+          | awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}'; then
         candidates+=("${candidate}:i386")
       fi
     done < <(apt-file --filter-origins Ubuntu -a i386 -l -F search "${path}" 2>/dev/null || true)
@@ -220,9 +223,10 @@ resolve_i386_package_for_soname() {
 
 repair_missing_i386_runtime_for_binary() {
   local binary="${1:?binary is required}"
-  local ldd_output soname package round
-  local -a missing_sonames=() packages=()
+  local ldd_output soname package round current_missing previous_missing=""
+  local -a missing_sonames=() packages=() to_install=()
   I386_RUNTIME_REPAIR_FAILURE_CLASS=runtime_environment
+  I386_RUNTIME_REPAIR_CHANGED=false
 
   for round in 1 2 3; do
     ldd_output="$(ldd "${binary}" 2>&1 || true)"
@@ -233,6 +237,14 @@ repair_missing_i386_runtime_for_binary() {
       return 0
     fi
 
+    current_missing="$(printf '%s\n' "${missing_sonames[@]}")"
+    if [ -n "${previous_missing}" ] && [ "${current_missing}" = "${previous_missing}" ]; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+      echo "::error::Repair round ${round}: unresolved SONAME set did not change; stopping instead of repeating identical package installs."
+      return 1
+    fi
+    previous_missing="${current_missing}"
+
     packages=()
     for soname in "${missing_sonames[@]}"; do
       if ! resolve_i386_package_for_soname "${soname}"; then
@@ -241,15 +253,31 @@ repair_missing_i386_runtime_for_binary() {
       packages+=("${I386_RESOLVED_PACKAGE}")
     done
     mapfile -t packages < <(printf '%s\n' "${packages[@]}" | sort -u)
-    echo "Repair round ${round}: installing i386 runtime dependencies: ${packages[*]}"
-    if ! sudo apt-get update; then
+
+    to_install=()
+    for package in "${packages[@]}"; do
+      if ! dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
+        to_install+=("${package}")
+      fi
+    done
+    if [ "${#to_install[@]}" -eq 0 ]; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+      echo "::error::Resolved provider packages are already installed but the required SONAMEs are still missing; a fresh runner retry will not help."
+      return 1
+    fi
+
+    echo "Repair round ${round}: validating i386 runtime dependencies: ${to_install[*]}"
+    if ! apt-get -s install -y --no-install-recommends "${to_install[@]}" >/dev/null 2>&1; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+      echo "::error::Resolved i386 provider packages cannot be installed together on this runner image; a fresh runner retry will not help."
+      return 1
+    fi
+    echo "Repair round ${round}: installing i386 runtime dependencies: ${to_install[*]}"
+    if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${to_install[@]}"; then
       I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
       return 1
     fi
-    if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"; then
-      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
-      return 1
-    fi
+    I386_RUNTIME_REPAIR_CHANGED=true
   done
 
   ldd_output="$(ldd "${binary}" 2>&1 || true)"
@@ -262,11 +290,14 @@ repair_missing_i386_runtime_for_binary() {
   I386_RUNTIME_REPAIR_FAILURE_CLASS=""
 }
 
+# Returns 0 when at least one host package was installed, 1 when repair failed,
+# and 2 when the log named no repairable ELF32 tool or no host change was needed.
 repair_i386_runtime_from_build_log() {
   local log_file="${1:?build log is required}"
   local reported path file_output
   local repaired=0
   I386_RUNTIME_REPAIR_FAILURE_CLASS=runtime_environment
+  I386_RUNTIME_REPAIR_CHANGED=false
 
   while IFS= read -r reported; do
     [ -n "${reported}" ] || continue
@@ -284,8 +315,10 @@ repair_i386_runtime_from_build_log() {
       continue
     fi
     echo "Repairing runtime for failed ELF32 build tool reported by Ninja: ${path}"
-    repair_missing_i386_runtime_for_binary "${path}" || return 1
-    repaired=1
+    repair_missing_i386_runtime_for_binary "${path}" </dev/null || return 1
+    if [ "${I386_RUNTIME_REPAIR_CHANGED}" = "true" ]; then
+      repaired=1
+    fi
   done < <(awk -F': error while loading shared libraries:' 'NF > 1 {print $1}' "${log_file}" | sort -u)
 
   if [ "${repaired}" -eq 1 ]; then
@@ -296,6 +329,8 @@ repair_i386_runtime_from_build_log() {
 
 verify_or_repair_i386_runtime_dependencies() {
   I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  I386_RUNTIME_REPAIR_CHANGED=false
+  local changed_any=false
   if [ ! -d "${OUT_DIR}" ]; then
     return 0
   fi
@@ -317,8 +352,12 @@ verify_or_repair_i386_runtime_dependencies() {
   echo "Checking ${#candidates[@]} generated ELF32 build-time executable(s)."
   for binary in "${candidates[@]}"; do
     echo "Runtime check: ${binary}"
-    repair_missing_i386_runtime_for_binary "${binary}" || return 1
+    repair_missing_i386_runtime_for_binary "${binary}" </dev/null || return 1
+    if [ "${I386_RUNTIME_REPAIR_CHANGED}" = "true" ]; then
+      changed_any=true
+    fi
   done
+  I386_RUNTIME_REPAIR_CHANGED="${changed_any}"
   I386_RUNTIME_REPAIR_FAILURE_CLASS=""
 }
 
@@ -646,9 +685,13 @@ run_build_until_checkpoint() {
       else
         repair_status=$?
       fi
-      if [ "${repair_status}" -ne 1 ] && verify_or_repair_i386_runtime_dependencies; then
-        runtime_repairs=$((runtime_repairs + 1))
-        continue
+      if [ "${repair_status}" -eq 2 ]; then
+        if verify_or_repair_i386_runtime_dependencies; then
+          if [ "${I386_RUNTIME_REPAIR_CHANGED}" = "true" ]; then
+            runtime_repairs=$((runtime_repairs + 1))
+            continue
+          fi
+        fi
       fi
       failure_class="${I386_RUNTIME_REPAIR_FAILURE_CLASS:-${failure_class}}"
     fi

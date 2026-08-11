@@ -40,6 +40,12 @@ jobs:
             bash -n "${script}"
           done
 
+      - name: Exercise i386 runtime repair contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_i386_runtime_repair.sh
+
       - name: Reject floating first-party action tags
         shell: bash
         run: |
