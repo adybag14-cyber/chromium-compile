@@ -97,7 +97,10 @@ declare -A I386_SONAME_PACKAGES=(
   [libudev.so.1]=libudev1:i386
   [libasound.so.2]=libasound2:i386
   # Qt is intentionally lazy: generated build tools pull it in only when ldd proves it is needed.
+  # All three mappings below were observed together in Chromium 151's libqt5_shim.so.
   [libQt5Core.so.5]=libqt5core5a:i386
+  [libQt5Gui.so.5]=libqt5gui5:i386
+  [libQt5Widgets.so.5]=libqt5widgets5:i386
 )
 
 install_i386_runtime_libraries() {
