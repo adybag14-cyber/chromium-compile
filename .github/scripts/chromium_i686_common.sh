@@ -14,13 +14,25 @@ BUILD_LOG="${WORKSPACE}/build-stage.log"
 export CCACHE_DIR="${CCACHE_DIR:-${WORKSPACE}/.ccache}"
 export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
 
+CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS="${CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS:-300}"
+CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS="${CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS:-180}"
+CHROMIUM_I686_SWAP_TIMEOUT_SECONDS="${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS:-180}"
+
+bounded_rm_rf() {
+  timeout -k 15s "${CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS}s" rm -rf -- "$@"
+}
+
+bounded_sudo_rm_rf() {
+  timeout -k 15s "${CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS}s" sudo rm -rf -- "$@"
+}
+
 maximize_runner_disk_space() {
   echo "=== Disk space BEFORE cleanup ==="
   df -h
-  sudo rm -rf /usr/share/dotnet
-  sudo rm -rf /usr/local/lib/android
-  sudo rm -rf /opt/ghc
-  sudo rm -rf /opt/hostedtoolcache/CodeQL
+  bounded_sudo_rm_rf /usr/share/dotnet || echo "::warning::Timed out removing /usr/share/dotnet; later disk guards will decide whether the runner is usable."
+  bounded_sudo_rm_rf /usr/local/lib/android || echo "::warning::Timed out removing /usr/local/lib/android; later disk guards will decide whether the runner is usable."
+  bounded_sudo_rm_rf /opt/ghc || echo "::warning::Timed out removing /opt/ghc; later disk guards will decide whether the runner is usable."
+  bounded_sudo_rm_rf /opt/hostedtoolcache/CodeQL || echo "::warning::Timed out removing CodeQL cache; later disk guards will decide whether the runner is usable."
   bounded_sudo_apt_get purge -y '^mysql-' '^mongodb-' '^postgresql-' '^dotnet-' '^android-sdk-' || true
   bounded_sudo_apt_get autoremove -y || true
   timeout -k 10s 60s sudo apt-get clean || true
@@ -36,7 +48,7 @@ ensure_swap() {
     return 0
   fi
   echo "Adding 8G swap file to reduce OOM risk during Chromium linking..."
-  sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
+  timeout -k 15s "${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS}s" sudo fallocate -l 8G /swapfile || timeout -k 15s "${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS}s" sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
   sudo chmod 600 /swapfile
   sudo mkswap /swapfile
   sudo swapon /swapfile
@@ -626,7 +638,7 @@ ensure_build_disk_space() {
   ccache --max-size=2G || true
   ccache --cleanup || true
   rm -f "${WORKSPACE}/.chromium-source-cache"/chromium-*.tar.xz || true
-  sudo apt-get clean || true
+  timeout -k 10s 60s sudo apt-get clean || true
 
   available="$(available_disk_gb "${WORKSPACE}")"
   echo "Available disk space after cleanup: ${available} GiB."
@@ -689,7 +701,7 @@ write_stage_summary() {
 }
 
 install_depot_tools() {
-  rm -rf "${DEPOT_TOOLS}"
+  bounded_rm_rf "${DEPOT_TOOLS}"
   git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "${DEPOT_TOOLS}"
   echo "${DEPOT_TOOLS}" >> "${GITHUB_PATH}"
   echo "${DEPOT_TOOLS}/.cipd_bin" >> "${GITHUB_PATH}"
@@ -721,7 +733,7 @@ prepare_chromium_source() {
   local version="${1:?version is required}"
   local cache_dir="${WORKSPACE}/.chromium-source-cache"
   local tarball="${cache_dir}/chromium-${version}.tar.xz"
-  rm -rf "${CHROMIUM_SRC}"
+  bounded_rm_rf "${CHROMIUM_SRC}"
   mkdir -p "${CHROMIUM_SRC}" "${cache_dir}"
   if [ -s "${tarball}" ]; then
     echo "Using cached Chromium ${version} source tarball at ${tarball}"

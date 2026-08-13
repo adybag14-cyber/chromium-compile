@@ -72,7 +72,7 @@ Baseline host requirements live in `I386_BASELINE_SONAMES`; package names are re
 
 `CHROMIUM_I686_RUNNER` controls the runner used by compatibility preflight and staged compilation. Leave it on the currently proven LTS until the validation matrix is green on the replacement. `ubuntu-latest` is intentionally included as an early-warning sentinel: when GitHub moves it to a newer LTS, the scheduled matrix starts testing that image automatically. A scheduled matrix failure opens or updates `[i686-port] Ubuntu LTS compatibility drift`, so runner drift becomes an explicit maintenance item rather than a silently red workflow.
 
-No dependency-discovery operation is allowed to consume a compiler stage. APT operations have a global timeout, `apt-file` metadata refresh has a shorter discovery timeout, individual content searches are separately bounded, and discovery exhaustion is treated as deterministic maintenance work rather than repeated on fresh runners.
+No dependency-discovery or large cleanup operation is allowed to consume a compiler stage. SDK-tree deletion, source/output replacement, and swap creation are time-bounded; cleanup timeouts are either best-effort with later disk guards or classified as runner failures. APT operations have a global timeout, `apt-file` metadata refresh has a shorter discovery timeout, individual content searches are separately bounded, and discovery exhaustion is treated as deterministic maintenance work rather than repeated on fresh runners.
 
 New checkpoints are a three-file bundle:
 

@@ -98,6 +98,17 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("set +e", resolver)
         self.assertNotIn("set -e", resolver)
 
+    def test_large_cleanup_and_swap_operations_are_bounded(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_SWAP_TIMEOUT_SECONDS", common)
+        self.assertIn("bounded_sudo_rm_rf /usr/local/lib/android", common)
+        self.assertIn('bounded_rm_rf "${CHROMIUM_SRC}"', common)
+        self.assertIn('bounded_rm_rf "${OUT_DIR}"', resume)
+        self.assertNotIn("sudo rm -rf /usr/local/lib/android", common)
+
     def test_runtime_discovery_and_apt_operations_are_bounded(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn("CHROMIUM_I686_APT_TIMEOUT_SECONDS", common)
