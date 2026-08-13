@@ -10,6 +10,8 @@ on:
       - "support/**"
       - "tests/**"
   workflow_dispatch:
+  schedule:
+    - cron: "23 6 * * 1"
 
 permissions:
   contents: read
@@ -106,7 +108,7 @@ jobs:
 
   validate_i386_runtime:
     name: Validate i386 host runtime
-    runs-on: ubuntu-22.04
+    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 25
     steps:
       - name: Checkout
@@ -152,3 +154,55 @@ jobs:
           ldd "${RUNNER_TEMP}/i386-canary"
           ! ldd "${RUNNER_TEMP}/i386-canary" | grep -q 'not found'
           "${RUNNER_TEMP}/i386-canary"
+
+  validate_lts_compatibility:
+    name: LTS i386 compatibility (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Probe release-local i386 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          install_i386_runtime_libraries
+          bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils
+
+          cat > "${RUNNER_TEMP}/lts-i386-canary.c" <<'EOF'
+          #include <stdio.h>
+          int main(void) {
+            puts("lts i386 compatibility ok");
+            return 0;
+          }
+          EOF
+          gcc -m32 "${RUNNER_TEMP}/lts-i386-canary.c" -o "${RUNNER_TEMP}/lts-i386-canary"
+          is_i386_host_executable "${RUNNER_TEMP}/lts-i386-canary"
+          ! ldd "${RUNNER_TEMP}/lts-i386-canary" | grep -q 'not found'
+          "${RUNNER_TEMP}/lts-i386-canary"
+
+      - name: Assert shared objects are not host executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          cat > "${RUNNER_TEMP}/shared.c" <<'EOF'
+          int chromium_i686_shared_probe(void) { return 42; }
+          EOF
+          gcc -m32 -shared -fPIC "${RUNNER_TEMP}/shared.c" -o "${RUNNER_TEMP}/libshared-probe.so"
+          file "${RUNNER_TEMP}/libshared-probe.so"
+          if is_i386_host_executable "${RUNNER_TEMP}/libshared-probe.so"; then
+            echo "::error::ELF32 shared object was incorrectly classified as a host build executable."
+            exit 1
+          fi

@@ -48,7 +48,7 @@ env:
 jobs:
   build:
     name: Build Stage ${{ inputs.stage || '1' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 360
     outputs:
       stage: ${{ steps.control.outputs.stage }}

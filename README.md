@@ -91,27 +91,11 @@ After these fixes, the final build resumed with only 21 operations remaining.
 
 ## i386 host requirements
 
-Some Chromium build tools generated near the end of compilation are themselves 32-bit executables. GitHub's 64-bit Ubuntu runner therefore installs:
+Some Chromium build tools generated near the end of compilation are themselves 32-bit executables. The pipeline defines the baseline as required **SONAMEs**, not Ubuntu package names. On each runner release it resolves those SONAMEs to installable `:i386` packages, which allows package renames across LTS releases without changing Chromium's ABI contract.
 
-```text
-libc6:i386
-libgcc-s1:i386
-libstdc++6:i386
-libglib2.0-0:i386
-libexpat1:i386
-libnspr4:i386
-libnss3:i386
-libdbus-1-3:i386
-libx11-6:i386
-libxext6:i386
-libgbm1:i386
-libxcb1:i386
-libxkbcommon0:i386
-libudev1:i386
-libasound2:i386
-```
+Only actual ELF32 executables/PIE executables are host-runtime checked. ELF32 shared objects such as Qt shims are target build artifacts and are deliberately excluded, preventing target-only libraries from becoming accidental host dependencies. Package installation, package simulation, and the rare `apt-file` fallback all have hard time limits so dependency discovery cannot consume an entire six-hour compiler stage.
 
-The restored V8 context snapshot generator is checked with `file` and `ldd`. A missing library or non-executable generator fails early.
+The restored/generated build tools are checked with `file` and `ldd`; missing host libraries are repaired only for tools that can actually execute on the runner.
 
 ## Repository layout
 
@@ -174,6 +158,7 @@ Optional repository variables:
 ```text
 CHROMIUM_I686_MAX_STAGES=20
 CHROMIUM_RUNNER_RETRIES=2
+CHROMIUM_I686_RUNNER=ubuntu-22.04
 ```
 
 The watcher checks every six hours when enabled.
@@ -268,14 +253,14 @@ This is an unofficial downstream port:
 
 The staged builder now treats the GitHub-hosted runner as an untrusted, replaceable execution environment rather than assuming that its image remains stable.
 
-- Required i386 host libraries are installed through one shared function and validated by SONAME before compilation.
-- Generated ELF32 build-time tools are discovered dynamically. If a tool reports a mapped missing shared library, the workflow installs the matching `:i386` package and retries the compiler slice once on the same runner.
+- Required i386 host libraries are expressed as SONAMEs and resolved against the active Ubuntu release instead of assuming one LTS package naming scheme.
+- Generated ELF32 **executables** are discovered dynamically; ELF32 shared target objects are excluded. Missing host libraries are repaired in bounded cycles only when the host actually changes.
 - Compiler failures are classified as `runtime_environment`, `infrastructure`, or `deterministic_build`. Deterministic compiler/source failures do not consume fresh-runner retries.
 - Checkpoints include a SHA-256 sidecar and JSON manifest recording Chromium version, stage, source checksum, clang revision, GN/patch configuration hash, Ninja metadata hashes, workflow commit, and runner image metadata.
 - Restores verify the compression stream, checksum, target/version/stage compatibility, source/toolchain/configuration identity, and extracted `args.gn` / `build.ninja` hashes before reuse.
 - Legacy checkpoints without manifests are rejected by default. A single in-flight Chromium version can be temporarily opted in with `CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION=<version>`; the next checkpoint automatically gains the new metadata.
-- The validation workflow performs a real 32-bit compile-and-execute canary on Ubuntu 22.04.
-- Missing generated-tool SONAMEs use a controlled i386 resolver: known libraries use pinned package mappings, while unknown libraries first use verified Debian/Ubuntu SONAME-to-package naming candidates, with Ubuntu i386 apt-file metadata reserved as a last-resort fallback when exactly one installable provider exists.
+- Validation includes a real 32-bit compile-and-execute canary plus an Ubuntu `22.04`, `24.04`, and `ubuntu-latest` compatibility matrix. The matrix also runs weekly so the next GitHub-hosted LTS image is exercised before production is switched.
+- Missing generated-tool SONAMEs use a controlled resolver: known mappings are preferences only, release-local package candidates are verified, and bounded Ubuntu i386 `apt-file` metadata is a last-resort fallback. An unavailable old mapping automatically falls through to discovery on a newer LTS.
 - First-party GitHub Actions are upgraded and pinned to immutable commit SHAs.
 - Disk-space guards trim expendable caches before compilation/checkpoint creation and fail before a near-full runner can destroy resumable state.
 - Every compiler stage writes a compact GitHub job summary with progress, checkpoint size, failure classification, free disk and ccache statistics.

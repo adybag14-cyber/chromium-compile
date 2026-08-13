@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   preflight:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 120
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache

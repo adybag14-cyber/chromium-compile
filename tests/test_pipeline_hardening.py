@@ -77,8 +77,33 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("Multiple Ubuntu i386 packages provide", common)
         self.assertIn("No installable Ubuntu i386 package provides", common)
         self.assertIn("for round in 1 2 3", common)
-        self.assertIn("i386_runtime_package_is_baseline()", common)
-        self.assertIn('if ! i386_runtime_package_is_baseline "${package}"', common)
+        self.assertIn("I386_BASELINE_SONAMES=(", common)
+        self.assertIn('resolve_i386_package_for_soname "${soname}"', common)
+
+    def test_runtime_scan_excludes_shared_target_objects(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("is_i386_host_executable()", common)
+        self.assertIn("shared target objects are intentionally excluded", common)
+        self.assertIn("(pie )?executable", common)
+
+    def test_runtime_discovery_and_apt_operations_are_bounded(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_APT_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS", common)
+        self.assertIn("timeout -k 20s", common)
+        self.assertIn("refusing to burn a fresh runner retry", common)
+
+    def test_lts_matrix_and_configurable_production_runner_exist(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("ubuntu-22.04", validation)
+        self.assertIn("ubuntu-24.04", validation)
+        self.assertIn("ubuntu-latest", validation)
+        self.assertIn("schedule:", validation)
+        self.assertIn("CHROMIUM_I686_RUNNER", build)
+        self.assertIn("CHROMIUM_I686_RUNNER", preflight)
 
     def test_runtime_failure_uses_exact_failed_tool_before_scanning(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")

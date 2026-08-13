@@ -40,7 +40,7 @@ outputs:
     value: ${{ steps.compile.outputs.complete }}
   failure_class:
     description: Classified failure type used to decide whether a fresh runner retry is useful.
-    value: ${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.checkpoint.outputs.failure_class }}
+    value: ${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.checkpoint.outputs.failure_class }}
 
 runs:
   using: composite
@@ -74,10 +74,14 @@ runs:
         install_system_dependencies
 
     - name: Install i386 Runtime Libraries
+      id: runtime
       shell: bash
       run: |
         source .github/scripts/chromium_i686_common.sh
-        install_i386_runtime_libraries
+        if ! install_i386_runtime_libraries; then
+          echo "failure_class=${I386_RUNTIME_REPAIR_FAILURE_CLASS:-infrastructure}" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
 
     - name: Install depot_tools
       shell: bash

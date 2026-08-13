@@ -14,7 +14,7 @@ fail() {
 # Avoid network access. Each test controls apt-file/apt-cache behavior explicitly.
 ensure_apt_file_i386_metadata() { return 0; }
 
-apt-file() {
+apt_file_search_i386() {
   case "$*" in
     *libMysteryProvider.so.7*) printf '%s\n' libunique ;;
     *libMysteryAmbiguous.so.7*) printf '%s\n' libalpha libbeta ;;
@@ -25,7 +25,7 @@ apt-file() {
 apt-cache() {
   [ "${1:-}" = policy ] || return 2
   case "${2:-}" in
-    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386)
+    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386|libstuck:i386)
       printf '%s\n' "${2}:" '  Candidate: 1.0' ;;
     libunavailable:i386)
       printf '%s\n' "${2}:" '  Candidate: (none)' ;;
@@ -61,8 +61,8 @@ ldd() { printf '%s\n' 'libStuck.so => not found'; }
 dpkg-query() { return 1; }
 SUDO_CALLS="${RUNNER_TEMP}/sudo-calls"
 : > "${SUDO_CALLS}"
-apt-get() { return 0; }
-sudo() {
+bounded_apt_get_simulate() { return 0; }
+bounded_sudo_apt_get() {
   printf '%s\n' "$*" >> "${SUDO_CALLS}"
   return 0
 }
@@ -81,9 +81,15 @@ TOOL_DIR="${RUNNER_TEMP}/out"
 mkdir -p "${TOOL_DIR}"
 : > "${TOOL_DIR}/tool-one"
 : > "${TOOL_DIR}/tool-two"
-chmod +x "${TOOL_DIR}/tool-one" "${TOOL_DIR}/tool-two"
+: > "${TOOL_DIR}/libtarget-shim.so"
+chmod +x "${TOOL_DIR}/tool-one" "${TOOL_DIR}/tool-two" "${TOOL_DIR}/libtarget-shim.so"
 OUT_DIR="${TOOL_DIR}"
-file() { printf '%s\n' "$1: ELF 32-bit LSB pie executable, Intel 80386"; }
+file() {
+  case "$1" in
+    *libtarget-shim.so) printf '%s\n' "$1: ELF 32-bit LSB shared object, Intel 80386" ;;
+    *) printf '%s\n' "$1: ELF 32-bit LSB pie executable, Intel 80386" ;;
+  esac
+}
 CALLS="${RUNNER_TEMP}/repair-calls"
 : > "${CALLS}"
 repair_missing_i386_runtime_for_binary() {
@@ -98,7 +104,7 @@ printf '%s\n' \
   './tool-one: error while loading shared libraries: libOne.so: cannot open shared object file' \
   './tool-two: error while loading shared libraries: libTwo.so: cannot open shared object file' > "${LOG}"
 repair_i386_runtime_from_build_log "${LOG}"
-[ "$(wc -l < "${CALLS}")" -eq 2 ] || fail "reported-tool loop skipped a tool"
+[ "$(wc -l < "${CALLS}")" -eq 2 ] || fail "reported-tool loop skipped a tool or scanned a shared target object"
 sed -n '1p' "${CALLS}" | grep -q 'tool-one$' || fail "tool-one repair order changed"
 sed -n '2p' "${CALLS}" | grep -q 'tool-two$' || fail "tool-two repair order changed"
 
