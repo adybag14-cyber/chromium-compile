@@ -2,12 +2,12 @@
   "schema": 1,
   "version": "150.0.7871.186",
   "dispatched_by_this_run": false,
-  "recorded_at": "2026-07-28T15:12:31+00:00",
+  "recorded_at": "2026-08-13T19:00:05+00:00",
   "preflight": {
-    "conclusion": "",
+    "conclusion": "success",
     "createdAt": "2026-07-28T15:09:22Z",
     "displayTitle": "Chromium i686 preflight 150.0.7871.186",
-    "status": "in_progress",
+    "status": "completed",
     "url": "https://github.com/adybag14-cyber/chromium-compile/actions/runs/30371959079"
   }
 }
