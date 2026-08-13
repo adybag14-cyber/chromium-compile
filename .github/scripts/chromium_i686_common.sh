@@ -254,6 +254,24 @@ apt_file_search_i386() {
     apt-file --filter-origins Ubuntu -a i386 -l -F search "${path}" 2>/dev/null
 }
 
+classify_apt_file_search_status() {
+  local status="${1:?status is required}"
+  case "${status}" in
+    0) return 0 ;;
+    1) return 1 ;; # Valid search with no matching package.
+    2)
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+      echo "::error::apt-file rejected the bounded search invocation; resolver syntax/tooling requires maintenance." >&2
+      return 2
+      ;;
+    *)
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+      echo "::error::apt-file search failed or timed out with status ${status}; a later runner may recover." >&2
+      return 3
+      ;;
+  esac
+}
+
 resolve_i386_package_for_soname() {
   local soname="${1:?SONAME is required}"
   local preferred="${I386_SONAME_PACKAGES[${soname}]:-}"
@@ -305,7 +323,23 @@ resolve_i386_package_for_soname() {
     "lib/${I386_MULTIARCH}/${soname}" \
     "usr/lib32/${soname}" \
     "lib32/${soname}"; do
-    search_output="$(apt_file_search_i386 "${path}" || true)"
+    local search_status=0 classified_status=0
+    if search_output="$(apt_file_search_i386 "${path}")"; then
+      search_status=0
+    else
+      search_status=$?
+    fi
+    if [ "${search_status}" -ne 0 ]; then
+      if classify_apt_file_search_status "${search_status}"; then
+        classified_status=0
+      else
+        classified_status=$?
+      fi
+      if [ "${classified_status}" -eq 1 ]; then
+        continue
+      fi
+      return 1
+    fi
     while IFS= read -r candidate; do
       [ -n "${candidate}" ] || continue
       candidate="${candidate%:i386}"
@@ -356,7 +390,12 @@ install_i386_runtime_libraries() {
     I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
     return 1
   fi
-  verify_i386_host_runtime
+  if ! verify_i386_host_runtime; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+    echo "::error::Installed i386 package set did not satisfy the baseline SONAME contract on this runner image."
+    return 1
+  fi
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
 }
 
 verify_i386_host_runtime() {

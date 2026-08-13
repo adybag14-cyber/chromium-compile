@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -122,7 +122,7 @@ jobs:
           set -euo pipefail
           source .github/scripts/chromium_i686_common.sh
           install_i386_runtime_libraries
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-multilib file binutils
+          bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils
 
           resolve_i386_package_for_soname libQt5Core.so.5
           test "${I386_RESOLVED_PACKAGE}" = libqt5core5a:i386
@@ -130,7 +130,7 @@ jobs:
           test "${I386_RESOLVED_PACKAGE}" = libqt5gui5:i386
           resolve_i386_package_for_soname libQt5Widgets.so.5
           test "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libqt5widgets5:i386
+          bounded_sudo_apt_get install -y --no-install-recommends libqt5widgets5:i386
           test -e /usr/lib/i386-linux-gnu/libQt5Core.so.5
           test -e /usr/lib/i386-linux-gnu/libQt5Gui.so.5
           test -e /usr/lib/i386-linux-gnu/libQt5Widgets.so.5
@@ -151,8 +151,12 @@ jobs:
           gcc -m32 "${RUNNER_TEMP}/i386-canary.c" -o "${RUNNER_TEMP}/i386-canary"
           file "${RUNNER_TEMP}/i386-canary"
           readelf -h "${RUNNER_TEMP}/i386-canary"
-          ldd "${RUNNER_TEMP}/i386-canary"
-          ! ldd "${RUNNER_TEMP}/i386-canary" | grep -q 'not found'
+          ldd_output="$(ldd "${RUNNER_TEMP}/i386-canary")"
+          printf '%s\n' "${ldd_output}"
+          if grep -q 'not found' <<<"${ldd_output}"; then
+            echo "::error::i386 runtime canary has unresolved runtime dependencies."
+            exit 1
+          fi
           "${RUNNER_TEMP}/i386-canary"
 
   validate_lts_compatibility:
@@ -189,7 +193,12 @@ jobs:
           EOF
           gcc -m32 "${RUNNER_TEMP}/lts-i386-canary.c" -o "${RUNNER_TEMP}/lts-i386-canary"
           is_i386_host_executable "${RUNNER_TEMP}/lts-i386-canary"
-          ! ldd "${RUNNER_TEMP}/lts-i386-canary" | grep -q 'not found'
+          ldd_output="$(ldd "${RUNNER_TEMP}/lts-i386-canary")"
+          printf '%s\n' "${ldd_output}"
+          if grep -q 'not found' <<<"${ldd_output}"; then
+            echo "::error::LTS i386 canary has unresolved runtime dependencies."
+            exit 1
+          fi
           "${RUNNER_TEMP}/lts-i386-canary"
 
       - name: Assert shared objects are not host executables
@@ -205,4 +214,30 @@ jobs:
           if is_i386_host_executable "${RUNNER_TEMP}/libshared-probe.so"; then
             echo "::error::ELF32 shared object was incorrectly classified as a host build executable."
             exit 1
+          fi
+
+  report_lts_drift:
+    name: Report Ubuntu LTS compatibility drift
+    needs: validate_lts_compatibility
+    if: ${{ always() && github.event_name == 'schedule' && needs.validate_lts_compatibility.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update LTS compatibility issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title='[i686-port] Ubuntu LTS compatibility drift'
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="The scheduled Ubuntu LTS compatibility matrix failed. Review ${run_url} before changing CHROMIUM_I686_RUNNER or relying on a newer GitHub-hosted image."
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --json number,title --jq '.[] | select(.title == "[i686-port] Ubuntu LTS compatibility drift") | .number' | head -n1)"
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
           fi

@@ -19,6 +19,8 @@ apt_file_search_i386() {
     *libMysteryProvider.so.7*) printf '%s\n' libunique ;;
     *libMysteryAmbiguous.so.7*) printf '%s\n' libalpha libbeta ;;
     *libMysteryUnavailable.so.7*) printf '%s\n' libunavailable ;;
+    *libMysteryTimeout.so.7*) return 124 ;;
+    *libMysteryInvalid.so.7*) return 2 ;;
   esac
 }
 
@@ -62,6 +64,21 @@ status=$?
 set -e
 [ "${status}" -eq 1 ] || fail "unavailable provider should fail"
 [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] || fail "unavailable provider should be deterministic"
+
+
+set +e
+resolve_i386_package_for_soname libMysteryTimeout.so.7 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ] || fail "timed-out apt-file search should fail resolution"
+[ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = infrastructure ] || fail "apt-file timeout should be infrastructure"
+
+set +e
+resolve_i386_package_for_soname libMysteryInvalid.so.7 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ] || fail "invalid apt-file invocation should fail resolution"
+[ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] || fail "apt-file invalid invocation should be deterministic"
 
 # A provider that installs successfully but leaves the same SONAME unresolved must
 # stop after one install rather than repeating identical apt cycles.
