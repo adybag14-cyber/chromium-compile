@@ -21,9 +21,9 @@ maximize_runner_disk_space() {
   sudo rm -rf /usr/local/lib/android
   sudo rm -rf /opt/ghc
   sudo rm -rf /opt/hostedtoolcache/CodeQL
-  sudo apt-get purge -y '^mysql-' '^mongodb-' '^postgresql-' '^dotnet-' '^android-sdk-' || true
-  sudo apt-get autoremove -y || true
-  sudo apt-get clean || true
+  bounded_sudo_apt_get purge -y '^mysql-' '^mongodb-' '^postgresql-' '^dotnet-' '^android-sdk-' || true
+  bounded_sudo_apt_get autoremove -y || true
+  timeout -k 10s 60s sudo apt-get clean || true
   ensure_swap
   echo "=== Disk space AFTER cleanup ==="
   df -h
@@ -44,8 +44,8 @@ ensure_swap() {
 }
 
 install_system_dependencies() {
-  sudo apt-get update
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  bounded_sudo_apt_get update
+  bounded_sudo_apt_get install -y \
     git python3 python3-pip curl jq xz-utils zstd zip unzip \
     build-essential pkg-config ninja-build ccache \
     libgtk-3-dev libnss3-dev libasound2-dev libxss-dev libxtst-dev libxrandr-dev \
@@ -54,22 +54,27 @@ install_system_dependencies() {
     libatspi2.0-dev libatk-bridge2.0-dev
 }
 
-I386_RUNTIME_PACKAGES=(
-  libc6:i386
-  libgcc-s1:i386
-  libstdc++6:i386
-  libglib2.0-0:i386
-  libexpat1:i386
-  libnspr4:i386
-  libnss3:i386
-  libdbus-1-3:i386
-  libx11-6:i386
-  libxext6:i386
-  libgbm1:i386
-  libxcb1:i386
-  libxkbcommon0:i386
-  libudev1:i386
-  libasound2:i386
+I386_BASELINE_SONAMES=(
+  libc.so.6
+  libgcc_s.so.1
+  libstdc++.so.6
+  libglib-2.0.so.0
+  libgobject-2.0.so.0
+  libgio-2.0.so.0
+  libgmodule-2.0.so.0
+  libexpat.so.1
+  libnspr4.so
+  libnss3.so
+  libnssutil3.so
+  libsmime3.so
+  libdbus-1.so.3
+  libX11.so.6
+  libXext.so.6
+  libgbm.so.1
+  libxcb.so.1
+  libxkbcommon.so.0
+  libudev.so.1
+  libasound.so.2
 )
 
 declare -A I386_SONAME_PACKAGES=(
@@ -96,93 +101,112 @@ declare -A I386_SONAME_PACKAGES=(
   [libxkbcommon.so.0]=libxkbcommon0:i386
   [libudev.so.1]=libudev1:i386
   [libasound.so.2]=libasound2:i386
-  # Qt is intentionally lazy: generated build tools pull it in only when ldd proves it is needed.
-  # All three mappings below were observed together in Chromium 151's libqt5_shim.so.
+  # Qt is intentionally lazy: shared target shims are not host executables.
+  # These remain preferred mappings if a future generated host tool genuinely needs Qt5.
   [libQt5Core.so.5]=libqt5core5a:i386
   [libQt5Gui.so.5]=libqt5gui5:i386
   [libQt5Widgets.so.5]=libqt5widgets5:i386
 )
 
-install_i386_runtime_libraries() {
-  sudo dpkg --add-architecture i386
-  sudo apt-get update
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    "${I386_RUNTIME_PACKAGES[@]}"
-  verify_i386_host_runtime
-}
-
-i386_runtime_package_is_baseline() {
-  local needle="${1:?package is required}" package
-  for package in "${I386_RUNTIME_PACKAGES[@]}"; do
-    if [ "${package}" = "${needle}" ]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-verify_i386_host_runtime() {
-  local package soname
-  local missing=0
-
-  for package in "${I386_RUNTIME_PACKAGES[@]}"; do
-    if ! dpkg-query -W -f='${db:Status-Abbrev}' "${package}" 2>/dev/null | grep -qx 'ii '; then
-      echo "::error::Required i386 runtime package is not installed: ${package}"
-      missing=1
-    fi
-  done
-
-  if [ ! -x /lib/ld-linux.so.2 ]; then
-    echo "::error::The i386 dynamic loader /lib/ld-linux.so.2 is unavailable."
-    missing=1
-  fi
-
-  for soname in "${!I386_SONAME_PACKAGES[@]}"; do
-    package="${I386_SONAME_PACKAGES[${soname}]}"
-    if ! i386_runtime_package_is_baseline "${package}"; then
-      continue
-    fi
-    if [ ! -e "/lib/i386-linux-gnu/${soname}" ] \
-        && [ ! -e "/usr/lib/i386-linux-gnu/${soname}" ]; then
-      echo "::error::Required baseline i386 runtime SONAME is not installed: ${soname}"
-      missing=1
-    fi
-  done
-
-  if [ "${missing}" -ne 0 ]; then
-    return 1
-  fi
-  echo "Verified required i386 packages, loader, and runtime SONAME files."
-}
-
 I386_RUNTIME_REPAIR_FAILURE_CLASS=""
 I386_RUNTIME_REPAIR_CHANGED=false
 I386_RESOLVED_PACKAGE=""
+RUNNER_DISTRO_ID=""
+RUNNER_DISTRO_VERSION_ID=""
+I386_MULTIARCH="i386-linux-gnu"
+CHROMIUM_I686_APT_TIMEOUT_SECONDS="${CHROMIUM_I686_APT_TIMEOUT_SECONDS:-900}"
+CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS="${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS:-180}"
+CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS="${CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS:-20}"
 
-ensure_apt_file_i386_metadata() {
-  local marker="${RUNNER_TEMP:-/tmp}/chromium-i686-apt-file-i386-ready"
-  if [ -s "${marker}" ]; then
-    return 0
-  fi
+bounded_sudo_apt_get() {
+  timeout -k 30s "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}s" \
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
+      -o DPkg::Lock::Timeout=60 \
+      "$@"
+}
 
-  echo "Preparing apt-file metadata for automatic i386 SONAME resolution."
-  if ! command -v apt-file >/dev/null 2>&1; then
-    if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apt-file; then
-      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
-      return 1
-    fi
-  fi
-  if ! sudo apt-file -o APT::Architecture=i386 -o APT::Architectures::=i386 update; then
-    I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+bounded_apt_get_simulate() {
+  timeout -k 15s "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}s" \
+    apt-get -s \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
+      "$@"
+}
+
+detect_runner_platform() {
+  if [ ! -r /etc/os-release ]; then
+    echo "::error::Cannot identify Linux runner: /etc/os-release is unavailable."
     return 1
   fi
-  printf 'ready\n' > "${marker}"
+  local ID="" VERSION_ID=""
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  RUNNER_DISTRO_ID="${ID:-unknown}"
+  RUNNER_DISTRO_VERSION_ID="${VERSION_ID:-unknown}"
+  I386_MULTIARCH="$(dpkg-architecture -ai386 -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+  I386_MULTIARCH="${I386_MULTIARCH:-i386-linux-gnu}"
+  echo "Runner platform: ${RUNNER_DISTRO_ID} ${RUNNER_DISTRO_VERSION_ID}; i386 multiarch tuple: ${I386_MULTIARCH}"
+  if [ "${RUNNER_DISTRO_ID}" != "ubuntu" ]; then
+    echo "::warning::The i686 pipeline is continuously validated on Ubuntu LTS runners; ${RUNNER_DISTRO_ID} is best-effort only."
+  fi
 }
 
 i386_package_has_candidate() {
   local package="${1:?package is required}"
   apt-cache policy "${package}" 2>/dev/null \
     | awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}'
+}
+
+i386_package_variants() {
+  local package="${1:?package is required}"
+  local base="${package%:i386}"
+  printf '%s\n' "${package}"
+  if [[ "${base}" != *t64 ]]; then
+    printf '%s\n' "${base}t64:i386"
+  fi
+}
+
+verify_i386_runner_capability() {
+  detect_runner_platform
+  sudo dpkg --add-architecture i386
+  if ! bounded_sudo_apt_get update; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+    echo "::error::Failed to refresh package indexes within the bounded APT timeout."
+    return 1
+  fi
+  if ! i386_package_has_candidate libc6:i386; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+    echo "::error::Runner ${RUNNER_DISTRO_ID} ${RUNNER_DISTRO_VERSION_ID} does not expose an installable libc6:i386 candidate."
+    return 1
+  fi
+}
+
+i386_soname_is_baseline() {
+  local needle="${1:?SONAME is required}" soname
+  for soname in "${I386_BASELINE_SONAMES[@]}"; do
+    if [ "${soname}" = "${needle}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+i386_soname_is_available() {
+  local soname="${1:?SONAME is required}" dir
+  for dir in \
+    "/lib/${I386_MULTIARCH}" \
+    "/usr/lib/${I386_MULTIARCH}" \
+    /lib32 \
+    /usr/lib32; do
+    if [ -e "${dir}/${soname}" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 guess_i386_packages_for_soname() {
@@ -201,21 +225,85 @@ guess_i386_packages_for_soname() {
   fi
 }
 
-resolve_i386_package_for_soname() {
-  local soname="${1:?SONAME is required}"
-  I386_RESOLVED_PACKAGE="${I386_SONAME_PACKAGES[${soname}]:-}"
-  if [ -n "${I386_RESOLVED_PACKAGE}" ]; then
-    echo "Known i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE}"
+ensure_apt_file_i386_metadata() {
+  local marker="${RUNNER_TEMP:-/tmp}/chromium-i686-apt-file-i386-ready"
+  if [ -s "${marker}" ]; then
     return 0
   fi
 
-  local candidate
-  local -a candidates=() guessed=()
+  echo "Preparing bounded apt-file metadata fallback for automatic i386 SONAME resolution."
+  if ! command -v apt-file >/dev/null 2>&1; then
+    if ! bounded_sudo_apt_get install -y --no-install-recommends apt-file; then
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+      echo "::error::apt-file fallback tooling is unavailable on this runner; add a SONAME mapping or update the resolver."
+      return 1
+    fi
+  fi
+  if ! timeout -k 20s "${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}s" \
+      sudo apt-file -o APT::Architecture=i386 -o APT::Architectures::=i386 update; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+    echo "::error::apt-file metadata fallback exceeded ${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}s or failed; refusing to burn a fresh runner retry."
+    return 1
+  fi
+  printf 'ready\n' > "${marker}"
+}
+
+apt_file_search_i386() {
+  local path="${1:?path is required}"
+  timeout -k 5s "${CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS}s" \
+    apt-file --filter-origins Ubuntu -a i386 -l -F search "${path}" 2>/dev/null
+}
+
+classify_apt_file_search_status() {
+  local status="${1:?status is required}"
+  case "${status}" in
+    0) return 0 ;;
+    1) return 1 ;; # Valid search with no matching package.
+    2)
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+      echo "::error::apt-file rejected the bounded search invocation; resolver syntax/tooling requires maintenance." >&2
+      return 2
+      ;;
+    *)
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+      echo "::error::apt-file search failed or timed out with status ${status}; a later runner may recover." >&2
+      return 3
+      ;;
+  esac
+}
+
+resolve_i386_package_for_soname() {
+  local soname="${1:?SONAME is required}"
+  local preferred="${I386_SONAME_PACKAGES[${soname}]:-}"
+  I386_RESOLVED_PACKAGE=""
+
+  local candidate variant
+  local -a candidates=() guessed=() variants=()
+  if [ -n "${preferred}" ]; then
+    mapfile -t variants < <(i386_package_variants "${preferred}" | sort -u)
+    for variant in "${variants[@]}"; do
+      if dpkg-query -W -f='${db:Status-Abbrev}' "${variant}" 2>/dev/null | grep -qx 'ii ' \
+          || i386_package_has_candidate "${variant}"; then
+        I386_RESOLVED_PACKAGE="${variant}"
+        if [ "${variant}" = "${preferred}" ]; then
+          echo "Known i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE}"
+        else
+          echo "Release-local i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE} (preferred ${preferred})"
+        fi
+        return 0
+      fi
+    done
+    echo "::warning::Preferred mapping ${soname} -> ${preferred} and its release-local variants are unavailable on ${RUNNER_DISTRO_ID:-this runner}; trying SONAME-derived discovery."
+  fi
+
   mapfile -t guessed < <(guess_i386_packages_for_soname "${soname}" | sort -u)
   for candidate in "${guessed[@]}"; do
-    if i386_package_has_candidate "${candidate}"; then
-      candidates+=("${candidate}")
-    fi
+    mapfile -t variants < <(i386_package_variants "${candidate}" | sort -u)
+    for variant in "${variants[@]}"; do
+      if i386_package_has_candidate "${variant}"; then
+        candidates+=("${variant}")
+      fi
+    done
   done
   mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
   if [ "${#candidates[@]}" -eq 1 ]; then
@@ -228,20 +316,37 @@ resolve_i386_package_for_soname() {
     return 1
   fi
 
-  local path
+  local path search_output
   candidates=()
   for path in \
-    "usr/lib/i386-linux-gnu/${soname}" \
-    "lib/i386-linux-gnu/${soname}" \
+    "usr/lib/${I386_MULTIARCH}/${soname}" \
+    "lib/${I386_MULTIARCH}/${soname}" \
     "usr/lib32/${soname}" \
     "lib32/${soname}"; do
+    local search_status=0 classified_status=0
+    if search_output="$(apt_file_search_i386 "${path}")"; then
+      search_status=0
+    else
+      search_status=$?
+    fi
+    if [ "${search_status}" -ne 0 ]; then
+      if classify_apt_file_search_status "${search_status}"; then
+        classified_status=0
+      else
+        classified_status=$?
+      fi
+      if [ "${classified_status}" -eq 1 ]; then
+        continue
+      fi
+      return 1
+    fi
     while IFS= read -r candidate; do
       [ -n "${candidate}" ] || continue
       candidate="${candidate%:i386}"
       if i386_package_has_candidate "${candidate}:i386"; then
         candidates+=("${candidate}:i386")
       fi
-    done < <(apt-file --filter-origins Ubuntu -a i386 -l -F search "${path}" 2>/dev/null || true)
+    done <<<"${search_output}"
   done
 
   mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
@@ -258,6 +363,72 @@ resolve_i386_package_for_soname() {
     echo "::error::Multiple Ubuntu i386 packages provide ${soname}; refusing to choose one automatically: ${candidates[*]}"
   fi
   return 1
+}
+
+install_i386_runtime_libraries() {
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  verify_i386_runner_capability || return 1
+
+  local soname package
+  local -a packages=()
+  for soname in "${I386_BASELINE_SONAMES[@]}"; do
+    if ! resolve_i386_package_for_soname "${soname}"; then
+      echo "::error::Could not resolve baseline i386 SONAME ${soname} on ${RUNNER_DISTRO_ID} ${RUNNER_DISTRO_VERSION_ID}."
+      return 1
+    fi
+    packages+=("${I386_RESOLVED_PACKAGE}")
+  done
+  mapfile -t packages < <(printf '%s\n' "${packages[@]}" | sort -u)
+
+  echo "Resolved baseline i386 runtime packages for ${RUNNER_DISTRO_ID} ${RUNNER_DISTRO_VERSION_ID}: ${packages[*]}"
+  if ! bounded_apt_get_simulate install -y --no-install-recommends "${packages[@]}" >/dev/null 2>&1; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+    echo "::error::Resolved baseline i386 packages cannot be installed together on this runner image."
+    return 1
+  fi
+  if ! bounded_sudo_apt_get install -y --no-install-recommends "${packages[@]}"; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+    return 1
+  fi
+  if ! verify_i386_host_runtime; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+    echo "::error::Installed i386 package set did not satisfy the baseline SONAME contract on this runner image."
+    return 1
+  fi
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+}
+
+verify_i386_host_runtime() {
+  local soname
+  local missing=0
+
+  if [ ! -x /lib/ld-linux.so.2 ]; then
+    echo "::error::The i386 dynamic loader /lib/ld-linux.so.2 is unavailable."
+    missing=1
+  fi
+
+  for soname in "${I386_BASELINE_SONAMES[@]}"; do
+    if ! i386_soname_is_available "${soname}"; then
+      echo "::error::Required baseline i386 runtime SONAME is not installed: ${soname}"
+      missing=1
+    fi
+  done
+
+  if [ "${missing}" -ne 0 ]; then
+    return 1
+  fi
+  echo "Verified baseline i386 loader and SONAMEs on ${RUNNER_DISTRO_ID} ${RUNNER_DISTRO_VERSION_ID}."
+}
+
+is_i386_host_executable() {
+  local binary="${1:?binary is required}"
+  local file_output="${2:-}"
+  if [ -z "${file_output}" ]; then
+    file_output="$(file -b "${binary}" 2>/dev/null || true)"
+  fi
+  # Shared libraries are target artifacts, not host build tools. Only actual ELF32
+  # executables/PIE executables need to run against the GitHub runner's i386 runtime.
+  grep -Eq 'ELF 32-bit.*(pie )?executable, Intel (80386|i386)' <<<"${file_output}"
 }
 
 repair_missing_i386_runtime_for_binary() {
@@ -306,13 +477,13 @@ repair_missing_i386_runtime_for_binary() {
     fi
 
     echo "Repair round ${round}: validating i386 runtime dependencies: ${to_install[*]}"
-    if ! apt-get -s install -y --no-install-recommends "${to_install[@]}" >/dev/null 2>&1; then
+    if ! bounded_apt_get_simulate install -y --no-install-recommends "${to_install[@]}" >/dev/null 2>&1; then
       I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
       echo "::error::Resolved i386 provider packages cannot be installed together on this runner image; a fresh runner retry will not help."
       return 1
     fi
     echo "Repair round ${round}: installing i386 runtime dependencies: ${to_install[*]}"
-    if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${to_install[@]}"; then
+    if ! bounded_sudo_apt_get install -y --no-install-recommends "${to_install[@]}"; then
       I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
       return 1
     fi
@@ -350,7 +521,7 @@ repair_i386_runtime_from_build_log() {
       continue
     fi
     file_output="$(file "${path}" 2>/dev/null || true)"
-    if ! grep -Eq 'ELF 32-bit.*Intel (80386|i386)' <<<"${file_output}"; then
+    if ! is_i386_host_executable "${path}" "${file_output}"; then
       continue
     fi
     echo "Repairing runtime for failed ELF32 build tool reported by Ninja: ${path}"
@@ -378,17 +549,17 @@ verify_or_repair_i386_runtime_dependencies() {
   local binary file_output
   while IFS= read -r -d '' binary; do
     file_output="$(file "${binary}" 2>/dev/null || true)"
-    if grep -Eq 'ELF 32-bit.*Intel (80386|i386)' <<<"${file_output}"; then
+    if is_i386_host_executable "${binary}" "${file_output}"; then
       candidates+=("${binary}")
     fi
   done < <(find "${OUT_DIR}" -maxdepth 2 -type f -perm -111 -print0)
 
   if [ "${#candidates[@]}" -eq 0 ]; then
-    echo "No generated ELF32 build-time executables are present yet."
+    echo "No generated ELF32 host build executables are present yet."
     return 0
   fi
 
-  echo "Checking ${#candidates[@]} generated ELF32 build-time executable(s)."
+  echo "Checking ${#candidates[@]} generated ELF32 host build executable(s); shared target objects are intentionally excluded."
   for binary in "${candidates[@]}"; do
     echo "Runtime check: ${binary}"
     repair_missing_i386_runtime_for_binary "${binary}" </dev/null || return 1

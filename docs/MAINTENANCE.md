@@ -25,6 +25,7 @@ Optional repository variables:
 ```text
 CHROMIUM_I686_MAX_STAGES=20
 CHROMIUM_RUNNER_RETRIES=2
+CHROMIUM_I686_RUNNER=ubuntu-22.04
 # Temporary migration only; omit normally:
 CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION=<exact-version>
 ```
@@ -65,7 +66,13 @@ Compiler failures are classified before the workflow decides whether a fresh run
 - `runtime_environment`: a generated ELF32 tool cannot load a host shared library. Known SONAMEs are repaired in-place first; an unrepaired environment failure may consume a runner retry.
 - `deterministic_build`: compiler, linker, GN, API or source incompatibilities. These do **not** consume fresh-runner retries and should become maintenance issues immediately.
 
-Known host runtime dependencies live in `I386_SONAME_PACKAGES` in `.github/scripts/chromium_i686_common.sh`; baseline libraries also live in `I386_RUNTIME_PACKAGES`. Unknown SONAMEs first try verified Debian/Ubuntu package-name candidates derived from the SONAME; Ubuntu i386 `apt-file` metadata is a last-resort fallback and is accepted only when there is exactly one installable provider. Add a permanent mapping after a dependency is observed in production, and keep the generic resolver/canary green on `ubuntu-22.04`.
+Baseline host requirements live in `I386_BASELINE_SONAMES`; package names are resolved per runner release. `I386_SONAME_PACKAGES` contains preferred mappings for known dependencies, but an unavailable mapping falls through to release-local discovery. Unknown SONAMEs first try verified Debian/Ubuntu package-name candidates derived from the SONAME; bounded Ubuntu i386 `apt-file` metadata is a last-resort fallback and is accepted only when there is exactly one installable provider. Only ELF32 executables/PIE executables are host-runtime checked—shared objects are target artifacts. Keep the production canary green and the scheduled `ubuntu-22.04` / `ubuntu-24.04` / `ubuntu-latest` matrix healthy before changing `CHROMIUM_I686_RUNNER`.
+
+### LTS migration policy
+
+`CHROMIUM_I686_RUNNER` controls the runner used by compatibility preflight and staged compilation. Leave it on the currently proven LTS until the validation matrix is green on the replacement. `ubuntu-latest` is intentionally included as an early-warning sentinel: when GitHub moves it to a newer LTS, the scheduled matrix starts testing that image automatically. A scheduled matrix failure opens or updates `[i686-port] Ubuntu LTS compatibility drift`, so runner drift becomes an explicit maintenance item rather than a silently red workflow.
+
+No dependency-discovery operation is allowed to consume a compiler stage. APT operations have a global timeout, `apt-file` metadata refresh has a shorter discovery timeout, individual content searches are separately bounded, and discovery exhaustion is treated as deterministic maintenance work rather than repeated on fresh runners.
 
 New checkpoints are a three-file bundle:
 

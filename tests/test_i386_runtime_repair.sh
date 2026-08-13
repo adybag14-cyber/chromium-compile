@@ -14,18 +14,20 @@ fail() {
 # Avoid network access. Each test controls apt-file/apt-cache behavior explicitly.
 ensure_apt_file_i386_metadata() { return 0; }
 
-apt-file() {
+apt_file_search_i386() {
   case "$*" in
     *libMysteryProvider.so.7*) printf '%s\n' libunique ;;
     *libMysteryAmbiguous.so.7*) printf '%s\n' libalpha libbeta ;;
     *libMysteryUnavailable.so.7*) printf '%s\n' libunavailable ;;
+    *libMysteryTimeout.so.7*) return 124 ;;
+    *libMysteryInvalid.so.7*) return 2 ;;
   esac
 }
 
 apt-cache() {
   [ "${1:-}" = policy ] || return 2
   case "${2:-}" in
-    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386)
+    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386|libstuck:i386|libglib2.0-0t64:i386)
       printf '%s\n' "${2}:" '  Candidate: 1.0' ;;
     libunavailable:i386)
       printf '%s\n' "${2}:" '  Candidate: (none)' ;;
@@ -36,6 +38,15 @@ apt-cache() {
 
 resolve_i386_package_for_soname libQt5Widgets.so.5
 [ "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386 ] || fail "derived provider was not selected"
+
+
+# Ubuntu 24.04-style time64 package renames must be discovered from a stale preferred mapping
+# The host running this contract test must not satisfy the stale package through its own dpkg database.
+dpkg-query() { return 1; }
+# without falling into apt-file Contents metadata.
+I386_SONAME_PACKAGES[libglib-2.0.so.0]=libglib2.0-0:i386
+resolve_i386_package_for_soname libglib-2.0.so.0
+[ "${I386_RESOLVED_PACKAGE}" = libglib2.0-0t64:i386 ] || fail "time64 provider variant was not selected"
 
 resolve_i386_package_for_soname libMysteryProvider.so.7
 [ "${I386_RESOLVED_PACKAGE}" = libunique:i386 ] || fail "apt-file fallback provider was not selected"
@@ -54,6 +65,21 @@ set -e
 [ "${status}" -eq 1 ] || fail "unavailable provider should fail"
 [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] || fail "unavailable provider should be deterministic"
 
+
+set +e
+resolve_i386_package_for_soname libMysteryTimeout.so.7 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ] || fail "timed-out apt-file search should fail resolution"
+[ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = infrastructure ] || fail "apt-file timeout should be infrastructure"
+
+set +e
+resolve_i386_package_for_soname libMysteryInvalid.so.7 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ] || fail "invalid apt-file invocation should fail resolution"
+[ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] || fail "apt-file invalid invocation should be deterministic"
+
 # A provider that installs successfully but leaves the same SONAME unresolved must
 # stop after one install rather than repeating identical apt cycles.
 I386_SONAME_PACKAGES[libStuck.so]=libstuck:i386
@@ -61,8 +87,8 @@ ldd() { printf '%s\n' 'libStuck.so => not found'; }
 dpkg-query() { return 1; }
 SUDO_CALLS="${RUNNER_TEMP}/sudo-calls"
 : > "${SUDO_CALLS}"
-apt-get() { return 0; }
-sudo() {
+bounded_apt_get_simulate() { return 0; }
+bounded_sudo_apt_get() {
   printf '%s\n' "$*" >> "${SUDO_CALLS}"
   return 0
 }
@@ -81,9 +107,15 @@ TOOL_DIR="${RUNNER_TEMP}/out"
 mkdir -p "${TOOL_DIR}"
 : > "${TOOL_DIR}/tool-one"
 : > "${TOOL_DIR}/tool-two"
-chmod +x "${TOOL_DIR}/tool-one" "${TOOL_DIR}/tool-two"
+: > "${TOOL_DIR}/libtarget-shim.so"
+chmod +x "${TOOL_DIR}/tool-one" "${TOOL_DIR}/tool-two" "${TOOL_DIR}/libtarget-shim.so"
 OUT_DIR="${TOOL_DIR}"
-file() { printf '%s\n' "$1: ELF 32-bit LSB pie executable, Intel 80386"; }
+file() {
+  case "$1" in
+    *libtarget-shim.so) printf '%s\n' "$1: ELF 32-bit LSB shared object, Intel 80386" ;;
+    *) printf '%s\n' "$1: ELF 32-bit LSB pie executable, Intel 80386" ;;
+  esac
+}
 CALLS="${RUNNER_TEMP}/repair-calls"
 : > "${CALLS}"
 repair_missing_i386_runtime_for_binary() {
@@ -98,7 +130,7 @@ printf '%s\n' \
   './tool-one: error while loading shared libraries: libOne.so: cannot open shared object file' \
   './tool-two: error while loading shared libraries: libTwo.so: cannot open shared object file' > "${LOG}"
 repair_i386_runtime_from_build_log "${LOG}"
-[ "$(wc -l < "${CALLS}")" -eq 2 ] || fail "reported-tool loop skipped a tool"
+[ "$(wc -l < "${CALLS}")" -eq 2 ] || fail "reported-tool loop skipped a tool or scanned a shared target object"
 sed -n '1p' "${CALLS}" | grep -q 'tool-one$' || fail "tool-one repair order changed"
 sed -n '2p' "${CALLS}" | grep -q 'tool-two$' || fail "tool-two repair order changed"
 

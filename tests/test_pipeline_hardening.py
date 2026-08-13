@@ -77,8 +77,61 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("Multiple Ubuntu i386 packages provide", common)
         self.assertIn("No installable Ubuntu i386 package provides", common)
         self.assertIn("for round in 1 2 3", common)
-        self.assertIn("i386_runtime_package_is_baseline()", common)
-        self.assertIn('if ! i386_runtime_package_is_baseline "${package}"', common)
+        self.assertIn("I386_BASELINE_SONAMES=(", common)
+        self.assertIn('resolve_i386_package_for_soname "${soname}"', common)
+
+    def test_release_local_time64_package_variants_are_supported(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("i386_package_variants()", common)
+        self.assertIn('"${base}t64:i386"', common)
+        self.assertIn("Release-local i386 runtime mapping", common)
+
+    def test_runtime_scan_excludes_shared_target_objects(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("is_i386_host_executable()", common)
+        self.assertIn("shared target objects are intentionally excluded", common)
+        self.assertIn("(pie )?executable", common)
+
+    def test_runtime_resolver_does_not_mutate_errexit(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resolver = common[common.index("resolve_i386_package_for_soname()") : common.index("install_i386_runtime_libraries()") ]
+        self.assertNotIn("set +e", resolver)
+        self.assertNotIn("set -e", resolver)
+
+    def test_runtime_discovery_and_apt_operations_are_bounded(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_APT_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS", common)
+        self.assertIn("timeout -k 20s", common)
+        self.assertIn("refusing to burn a fresh runner retry", common)
+        self.assertIn("classify_apt_file_search_status()", common)
+        self.assertIn("resolver syntax/tooling requires maintenance", common)
+        self.assertIn("apt-file search failed or timed out", common)
+
+    def test_non_build_orchestration_is_not_pinned_to_old_lts(self):
+        for rel in (
+            ".github/workflows/bootstrap-i686-live.yml",
+            ".github/workflows/publish-i686-release.yml",
+            ".github/workflows/report-i686-build-failure.yml",
+            ".github/workflows/watch-chromium-stable.yml",
+        ):
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotIn("runs-on: ubuntu-22.04", text, rel)
+            self.assertIn("runs-on: ubuntu-latest", text, rel)
+
+    def test_lts_matrix_and_configurable_production_runner_exist(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("ubuntu-22.04", validation)
+        self.assertIn("ubuntu-24.04", validation)
+        self.assertIn("ubuntu-latest", validation)
+        self.assertIn("schedule:", validation)
+        self.assertIn("report_lts_drift:", validation)
+        self.assertIn("Ubuntu LTS compatibility drift", validation)
+        self.assertIn("CHROMIUM_I686_RUNNER", build)
+        self.assertIn("CHROMIUM_I686_RUNNER", preflight)
 
     def test_runtime_failure_uses_exact_failed_tool_before_scanning(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
@@ -88,9 +141,17 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("for pass in 1 2 3", common)
         self.assertIn('runtime_repairs}" -lt 2', common)
 
+    def test_configurable_runner_package_installs_are_bounded(self):
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("bounded_sudo_apt_get install -y file binutils", preflight)
+        self.assertIn("bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils", validation)
+        self.assertIn('ldd_output="$(ldd "${RUNNER_TEMP}/lts-i386-canary")"', validation)
+
     def test_prepare_propagates_runtime_repair_failure_class(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         self.assertIn("I386_RUNTIME_REPAIR_FAILURE_CLASS:-runtime_environment", action)
+        self.assertIn("steps.runtime.outputs.failure_class", action)
 
     def test_linux_ci_exercises_generic_soname_discovery(self):
         workflow = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")

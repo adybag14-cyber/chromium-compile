@@ -48,7 +48,7 @@ env:
 jobs:
   build:
     name: Build Stage ${{ inputs.stage || '1' }}
-    runs-on: ubuntu-22.04
+    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 360
     outputs:
       stage: ${{ steps.control.outputs.stage }}
@@ -165,7 +165,7 @@ jobs:
         needs.build.outputs.complete != 'true' &&
         fromJSON(needs.build.outputs.stage) < fromJSON(needs.build.outputs.max_stage)
       }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Start next stage on a fresh runner
@@ -200,7 +200,7 @@ jobs:
         needs.build.outputs.failure_class != 'deterministic_build' &&
         fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(needs.build.outputs.max_retries || '0')
       }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Redispatch failed stage
