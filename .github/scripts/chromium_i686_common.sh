@@ -161,6 +161,15 @@ i386_package_has_candidate() {
     | awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}'
 }
 
+i386_package_variants() {
+  local package="${1:?package is required}"
+  local base="${package%:i386}"
+  printf '%s\n' "${package}"
+  if [[ "${base}" != *t64 ]]; then
+    printf '%s\n' "${base}t64:i386"
+  fi
+}
+
 verify_i386_runner_capability() {
   detect_runner_platform
   sudo dpkg --add-architecture i386
@@ -250,23 +259,33 @@ resolve_i386_package_for_soname() {
   local preferred="${I386_SONAME_PACKAGES[${soname}]:-}"
   I386_RESOLVED_PACKAGE=""
 
+  local candidate variant
+  local -a candidates=() guessed=() variants=()
   if [ -n "${preferred}" ]; then
-    if dpkg-query -W -f='${db:Status-Abbrev}' "${preferred}" 2>/dev/null | grep -qx 'ii ' \
-        || i386_package_has_candidate "${preferred}"; then
-      I386_RESOLVED_PACKAGE="${preferred}"
-      echo "Known i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE}"
-      return 0
-    fi
-    echo "::warning::Preferred mapping ${soname} -> ${preferred} is unavailable on ${RUNNER_DISTRO_ID:-this runner}; trying release-local discovery."
+    mapfile -t variants < <(i386_package_variants "${preferred}" | sort -u)
+    for variant in "${variants[@]}"; do
+      if dpkg-query -W -f='${db:Status-Abbrev}' "${variant}" 2>/dev/null | grep -qx 'ii ' \
+          || i386_package_has_candidate "${variant}"; then
+        I386_RESOLVED_PACKAGE="${variant}"
+        if [ "${variant}" = "${preferred}" ]; then
+          echo "Known i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE}"
+        else
+          echo "Release-local i386 runtime mapping: ${soname} -> ${I386_RESOLVED_PACKAGE} (preferred ${preferred})"
+        fi
+        return 0
+      fi
+    done
+    echo "::warning::Preferred mapping ${soname} -> ${preferred} and its release-local variants are unavailable on ${RUNNER_DISTRO_ID:-this runner}; trying SONAME-derived discovery."
   fi
 
-  local candidate
-  local -a candidates=() guessed=()
   mapfile -t guessed < <(guess_i386_packages_for_soname "${soname}" | sort -u)
   for candidate in "${guessed[@]}"; do
-    if i386_package_has_candidate "${candidate}"; then
-      candidates+=("${candidate}")
-    fi
+    mapfile -t variants < <(i386_package_variants "${candidate}" | sort -u)
+    for variant in "${variants[@]}"; do
+      if i386_package_has_candidate "${variant}"; then
+        candidates+=("${variant}")
+      fi
+    done
   done
   mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | sed '/^$/d' | sort -u)
   if [ "${#candidates[@]}" -eq 1 ]; then

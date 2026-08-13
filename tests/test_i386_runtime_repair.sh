@@ -25,7 +25,7 @@ apt_file_search_i386() {
 apt-cache() {
   [ "${1:-}" = policy ] || return 2
   case "${2:-}" in
-    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386|libstuck:i386)
+    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386|libstuck:i386|libglib2.0-0t64:i386)
       printf '%s\n' "${2}:" '  Candidate: 1.0' ;;
     libunavailable:i386)
       printf '%s\n' "${2}:" '  Candidate: (none)' ;;
@@ -36,6 +36,15 @@ apt-cache() {
 
 resolve_i386_package_for_soname libQt5Widgets.so.5
 [ "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386 ] || fail "derived provider was not selected"
+
+
+# Ubuntu 24.04-style time64 package renames must be discovered from a stale preferred mapping
+# The host running this contract test must not satisfy the stale package through its own dpkg database.
+dpkg-query() { return 1; }
+# without falling into apt-file Contents metadata.
+I386_SONAME_PACKAGES[libglib-2.0.so.0]=libglib2.0-0:i386
+resolve_i386_package_for_soname libglib-2.0.so.0
+[ "${I386_RESOLVED_PACKAGE}" = libglib2.0-0t64:i386 ] || fail "time64 provider variant was not selected"
 
 resolve_i386_package_for_soname libMysteryProvider.so.7
 [ "${I386_RESOLVED_PACKAGE}" = libunique:i386 ] || fail "apt-file fallback provider was not selected"

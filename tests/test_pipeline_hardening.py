@@ -80,6 +80,12 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("I386_BASELINE_SONAMES=(", common)
         self.assertIn('resolve_i386_package_for_soname "${soname}"', common)
 
+    def test_release_local_time64_package_variants_are_supported(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("i386_package_variants()", common)
+        self.assertIn('"${base}t64:i386"', common)
+        self.assertIn("Release-local i386 runtime mapping", common)
+
     def test_runtime_scan_excludes_shared_target_objects(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn("is_i386_host_executable()", common)
