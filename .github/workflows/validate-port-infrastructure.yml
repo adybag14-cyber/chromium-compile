@@ -181,6 +181,8 @@ jobs:
         run: |
           set -euo pipefail
           source .github/scripts/chromium_i686_common.sh
+          maximize_runner_disk_space
+          install_system_dependencies
           install_i386_runtime_libraries
           bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils
 

@@ -98,6 +98,17 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("set +e", resolver)
         self.assertNotIn("set -e", resolver)
 
+    def test_large_cleanup_and_swap_operations_are_bounded(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_SWAP_TIMEOUT_SECONDS", common)
+        self.assertIn("bounded_sudo_rm_rf /usr/local/lib/android", common)
+        self.assertIn('bounded_rm_rf "${CHROMIUM_SRC}"', common)
+        self.assertIn('bounded_rm_rf "${OUT_DIR}"', resume)
+        self.assertNotIn("sudo rm -rf /usr/local/lib/android", common)
+
     def test_runtime_discovery_and_apt_operations_are_bounded(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn("CHROMIUM_I686_APT_TIMEOUT_SECONDS", common)
@@ -127,6 +138,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("ubuntu-22.04", validation)
         self.assertIn("ubuntu-24.04", validation)
         self.assertIn("ubuntu-latest", validation)
+        self.assertIn("maximize_runner_disk_space", validation)
+        self.assertIn("install_system_dependencies", validation)
         self.assertIn("schedule:", validation)
         self.assertIn("report_lts_drift:", validation)
         self.assertIn("Ubuntu LTS compatibility drift", validation)

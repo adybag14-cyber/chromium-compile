@@ -203,7 +203,7 @@ restore_out_checkpoint() {
     checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
   fi
   echo "Restoring previous Ninja output checkpoint from ${archive}"
-  rm -rf "${OUT_DIR}"
+  bounded_rm_rf "${OUT_DIR}"
   tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"
   du -sh "${OUT_DIR}" || true
 
