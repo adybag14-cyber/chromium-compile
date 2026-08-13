@@ -127,6 +127,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("ubuntu-22.04", validation)
         self.assertIn("ubuntu-24.04", validation)
         self.assertIn("ubuntu-latest", validation)
+        self.assertIn("maximize_runner_disk_space", validation)
+        self.assertIn("install_system_dependencies", validation)
         self.assertIn("schedule:", validation)
         self.assertIn("report_lts_drift:", validation)
         self.assertIn("Ubuntu LTS compatibility drift", validation)
