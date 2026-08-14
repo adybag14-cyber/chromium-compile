@@ -123,7 +123,7 @@ runs:
         checkpoint_restored=false
         resume_archive=""
         preferred_candidate="${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst"
-        if [ -s "${preferred_candidate}" ]; then
+        if [ -n "${{ inputs.preferred-checkpoint-artifact }}" ]; then
           if ! validate_checkpoint_source_run \
               "${{ inputs.preferred-checkpoint-run-id }}" \
               "${{ inputs.version }}" \
@@ -132,6 +132,8 @@ runs:
             echo "failure_class=${CHECKPOINT_PROVENANCE_FAILURE_CLASS:-deterministic_build}" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
+        fi
+        if [ -s "${preferred_candidate}" ]; then
           if checkpoint_bundle_is_usable "${preferred_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
             resume_archive="${preferred_candidate}"
           else

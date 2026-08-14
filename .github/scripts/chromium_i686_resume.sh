@@ -109,7 +109,14 @@ validate_checkpoint_source_run() {
   local expected_version="${2:?expected Chromium version is required}"
   local current_stage="${3:?current stage is required}"
   local artifact_name="${4:?checkpoint artifact name is required}"
+  local expected_repo="${GITHUB_REPOSITORY:-}"
+  local expected_ref="${GITHUB_REF_NAME:-}"
   CHECKPOINT_PROVENANCE_FAILURE_CLASS=deterministic_build
+  if [ -z "${expected_repo}" ] || [ -z "${expected_ref}" ]; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::GitHub repository/ref metadata is unavailable for checkpoint provenance validation."
+    return 1
+  fi
 
   [[ "${run_id}" =~ ^[0-9]+$ ]] || {
     echo "::error::Checkpoint run id is not numeric: ${run_id}"
@@ -141,21 +148,25 @@ validate_checkpoint_source_run() {
     return 1
   fi
   local workflow_path head_repo head_branch title
-  workflow_path="$(jq -r '.path // ""' <<<"${run_json}")"
-  head_repo="$(jq -r '.head_repository.full_name // ""' <<<"${run_json}")"
-  head_branch="$(jq -r '.head_branch // ""' <<<"${run_json}")"
-  title="$(jq -r '.display_title // ""' <<<"${run_json}")"
+  if ! workflow_path="$(jq -er '.path | strings' <<<"${run_json}")" \
+      || ! head_repo="$(jq -er '.head_repository.full_name | strings' <<<"${run_json}")" \
+      || ! head_branch="$(jq -er '.head_branch | strings' <<<"${run_json}")" \
+      || ! title="$(jq -er '.display_title | strings' <<<"${run_json}")"; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Checkpoint run ${run_id} returned incomplete or malformed provenance metadata."
+    return 1
+  fi
 
   test "${workflow_path}" = ".github/workflows/chromium-i686.yml" || {
     echo "::error::Checkpoint run ${run_id} belongs to ${workflow_path}, not the Chromium i686 build workflow."
     return 1
   }
-  test "${head_repo}" = "${GITHUB_REPOSITORY}" || {
-    echo "::error::Checkpoint run ${run_id} originated from ${head_repo}, not ${GITHUB_REPOSITORY}."
+  test "${head_repo}" = "${expected_repo}" || {
+    echo "::error::Checkpoint run ${run_id} originated from ${head_repo}, not ${expected_repo}."
     return 1
   }
-  test "${head_branch}" = "${GITHUB_REF_NAME}" || {
-    echo "::error::Checkpoint run ${run_id} is from branch ${head_branch}, not ${GITHUB_REF_NAME}."
+  test "${head_branch}" = "${expected_ref}" || {
+    echo "::error::Checkpoint run ${run_id} is from branch ${head_branch}, not ${expected_ref}."
     return 1
   }
   [[ "${title}" == "Chromium i686 ${expected_version}"* ]] || {
@@ -175,7 +186,16 @@ validate_checkpoint_source_run() {
     echo "::error::Could not verify checkpoint artifact ownership for Actions run ${run_id}."
     return 1
   fi
-  total="$(jq -r '.total_count // 0' <<<"${artifacts_json}")"
+  if ! total="$(jq -er '.total_count | numbers' <<<"${artifacts_json}")"; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Checkpoint artifact listing for run ${run_id} returned malformed total_count metadata."
+    return 1
+  fi
+  [[ "${total}" =~ ^[0-9]+$ ]] || {
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Checkpoint artifact total_count is not an integer: ${total}"
+    return 1
+  }
   if [ "${total}" -gt 100 ]; then
     echo "::error::Checkpoint run ${run_id} has ${total} artifacts; refusing truncated artifact provenance lookup."
     return 1

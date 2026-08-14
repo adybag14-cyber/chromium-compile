@@ -62,4 +62,22 @@ set -e
 [ "${status}" -eq 1 ]
 [ "${CHECKPOINT_PROVENANCE_FAILURE_CLASS}" = infrastructure ]
 
+GH_MODE=ok
+RUN_JSON='{}'
+set +e
+validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ]
+[ "${CHECKPOINT_PROVENANCE_FAILURE_CLASS}" = infrastructure ]
+
+RUN_JSON='{"path":".github/workflows/chromium-i686.yml","head_repository":{"full_name":"owner/repo"},"head_branch":"main","display_title":"Chromium i686 151.0.7922.108 - stage 2 - attempt 0"}'
+ARTIFACTS_JSON='{"total_count":"not-a-number","artifacts":[]}'
+set +e
+validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ]
+[ "${CHECKPOINT_PROVENANCE_FAILURE_CLASS}" = infrastructure ]
+
 echo "checkpoint provenance contract tests passed"
