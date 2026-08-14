@@ -445,5 +445,15 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("return 0", gn_func)
 
 
+    def test_source_archive_paths_are_validated_before_extraction(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        validator = (ROOT / "scripts" / "validate_chromium_source_archive.py").read_text(encoding="utf-8")
+        self.assertIn("validate_chromium_source_archive.py", common)
+        self.assertLess(common.index("validate_chromium_source_tarball"), common.index("tar -xJf"))
+        self.assertIn("Unsafe source archive member path", validator)
+        self.assertIn("Source archive link escapes expected root", validator)
+        self.assertIn("Unsupported special source archive member", validator)
+
+
 if __name__ == "__main__":
     unittest.main()

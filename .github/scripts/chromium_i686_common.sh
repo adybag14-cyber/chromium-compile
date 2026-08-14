@@ -851,8 +851,10 @@ validate_chromium_source_tarball() {
     echo "::error::Chromium ${version} source archive failed xz integrity validation: ${tarball}"
     return 1
   fi
-  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" tar -tJf "${tarball}" >/dev/null; then
-    echo "::error::Chromium ${version} source archive failed tar structure validation: ${tarball}"
+  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+      python3 "${WORKSPACE}/scripts/validate_chromium_source_archive.py" \
+        "${tarball}" --version "${version}"; then
+    echo "::error::Chromium ${version} source archive failed safe-path/structure validation: ${tarball}"
     return 1
   fi
 }
