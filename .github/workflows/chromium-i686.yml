@@ -163,6 +163,7 @@ jobs:
       ${{
         needs.build.result == 'success' &&
         needs.build.outputs.complete != 'true' &&
+        github.ref_name == github.event.repository.default_branch &&
         fromJSON(needs.build.outputs.stage) < fromJSON(needs.build.outputs.max_stage)
       }}
     runs-on: ubuntu-latest
@@ -209,6 +210,7 @@ jobs:
       ${{
         always() &&
         (needs.build.result == 'failure' || needs.build.result == 'cancelled') &&
+        github.ref_name == github.event.repository.default_branch &&
         needs.build.outputs.failure_class != 'deterministic_build' &&
         fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(needs.build.outputs.max_retries || '0')
       }}
@@ -258,6 +260,7 @@ jobs:
       ${{
         always() &&
         (needs.build.result == 'failure' || needs.build.result == 'cancelled') &&
+        github.ref_name == github.event.repository.default_branch &&
         needs.recover_bad_runner.result != 'success'
       }}
     permissions:

@@ -72,7 +72,7 @@ jobs:
           run_extended_i686_preflight
 
       - name: Quarantine failed preflight
-        if: ${{ failure() }}
+        if: ${{ failure() && github.ref_name == github.event.repository.default_branch }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -111,7 +111,7 @@ jobs:
           if-no-files-found: error
 
       - name: Dispatch resumable build
-        if: ${{ success() && inputs.dispatch_build }}
+        if: ${{ success() && inputs.dispatch_build && github.ref_name == github.event.repository.default_branch }}
         env:
           GH_TOKEN: ${{ github.token }}
           CHROMIUM_VERSION: ${{ inputs.version }}

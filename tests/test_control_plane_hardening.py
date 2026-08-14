@@ -27,6 +27,13 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("scripts/github_maintenance_issue.py", preflight)
         self.assertNotIn("gh workflow run chromium-i686.yml", preflight)
 
+    def test_non_default_runs_cannot_mutate_production_control_state(self):
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        self.assertIn("failure() && github.ref_name == github.event.repository.default_branch", preflight)
+        self.assertIn("success() && inputs.dispatch_build && github.ref_name == github.event.repository.default_branch", preflight)
+        self.assertGreaterEqual(build.count("github.ref_name == github.event.repository.default_branch"), 3)
+
     def test_bootstrap_is_manual_release_guarded_and_exactly_once(self):
         bootstrap = (ROOT / ".github" / "workflows" / "bootstrap-i686-live.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", bootstrap)
