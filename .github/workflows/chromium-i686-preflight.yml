@@ -95,7 +95,7 @@ jobs:
           Failed workflow history is itself treated as quarantine state, so this issue is a human-visible mirror rather than the only loop-prevention mechanism.
           EOF
 
-          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --json number,title --jq ".[] | select(.title == \"${title}\") | .number" | head -n1)"
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title --jq ".[] | select(.title == \"${title}\") | .number" | head -n1)"
           if [ -n "${issue_number}" ]; then
             gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body-file "${body_file}"
           else
