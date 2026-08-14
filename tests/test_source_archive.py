@@ -67,6 +67,15 @@ class ChromiumSourceArchiveTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validator.validate_source_archive(path, self.VERSION)
 
+    def test_rejects_archive_missing_expected_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "source.tar.xz"
+            with tarfile.open(path, "w:xz") as archive:
+                info, data = self._file("foreign/DEPS")
+                archive.addfile(info, data)
+            with self.assertRaises(ValueError):
+                validator.validate_source_archive(path, self.VERSION)
+
     def test_rejects_symlink_escape(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "source.tar.xz"

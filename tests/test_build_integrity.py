@@ -143,7 +143,7 @@ action_foreach("calculate_deb_dependencies") {}
 
     def test_renders_standalone_wrapper_from_upstream_template(self):
         with tempfile.TemporaryDirectory() as tmp:
-            source, out = self._fixture(pathlib.Path(tmp))
+            _source, out = self._fixture(pathlib.Path(tmp))
             target = runtime.render_standalone_wrapper(out)
             text = target.read_text(encoding="utf-8")
             self.assertIn("chrome", text)
@@ -151,7 +151,6 @@ action_foreach("calculate_deb_dependencies") {}
             self.assertNotIn("@@channel", text)
             if os.name != "nt":
                 self.assertTrue(target.stat().st_mode & 0o111)
-            self.assertIn("target.chmod(0o755)", (ROOT / "scripts" / "chromium_linux_runtime.py").read_text(encoding="utf-8"))
 
     def test_missing_required_output_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,6 +158,13 @@ action_foreach("calculate_deb_dependencies") {}
             (out / "libEGL.so").unlink()
             with self.assertRaises(ValueError):
                 runtime.collect_runtime(source, out)
+
+    def test_missing_installer_definition_is_actionable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp) / "source"
+            source.mkdir()
+            with self.assertRaisesRegex(ValueError, "installer definition is unavailable"):
+                runtime.installer_runtime_candidates(source)
 
 
 class ReleaseArchiveTests(unittest.TestCase):
@@ -215,6 +221,47 @@ class ReleaseArchiveTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 archive_validator.validate_archive(path)
 
+    def test_rejects_unsafe_link_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            with tarfile.open(path, "w:xz") as archive:
+                for name in names:
+                    data = b"runtime"
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+                link = tarfile.TarInfo("escape-link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../outside"
+                archive.addfile(link)
+            with self.assertRaises(ValueError):
+                archive_validator.validate_archive(path)
+
+    def test_rejects_missing_required_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales", "chrome_sandbox"}) + ["locales/en-US.pak"]
+            self._archive(path, names)
+            with self.assertRaises(ValueError):
+                archive_validator.validate_archive(path)
+
+    def test_rejects_required_runtime_stored_as_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales", "chrome"}) + ["locales/en-US.pak"]
+            with tarfile.open(path, "w:xz") as archive:
+                for name in names:
+                    data = b"runtime"
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+                link = tarfile.TarInfo("chrome")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "resources.pak"
+                archive.addfile(link)
+            with self.assertRaises(ValueError):
+                archive_validator.validate_archive(path)
 
 
 if __name__ == "__main__":

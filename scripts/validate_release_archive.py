@@ -16,6 +16,7 @@ def _unsafe(value: str) -> bool:
 
 def validate_archive(path: Path) -> None:
     names: set[str] = set()
+    nonempty_regular_files: set[str] = set()
     with tarfile.open(path, mode="r:xz") as archive:
         for member in archive.getmembers():
             if _unsafe(member.name):
@@ -29,12 +30,14 @@ def validate_archive(path: Path) -> None:
                 if _unsafe(member.linkname):
                     raise ValueError(f"Unsafe archive link target: {member.name} -> {member.linkname}")
             names.add(normalized)
+            if member.isfile() and member.size > 0:
+                nonempty_regular_files.add(normalized)
     missing: list[str] = []
     for required in sorted(REQUIRED_RUNTIME):
         if required == "locales":
-            if not any(name == "locales" or name.startswith("locales/") for name in names):
+            if not any(name.startswith("locales/") for name in nonempty_regular_files):
                 missing.append(required)
-        elif required not in names:
+        elif required not in nonempty_regular_files:
             missing.append(required)
     if missing:
         raise ValueError("Release archive is missing required runtime paths: " + ", ".join(missing))

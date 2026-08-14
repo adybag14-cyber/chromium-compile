@@ -266,7 +266,7 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("validate_extracted_chromium_version()", common)
         self.assertIn("--connect-timeout 30", common)
         self.assertIn("--max-time", common)
-        self.assertIn("Discarding structurally unsafe cached Chromium source archive", common)
+        self.assertIn("Authoritative GCS source bytes are structurally unsafe", common)
         self.assertIn("Discarding cached Chromium source bytes that do not match the authoritative GCS object", common)
 
     def test_build_tracks_upstream_linux_installer_runtime(self):
@@ -290,11 +290,11 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('grep -qx "github_run_id=${BUILD_RUN_ID}"', publish)
         self.assertIn('--target "${BUILD_SHA}"', publish)
         self.assertIn("refusing to rewrite release history", publish)
-        self.assertIn("immutable releases are never repaired with --clobber", publish)
+        self.assertIn("immutable releases are never mutated in place", publish)
         self.assertIn("--draft", publish)
         self.assertIn("Uploading missing draft asset", publish)
         self.assertIn("--draft=false", publish)
-        self.assertNotRegex(publish, r"bounded_gh release (?:upload|create|edit)[^\n]*--clobber")
+        self.assertNotIn("--clobber", publish)
         self.assertIn('"$(basename "${package}")"', common)
         self.assertIn("package_sha256=", common)
 
@@ -377,7 +377,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("continuing without swap", common)
         self.assertIn("capture_ldd_output()", common)
         self.assertIn("bounded_ldd()", common)
-        self.assertIn("timeout -k 3s 15s ldd", common)
+        self.assertIn("CHROMIUM_I686_LDD_TIMEOUT_SECONDS", common)
+        self.assertIn('timeout -k 3s "${CHROMIUM_I686_LDD_TIMEOUT_SECONDS}s" ldd', common)
         self.assertIn("timeout -k 10s 120s ccache --cleanup", common)
 
     def test_standalone_runtime_requires_rendered_wrapper(self):
@@ -398,6 +399,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("verifying whether GitHub stored", publish)
         self.assertIn("All draft assets are byte-identical", publish)
         self.assertIn("--draft=false", publish)
+        self.assertIn("group: chromium-i686-release", publish)
+        self.assertNotIn("github.event.workflow_run.id || inputs.build_run_id", publish[publish.index("concurrency:"):publish.index("jobs:")])
+        self.assertIn("required release-digest capability is unavailable", publish)
         self.assertNotIn("install_i386_runtime_libraries", publish)
 
     def test_build_hosts_always_install_release_validation_tools(self):
@@ -430,6 +434,10 @@ class PipelineHardeningTests(unittest.TestCase):
         install = publish[install_pos:resolve_pos]
         self.assertIn("bounded_sudo_apt_get update", install)
         self.assertIn("jq python3 file binutils xz-utils", install)
+        self.assertIn("display_title<<%s", publish)
+        self.assertIn("if: ${{ failure() }}", publish)
+        self.assertIn("steps.artifact.outputs.version || 'unknown'", publish)
+        self.assertIn("not converting publication success into a release failure", publish)
 
 
     def test_source_identity_is_cross_checked_against_authoritative_tag(self):
@@ -479,6 +487,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("sha256", verifier)
         self.assertIn("safe_archive", verifier)
         self.assertIn("gitiles_identity", verifier)
+        self.assertIn("ALLOWED_SOURCE_HOSTS", verifier)
+        self.assertIn("--safe-archive-verified --gitiles-identity-verified", common)
         self.assertIn("skipping redundant decompression scan", common)
         self.assertIn("validate_chromium_critical_source_identity", common)
         self.assertNotIn('xz -t "${tarball}"', common)

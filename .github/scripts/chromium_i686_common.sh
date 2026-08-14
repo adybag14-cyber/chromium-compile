@@ -22,6 +22,7 @@ CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS="${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECON
 CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS:-1800}"
 CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS:-600}"
 CHROMIUM_I686_GH_TIMEOUT_SECONDS="${CHROMIUM_I686_GH_TIMEOUT_SECONDS:-600}"
+CHROMIUM_I686_LDD_TIMEOUT_SECONDS="${CHROMIUM_I686_LDD_TIMEOUT_SECONDS:-15}"
 CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
 export DEPOT_TOOLS_UPDATE=0
 
@@ -487,7 +488,7 @@ is_i386_host_executable() {
 }
 
 bounded_ldd() {
-  timeout -k 3s 15s ldd "$@"
+  timeout -k 3s "${CHROMIUM_I686_LDD_TIMEOUT_SECONDS}s" ldd "$@"
 }
 
 capture_ldd_output() {
@@ -880,6 +881,7 @@ validate_chromium_critical_source_identity() {
     fi
     local_sha="$(sha256sum "${CHROMIUM_SRC}/${rel}" | awk '{print $1}')"
     remote_sha="$(sha256sum "${decoded}" | awk '{print $1}')"
+    echo "Critical source identity ${rel}: local=${local_sha} upstream=${remote_sha}"
     rm -f "${encoded}" "${decoded}"
     if [ "${local_sha}" != "${remote_sha}" ]; then
       echo "::error::Chromium source archive critical file ${rel} does not match authoritative tag ${version}."
@@ -915,9 +917,9 @@ prepare_chromium_source() {
       else
         echo "Cached bytes are authoritative but have no matching safety marker; performing the full archive scan."
         if ! validate_chromium_source_tarball "${tarball}" "${version}"; then
-          echo "::warning::Discarding structurally unsafe cached Chromium source archive."
+          echo "::error::Authoritative GCS source bytes are structurally unsafe; refusing a redundant redownload of the same object."
           rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}"
-          source_sha=""
+          return 1
         fi
       fi
     else
@@ -966,7 +968,7 @@ prepare_chromium_source() {
     validate_chromium_critical_source_identity "${version}"
     python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
       --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
-      --write-marker >/dev/null
+      --write-marker --safe-archive-verified --gitiles-identity-verified >/dev/null
     echo "Recorded SHA-bound source safety/Gitiles identity marker for Chromium ${version}."
   else
     echo "Reused prior Gitiles identity proof for the exact same GCS generation, MD5, length and SHA-256."
@@ -1185,7 +1187,12 @@ validate_i686_runtime_bundle() {
     }
   done
 
-  local path resolved file_output elf_class elf_machine
+  local path resolved file_output elf_class elf_machine root_real
+  root_real="$(realpath "${root}" 2>/dev/null || true)"
+  if [ -z "${root_real}" ] || [ ! -d "${root_real}" ]; then
+    echo "::error::Could not resolve runtime bundle root: ${root}"
+    return 1
+  fi
   while IFS= read -r -d '' path; do
     resolved="$(readlink -f "${path}" 2>/dev/null || true)"
     if [ -z "${resolved}" ] || [ ! -e "${resolved}" ]; then
@@ -1193,7 +1200,7 @@ validate_i686_runtime_bundle() {
       return 1
     fi
     case "${resolved}" in
-      "$(realpath "${root}")"/*) ;;
+      "${root_real}"/*) ;;
       *)
         echo "::error::Runtime bundle symlink escapes package root: ${path} -> ${resolved}"
         return 1
@@ -1316,11 +1323,13 @@ package_chromium_i686() {
   bounded_rm_rf "${smoke_dir}"
   mkdir -p "${smoke_dir}"
   bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${package}" -C "${smoke_dir}"
-  if ! validate_i686_runtime_bundle "${smoke_dir}"; then
+  local smoke_status=0
+  validate_i686_runtime_bundle "${smoke_dir}" || smoke_status=$?
+  bounded_rm_rf "${smoke_dir}" || true
+  if [ "${smoke_status}" -ne 0 ]; then
     echo "::error::Packaged runtime bundle failed deterministic i686 validation."
     return 1
   fi
-  bounded_rm_rf "${smoke_dir}" || true
 
   CHROMIUM_PACKAGE_FAILURE_CLASS=""
   ls -lh "${package}" "${checksum}" "${manifest}"

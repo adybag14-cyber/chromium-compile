@@ -8,11 +8,22 @@ import hashlib
 import json
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
+
+
+ALLOWED_SOURCE_HOSTS = frozenset({"commondatastorage.googleapis.com", "storage.googleapis.com"})
 
 
 def fetch_metadata(url: str, timeout: int = 60) -> dict[str, object]:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_SOURCE_HOSTS:
+        raise ValueError(f"Refusing source metadata from untrusted URL: {url!r}")
     request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "chromium-i686-source-verifier/1"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
+        final_url = response.geturl()
+        final = urlparse(final_url)
+        if final.scheme != "https" or final.hostname not in ALLOWED_SOURCE_HOSTS:
+            raise ValueError(f"Source metadata request redirected to untrusted URL: {final_url!r}")
         headers = response.headers
         hashes = headers.get_all("x-goog-hash") or []
         tokens: dict[str, str] = {}
@@ -84,7 +95,17 @@ def marker_matches(path: Path, *, version: str, metadata: dict[str, object], sha
     )
 
 
-def write_marker(path: Path, *, version: str, metadata: dict[str, object], sha256: str) -> None:
+def write_marker(
+    path: Path,
+    *,
+    version: str,
+    metadata: dict[str, object],
+    sha256: str,
+    safe_archive: bool,
+    gitiles_identity: bool,
+) -> None:
+    if not (safe_archive and gitiles_identity):
+        raise ValueError("Refusing to write source trust marker without both validation proofs")
     payload = {
         "schema": 1,
         "version": version,
@@ -93,8 +114,8 @@ def write_marker(path: Path, *, version: str, metadata: dict[str, object], sha25
         "md5_base64": metadata["md5_base64"],
         "etag": metadata.get("etag", ""),
         "sha256": sha256,
-        "safe_archive": True,
-        "gitiles_identity": True,
+        "safe_archive": safe_archive,
+        "gitiles_identity": gitiles_identity,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -109,6 +130,8 @@ def main() -> int:
     parser.add_argument("--version")
     parser.add_argument("--check-marker", action="store_true")
     parser.add_argument("--write-marker", action="store_true")
+    parser.add_argument("--safe-archive-verified", action="store_true")
+    parser.add_argument("--gitiles-identity-verified", action="store_true")
     args = parser.parse_args()
 
     if args.metadata_in:
@@ -134,7 +157,14 @@ def main() -> int:
     if args.write_marker:
         if not args.marker or not args.version or "sha256" not in result:
             parser.error("--write-marker requires --marker, --version, and metadata containing sha256")
-        write_marker(args.marker, version=args.version, metadata=result, sha256=str(result["sha256"]))
+        write_marker(
+            args.marker,
+            version=args.version,
+            metadata=result,
+            sha256=str(result["sha256"]),
+            safe_archive=args.safe_archive_verified,
+            gitiles_identity=args.gitiles_identity_verified,
+        )
 
     print(json.dumps(result, sort_keys=True))
     return 0

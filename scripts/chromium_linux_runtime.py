@@ -19,7 +19,6 @@ REQUIRED_RUNTIME = {
     "locales",
 }
 EXTRA_IF_PRESENT = {
-    "chrome-wrapper",
     "chrome_100_percent.pak",
     "chrome_200_percent.pak",
     "headless_command_resources.pak",
@@ -38,7 +37,10 @@ def _safe_rel(value: str) -> str:
 
 def installer_runtime_candidates(source_root: Path) -> set[str]:
     build_gn = source_root / "chrome" / "installer" / "linux" / "BUILD.gn"
-    text = build_gn.read_text(encoding="utf-8")
+    try:
+        text = build_gn.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Chromium Linux installer definition is unavailable: {build_gn}") from exc
     if '"common/wrapper"' not in text:
         raise ValueError("Chromium Linux installer no longer declares common/wrapper; review standalone launcher packaging")
     start = text.find("packaging_files_executables = [")
@@ -74,7 +76,8 @@ def render_standalone_wrapper(out_dir: Path) -> Path:
         raise ValueError("Chromium Linux wrapper placeholders changed; review standalone launcher rendering")
     rendered = text.replace("@@PROGNAME", "chrome").replace("@@channel", "")
     target = out_dir / "chrome-wrapper"
-    target.write_text(rendered, encoding="utf-8", newline="\n")
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(rendered)
     target.chmod(0o755)
     return target
 

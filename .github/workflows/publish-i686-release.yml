@@ -20,7 +20,9 @@ permissions:
   issues: write
 
 concurrency:
-  group: chromium-i686-release-${{ github.event.workflow_run.id || inputs.build_run_id }}
+  # Release mutation is rare and correctness-sensitive. Serialize all publishers so
+  # two successful build runs can never race on the same version tag/draft.
+  group: chromium-i686-release
   cancel-in-progress: false
 
 jobs:
@@ -95,7 +97,12 @@ jobs:
           }
           echo "run_id=${REQUESTED_RUN_ID}" >> "${GITHUB_OUTPUT}"
           echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
-          echo "display_title=${display_title}" >> "${GITHUB_OUTPUT}"
+          delimiter="display_title_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+          {
+            printf 'display_title<<%s\n' "${delimiter}"
+            printf '%s\n' "${display_title}"
+            printf '%s\n' "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Discover completed build artifact
         id: artifact
@@ -212,6 +219,26 @@ jobs:
             "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686-manifest.txt"
           )
 
+          release_asset_digest() {
+            local json="${1:?release json is required}"
+            local name="${2:?asset name is required}"
+            local count digest
+            count="$(jq -r --arg name "${name}" '[.assets[] | select(.name == $name)] | length' <<<"${json}")"
+            if [ "${count}" -eq 0 ]; then
+              return 4
+            fi
+            if [ "${count}" -ne 1 ]; then
+              echo "::error::Release contains ${count} assets named ${name}; refusing ambiguous publication state." >&2
+              return 1
+            fi
+            digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest // empty' <<<"${json}")"
+            if [ -z "${digest}" ]; then
+              echo "::error::GitHub did not expose a SHA-256 digest for existing release asset ${name}; required release-digest capability is unavailable." >&2
+              return 2
+            fi
+            printf '%s\n' "${digest}"
+          }
+
           release_json=""
           if release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets 2>/dev/null)"; then
             is_draft="$(jq -r '.isDraft' <<<"${release_json}")"
@@ -249,9 +276,12 @@ jobs:
             for asset in "${assets[@]}"; do
               name="$(basename "${asset}")"
               local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
-              remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
-              if [ -z "${remote_digest}" ] || [ "${remote_digest}" = "null" ] || [ "${remote_digest}" != "${local_digest}" ]; then
-                echo "::error::Published release asset ${name} is missing or differs; immutable releases are never repaired with --clobber."
+              if ! remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                echo "::error::Published release asset ${name} is missing or lacks verifiable digest metadata; immutable releases are never mutated in place."
+                exit 1
+              fi
+              if [ "${remote_digest}" != "${local_digest}" ]; then
+                echo "::error::Published release asset ${name} differs from the validated local artifact; immutable releases are never mutated in place."
                 exit 1
               fi
             done
@@ -269,14 +299,23 @@ jobs:
               name="$(basename "${asset}")"
               local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
               release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
-              remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
-              if [ -z "${remote_digest}" ] || [ "${remote_digest}" = "null" ]; then
+              digest_status=0
+              if remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                :
+              else
+                digest_status=$?
+                if [ "${digest_status}" -ne 4 ]; then
+                  exit 1
+                fi
                 echo "Uploading missing draft asset ${name}."
                 if ! bounded_gh release upload "${tag}" "${asset}" --repo "${GITHUB_REPOSITORY}"; then
                   echo "::warning::Upload returned an error; verifying whether GitHub stored ${name}."
                 fi
                 release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
-                remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
+                if ! remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                  echo "::error::Uploaded draft asset ${name} is not present with verifiable digest metadata."
+                  exit 1
+                fi
               fi
               if [ "${remote_digest}" != "${local_digest}" ]; then
                 echo "::error::Draft asset ${name} differs from the validated local artifact; refusing overwrite."
@@ -288,7 +327,10 @@ jobs:
             for asset in "${assets[@]}"; do
               name="$(basename "${asset}")"
               local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
-              remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
+              if ! remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                echo "::error::Draft asset ${name} lost required digest metadata before publication."
+                exit 1
+              fi
               test "${remote_digest}" = "${local_digest}"
             done
 
@@ -303,18 +345,24 @@ jobs:
           fi
 
           maintenance_title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
-          issue_number="$(bounded_gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${maintenance_title}" '.[] | select(.title == $title) | .number' | head -n1)"
-          if [ -n "${issue_number}" ]; then
-            bounded_gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "Resolved by successful immutable unofficial i686 release \`${tag}\`."
-            bounded_gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --reason completed
+          issue_number=""
+          if issue_number="$(bounded_gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${maintenance_title}" '.[] | select(.title == $title) | .number' | head -n1)"; then
+            if [ -n "${issue_number}" ]; then
+              bounded_gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "Resolved by successful immutable unofficial i686 release \`${tag}\`." \
+                || echo "::warning::Release succeeded but maintenance issue comment failed."
+              bounded_gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --reason completed \
+                || echo "::warning::Release succeeded but maintenance issue close failed."
+            fi
+          else
+            echo "::warning::Release succeeded but maintenance issue lookup failed; not converting publication success into a release failure."
           fi
 
       - name: Report release publication failure
-        if: ${{ failure() && steps.artifact.outputs.found == 'true' }}
+        if: ${{ failure() }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          CHROMIUM_VERSION: ${{ steps.artifact.outputs.version }}
+          CHROMIUM_VERSION: ${{ steps.artifact.outputs.version || 'unknown' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
