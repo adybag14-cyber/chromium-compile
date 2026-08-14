@@ -430,5 +430,20 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("jq python3 file binutils xz-utils", install)
 
 
+    def test_source_identity_is_cross_checked_against_authoritative_tag(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("validate_chromium_critical_source_identity()", common)
+        self.assertIn("chromium.googlesource.com/chromium/src/+/refs/tags/${version}", common)
+        self.assertIn("chrome/installer/linux/BUILD.gn", common)
+        self.assertIn("critical source files against the authoritative Gitiles tag", common)
+
+    def test_gn_pin_is_reasserted_even_if_binary_already_exists(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        gn_func = common[common.index("install_gn_from_cipd()") : common.index("configure_gn()")]
+        self.assertIn("will be re-asserted", gn_func)
+        self.assertIn("cipd install", gn_func)
+        self.assertNotIn("return 0", gn_func)
+
+
 if __name__ == "__main__":
     unittest.main()

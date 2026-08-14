@@ -9,9 +9,16 @@ from pathlib import Path
 
 GN_RE = re.compile(r'[\'"]gn_version[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]')
 DEPOT_RE = re.compile(
-    r'[\'"]src/third_party/depot_tools[\'"]\s*:\s*.*?[\'"]([0-9a-f]{40})[\'"]',
-    re.DOTALL,
+    r"""
+    [\'"]src/third_party/depot_tools[\'"]\s*:\s*
+    Var\([\'"]chromium_git[\'"]\)\s*\+\s*
+    [\'"]/chromium/tools/depot_tools\.git[\'"]\s*\+\s*
+    [\'"]@[\'"]\s*\+\s*
+    [\'"]([0-9a-f]{40})[\'"]
+    """,
+    re.VERBOSE,
 )
+
 
 
 def resolve_pins(path: Path) -> dict[str, str]:
@@ -22,7 +29,10 @@ def resolve_pins(path: Path) -> dict[str, str]:
         raise ValueError(f"Could not resolve gn_version from {path}")
     if not depot:
         raise ValueError(f"Could not resolve depot_tools revision from {path}")
-    return {"gn_version": gn.group(1), "depot_tools_revision": depot.group(1)}
+    gn_version = gn.group(1)
+    if not re.fullmatch(r"git_revision:[0-9a-f]{40}", gn_version):
+        raise ValueError(f"Unsupported or mutable gn_version in {path}: {gn_version!r}")
+    return {"gn_version": gn_version, "depot_tools_revision": depot.group(1)}
 
 
 def main() -> int:

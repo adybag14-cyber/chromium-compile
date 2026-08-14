@@ -32,10 +32,11 @@ class ToolPinTests(unittest.TestCase):
             deps.write_text(
                 """
 vars = {
-  'gn_version': 'git_revision:0123456789abcdef',
+  'gn_version': 'git_revision:0123456789abcdef0123456789abcdef01234567',
 }
 
 deps = {
+  'src/unrelated': 'https://example.invalid/repo.git@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   'src/third_party/depot_tools':
     Var('chromium_git') + '/chromium/tools/depot_tools.git' + '@' + '0123456789abcdef0123456789abcdef01234567',
 }
@@ -45,7 +46,7 @@ deps = {
             self.assertEqual(
                 tool_pins.resolve_pins(deps),
                 {
-                    "gn_version": "git_revision:0123456789abcdef",
+                    "gn_version": "git_revision:0123456789abcdef0123456789abcdef01234567",
                     "depot_tools_revision": "0123456789abcdef0123456789abcdef01234567",
                 },
             )
@@ -56,6 +57,23 @@ deps = {
             deps.write_text("vars = {}\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 tool_pins.resolve_pins(deps)
+
+    def test_mutable_gn_tag_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                """
+vars = {'gn_version': 'latest'}
+deps = {
+  'src/third_party/depot_tools':
+    Var('chromium_git') + '/chromium/tools/depot_tools.git' + '@' + '0123456789abcdef0123456789abcdef01234567',
+}
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                tool_pins.resolve_pins(deps)
+
 
 
 class RuntimeCollectorTests(unittest.TestCase):

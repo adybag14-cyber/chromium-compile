@@ -857,6 +857,40 @@ validate_chromium_source_tarball() {
   fi
 }
 
+validate_chromium_critical_source_identity() {
+  local version="${1:?version is required}"
+  local rel encoded decoded local_sha remote_sha
+  local -a critical_files=(
+    DEPS
+    chrome/VERSION
+    BUILD.gn
+    chrome/installer/linux/BUILD.gn
+  )
+  for rel in "${critical_files[@]}"; do
+    encoded="${RUNNER_TEMP:-${WORKSPACE}}/chromium-${version}-${rel//\//_}.b64"
+    decoded="${encoded%.b64}.upstream"
+    if ! curl --fail --location --retry 4 --retry-all-errors --retry-delay 5 \
+        --connect-timeout 20 --max-time 120 \
+        "https://chromium.googlesource.com/chromium/src/+/refs/tags/${version}/${rel}?format=TEXT" \
+        -o "${encoded}"; then
+      echo "::error::Could not fetch authoritative Chromium ${version} ${rel} for critical-source identity validation."
+      return 1
+    fi
+    if ! base64 --decode "${encoded}" > "${decoded}"; then
+      echo "::error::Gitiles returned invalid base64 for Chromium ${version} ${rel}."
+      return 1
+    fi
+    local_sha="$(sha256sum "${CHROMIUM_SRC}/${rel}" | awk '{print $1}')"
+    remote_sha="$(sha256sum "${decoded}" | awk '{print $1}')"
+    rm -f "${encoded}" "${decoded}"
+    if [ "${local_sha}" != "${remote_sha}" ]; then
+      echo "::error::Chromium source archive critical file ${rel} does not match authoritative tag ${version}."
+      return 1
+    fi
+  done
+  echo "Verified Chromium ${version} critical source files against the authoritative Gitiles tag."
+}
+
 prepare_chromium_source() {
   local version="${1:?version is required}"
   local cache_dir="${WORKSPACE}/.chromium-source-cache"
@@ -890,6 +924,7 @@ prepare_chromium_source() {
   echo "Extracting Chromium ${version} source..."
   bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1
   validate_extracted_chromium_version "${version}"
+  validate_chromium_critical_source_identity "${version}"
   python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${CHROMIUM_SRC}/DEPS"
   echo "Extraction complete. Source size:"
   du -sh "${CHROMIUM_SRC}"
@@ -951,8 +986,7 @@ install_gn_from_cipd() {
   local expected_version
   expected_version="$(chromium_gn_version)"
   if [ -x "${GN_BINARY}" ]; then
-    echo "Existing GN binary: $("${GN_BINARY}" --version || true)"
-    return 0
+    echo "Existing GN binary will be re-asserted against Chromium's exact CIPD pin: $("${GN_BINARY}" --version || true)"
   fi
 
   local host_arch
