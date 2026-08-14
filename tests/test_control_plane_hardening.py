@@ -46,6 +46,7 @@ class ControlPlaneHardeningTests(unittest.TestCase):
     def test_watcher_state_queries_are_bounded_and_include_publisher(self):
         watcher = (ROOT / "scripts" / "chromium_stable_watcher.py").read_text(encoding="utf-8")
         self.assertIn('"publish-i686-release.yml"', watcher)
+        self.assertIn("from github_workflow_dispatch import DispatchError, dispatch_once", watcher)
         self.assertIn("RUN_HISTORY_DAYS", watcher)
         self.assertIn('CHROMIUM_I686_RUN_HISTORY_DAYS", "1095"', watcher)
         self.assertIn("RUN_HISTORY_MAX_PAGES", watcher)

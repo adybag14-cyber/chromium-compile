@@ -99,12 +99,26 @@ class StableWatcherTests(unittest.TestCase):
             with self.assertRaises(watcher.WatcherError):
                 watcher.run_gh(["api", "repos/owner/repository"], timeout=1)
 
-    def test_uncertain_dispatch_confirms_server_side_acceptance_without_retry(self):
-        with mock.patch.object(watcher, "run_gh", side_effect=watcher.WatcherError("timeout")) as run_call, \
-             mock.patch.object(watcher, "_recent_exact_run_exists", return_value=True), \
-             mock.patch.object(watcher.time, "sleep"):
+    def test_uncertain_dispatch_uses_central_exact_once_confirmation(self):
+        with mock.patch.object(watcher, "dispatch_once", return_value="accepted-after-client-error") as dispatch_call:
             watcher.dispatch_preflight("owner/repository", "main", "155.0.1.2", False)
-        self.assertEqual(run_call.call_count, 1)
+        dispatch_call.assert_called_once_with(
+            "owner/repository",
+            "chromium-i686-preflight.yml",
+            "main",
+            "Chromium i686 preflight 155.0.1.2",
+            ["version=155.0.1.2", "dispatch_build=true"],
+        )
+
+    def test_racing_manual_preflight_is_deduped_by_central_dispatcher(self):
+        with mock.patch.object(watcher, "dispatch_once", return_value="already-active") as dispatch_call:
+            watcher.dispatch_preflight("owner/repository", "main", "155.0.1.2", False)
+        self.assertEqual(dispatch_call.call_count, 1)
+
+    def test_dispatcher_failure_becomes_watcher_error(self):
+        with mock.patch.object(watcher, "dispatch_once", side_effect=watcher.DispatchError("timeout")):
+            with self.assertRaises(watcher.WatcherError):
+                watcher.dispatch_preflight("owner/repository", "main", "155.0.1.2", False)
 
     def test_baseline_and_older_versions_are_ignored(self):
         empty = watcher.PortState(set(), set(), set(), set())

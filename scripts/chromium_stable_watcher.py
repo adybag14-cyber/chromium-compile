@@ -17,6 +17,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from github_workflow_dispatch import DispatchError, dispatch_once
+
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
 ACTIVE_RUN_STATES = {"queued", "in_progress", "requested", "waiting", "pending"}
 QUARANTINE_RUN_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
@@ -328,87 +334,34 @@ def select_candidates(
     return selected
 
 
-def _recent_exact_run_exists(
-    repository: str,
-    workflow: str,
-    display_title: str,
-    not_before: datetime,
-) -> bool:
-    payload = gh_json(
-        [
-            "run",
-            "list",
-            "--repo",
-            repository,
-            "--workflow",
-            workflow,
-            "--limit",
-            "50",
-            "--json",
-            "displayTitle,createdAt,status",
-        ]
-    )
-    if not isinstance(payload, list):
-        return False
-    threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=30)
-    for item in payload:
-        if not isinstance(item, dict) or item.get("displayTitle") != display_title:
-            continue
-        raw = str(item.get("createdAt", ""))
-        try:
-            created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if created >= threshold:
-            return True
-    return False
-
-
 def dispatch_preflight(repository: str, ref: str, version: str, dry_run: bool) -> None:
     display_title = f"Chromium i686 preflight {version}"
-    command = [
-        "workflow",
-        "run",
-        "chromium-i686-preflight.yml",
-        "--repo",
-        repository,
-        "--ref",
-        ref,
-        "-f",
-        f"version={version}",
-        "-f",
-        "dispatch_build=true",
-    ]
-    printable = "gh " + " ".join(command)
+    inputs = [f"version={version}", "dispatch_build=true"]
     if dry_run:
+        printable = (
+            f"gh workflow run chromium-i686-preflight.yml --repo {repository} "
+            f"--ref {ref} -f version={version} -f dispatch_build=true"
+        )
         print(f"DRY RUN: {printable}")
         return
 
-    started = datetime.now(timezone.utc)
     try:
-        run_gh(command, timeout=120)
-    except WatcherError as dispatch_error:
-        # A network timeout can occur after GitHub accepted workflow_dispatch.
-        # Never blindly retry a non-idempotent dispatch. Confirm by run identity.
-        for _ in range(6):
-            time.sleep(3)
-            try:
-                if _recent_exact_run_exists(
-                    repository,
-                    "chromium-i686-preflight.yml",
-                    display_title,
-                    started,
-                ):
-                    print(
-                        f"Dispatch client failed but Chromium {version} preflight "
-                        "is visible in Actions; treating dispatch as accepted."
-                    )
-                    return
-            except WatcherError:
-                continue
-        raise dispatch_error
-    print(f"Dispatched Chromium {version} i686 compatibility preflight.")
+        result = dispatch_once(
+            repository,
+            "chromium-i686-preflight.yml",
+            ref,
+            display_title,
+            inputs,
+        )
+    except (DispatchError, ValueError) as exc:
+        raise WatcherError(f"Preflight dispatch could not be established safely: {exc}") from exc
 
+    if result == "already-active":
+        print(f"Chromium {version} preflight became active before dispatch; no duplicate was sent.")
+    elif result == "accepted-after-client-error":
+        print(f"Dispatch client failed but Chromium {version} preflight is visible in Actions; treating dispatch as accepted.")
+    else:
+        print(f"Dispatched Chromium {version} i686 compatibility preflight.")
 
 def append_summary(lines: Iterable[str]) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
