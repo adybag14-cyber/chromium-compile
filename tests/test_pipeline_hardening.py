@@ -369,6 +369,7 @@ class PipelineHardeningTests(unittest.TestCase):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn("continuing without swap", common)
         self.assertIn("capture_ldd_output()", common)
+        self.assertIn("bounded_ldd()", common)
         self.assertIn("timeout -k 3s 15s ldd", common)
         self.assertIn("timeout -k 10s 120s ccache --cleanup", common)
 

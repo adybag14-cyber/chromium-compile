@@ -485,11 +485,15 @@ is_i386_host_executable() {
   grep -Eq 'ELF 32-bit.*(pie )?executable, Intel (80386|i386)' <<<"${file_output}"
 }
 
+bounded_ldd() {
+  timeout -k 3s 15s ldd "$@"
+}
+
 capture_ldd_output() {
   local binary="${1:?binary is required}"
   local output_name="${2:?output variable name is required}"
   local output status=0
-  if output="$(timeout -k 3s 15s ldd "${binary}" 2>&1)"; then
+  if output="$(bounded_ldd "${binary}" 2>&1)"; then
     printf -v "${output_name}" '%s' "${output}"
     return 0
   else

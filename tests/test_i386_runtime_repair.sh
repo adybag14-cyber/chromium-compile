@@ -106,7 +106,7 @@ set -e
 # A provider that installs successfully but leaves the same SONAME unresolved must
 # stop after one install rather than repeating identical apt cycles.
 I386_SONAME_PACKAGES[libStuck.so]=libstuck:i386
-ldd() { printf '%s\n' 'libStuck.so => not found'; }
+bounded_ldd() { printf '%s\n' 'libStuck.so => not found'; }
 dpkg-query() { return 1; }
 SUDO_CALLS="${RUNNER_TEMP}/sudo-calls"
 : > "${SUDO_CALLS}"
