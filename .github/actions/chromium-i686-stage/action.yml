@@ -159,7 +159,12 @@ runs:
         rm -rf "${GITHUB_WORKSPACE}/resume"
 
         log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after source/checkpoint extraction"
-        configure_gn_from_checkpoint_or_fresh "${checkpoint_restored}"
+        if [ "${checkpoint_restored}" = "true" ] && [ "${CHECKPOINT_REQUIRES_GN_REFRESH}" = "true" ]; then
+          echo "Migrating restored checkpoint graph to Chromium's exact source-declared GN pin."
+          configure_gn
+        else
+          configure_gn_from_checkpoint_or_fresh "${checkpoint_restored}"
+        fi
         if [ "${checkpoint_restored}" = "true" ]; then
           report_ninja_resume_state
         fi

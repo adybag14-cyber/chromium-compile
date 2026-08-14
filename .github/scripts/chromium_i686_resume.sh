@@ -4,6 +4,8 @@ set -euo pipefail
 # Helpers for carrying a live Ninja build graph between fresh GitHub-hosted
 # runners. Source chromium_i686_common.sh before sourcing this file.
 
+CHECKPOINT_REQUIRES_GN_REFRESH=false
+
 normalize_chromium_resume_inputs() {
   local epoch="${CHROMIUM_RESUME_INPUT_EPOCH:-946684800}"
   local started_at
@@ -208,6 +210,7 @@ PY
 }
 
 restore_out_checkpoint() {
+  CHECKPOINT_REQUIRES_GN_REFRESH=false
   local archive="${1:-}"
   local expected_version="${2:-}"
   local current_stage="${3:-1}"
@@ -241,6 +244,17 @@ restore_out_checkpoint() {
     test "${args_hash}" = "${expected_args_hash}"
     test "${ninja_hash}" = "${expected_ninja_hash}"
     echo "Checkpoint manifest matches extracted Ninja metadata."
+
+    local manifest_gn manifest_depot
+    manifest_gn="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gn_version", ""))' "${manifest}")"
+    manifest_depot="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("depot_tools_revision", ""))' "${manifest}")"
+    if [ -z "${manifest_gn}" ] || [ -z "${manifest_depot}" ]; then
+      CHECKPOINT_REQUIRES_GN_REFRESH=true
+      echo "::warning::Restored checkpoint predates exact GN/depot_tools provenance; regenerating the Ninja graph once with Chromium's source-declared pinned GN before reuse."
+    fi
+  else
+    CHECKPOINT_REQUIRES_GN_REFRESH=true
+    echo "::warning::Restored legacy checkpoint has no tool-pin manifest; regenerating the Ninja graph once before reuse."
   fi
 }
 

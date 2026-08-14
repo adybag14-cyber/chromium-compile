@@ -38,6 +38,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install release validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          bounded_sudo_apt_get update
+          bounded_sudo_apt_get install -y --no-install-recommends jq python3 file binutils xz-utils
+
       - name: Resolve and verify trusted build source
         id: source
         env:
@@ -88,13 +96,6 @@ jobs:
           echo "run_id=${REQUESTED_RUN_ID}" >> "${GITHUB_OUTPUT}"
           echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
           echo "display_title=${display_title}" >> "${GITHUB_OUTPUT}"
-
-      - name: Install release validation tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          source .github/scripts/chromium_i686_common.sh
-          bounded_sudo_apt_get install -y --no-install-recommends file binutils xz-utils
 
       - name: Discover completed build artifact
         id: artifact

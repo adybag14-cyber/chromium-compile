@@ -410,5 +410,25 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("readlink -f", common)
 
 
+    def test_pinless_checkpoint_migrates_graph_before_claiming_tool_provenance(self):
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        self.assertIn("CHECKPOINT_REQUIRES_GN_REFRESH=false", resume)
+        self.assertIn("predates exact GN/depot_tools provenance", resume)
+        self.assertIn("legacy checkpoint has no tool-pin manifest", resume)
+        self.assertIn('CHECKPOINT_REQUIRES_GN_REFRESH}" = "true"', action)
+        self.assertIn("Migrating restored checkpoint graph", action)
+        self.assertIn("configure_gn", action)
+
+    def test_publisher_installs_json_and_validation_prerequisites_before_use(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        install_pos = publish.index("Install release validation tools")
+        resolve_pos = publish.index("Resolve and verify trusted build source")
+        self.assertLess(install_pos, resolve_pos)
+        install = publish[install_pos:resolve_pos]
+        self.assertIn("bounded_sudo_apt_get update", install)
+        self.assertIn("jq python3 file binutils xz-utils", install)
+
+
 if __name__ == "__main__":
     unittest.main()
