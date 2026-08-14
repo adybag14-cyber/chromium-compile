@@ -219,6 +219,10 @@ jobs:
             "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686-manifest.txt"
           )
 
+          tag_state="$(python3 scripts/github_release_tag.py \
+            --repository "${GITHUB_REPOSITORY}" --tag "${tag}" --sha "${BUILD_SHA}")"
+          echo "Verified exact release tag ${tag} -> ${BUILD_SHA} (${tag_state})."
+
           release_asset_digest() {
             local json="${1:?release json is required}"
             local name="${2:?asset name is required}"
@@ -240,20 +244,16 @@ jobs:
           }
 
           release_json=""
-          if release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets 2>/dev/null)"; then
+          release_state="$(python3 scripts/github_release_state.py \
+            --repository "${GITHUB_REPOSITORY}" --tag "${tag}")"
+          if [ "${release_state}" = "exists" ]; then
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
             is_draft="$(jq -r '.isDraft' <<<"${release_json}")"
-          else
+          elif [ "${release_state}" = "missing" ]; then
             is_draft=true
-            existing_tag_commit="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
-            if [ -n "${existing_tag_commit}" ] && [ "${existing_tag_commit}" != "${BUILD_SHA}" ]; then
-              echo "::error::Git tag ${tag} already points to ${existing_tag_commit}, not build ${BUILD_SHA}."
-              exit 1
-            fi
-
-            echo "Creating draft ${tag} targeted at exact build ${BUILD_SHA}."
+            echo "Creating draft ${tag}; exact tag provenance is already pinned to ${BUILD_SHA}."
             if ! bounded_gh release create "${tag}" \
                 --repo "${GITHUB_REPOSITORY}" \
-                --target "${BUILD_SHA}" \
                 --draft \
                 --title "${title}" \
                 --notes "${notes}"; then
@@ -265,6 +265,9 @@ jobs:
               echo "::error::Unexpected published release appeared while creating ${tag}; refusing mutation."
               exit 1
             }
+          else
+            echo "::error::Unexpected release-state helper result: ${release_state}"
+            exit 1
           fi
 
           if [ "${is_draft}" = false ]; then
@@ -288,10 +291,7 @@ jobs:
             echo "Published ${tag} is commit- and byte-identical; leaving immutable release untouched."
           else
             draft_target="$(jq -r '.targetCommitish // ""' <<<"${release_json}")"
-            if [ -n "${draft_target}" ] && [ "${draft_target}" != "${BUILD_SHA}" ]; then
-              echo "::error::Draft ${tag} targets ${draft_target}, not build ${BUILD_SHA}; refusing to resume it."
-              exit 1
-            fi
+            echo "Draft API target_commitish=${draft_target:-unset}; exact provenance is enforced by verified Git ref ${tag} -> ${BUILD_SHA}."
 
             # Drafts are resumable. Upload only a missing asset. An existing asset
             # must already be byte-identical; differing bytes are never overwritten.

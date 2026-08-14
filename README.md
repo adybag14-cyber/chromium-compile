@@ -219,9 +219,11 @@ A separate default-branch workflow then:
 - extracts `chrome`;
 - checks it with `file` and `readelf`;
 - requires `ELF32` and `Intel 80386`;
-- creates or updates `chromium-<version>-linux-i686`.
+- verifies or creates the exact `refs/tags/chromium-<version>-linux-i686` ref at the validated build SHA;
+- creates/resumes a draft release only after that tag provenance is fixed;
+- publishes only after every retained asset digest matches, while an already-published release remains immutable.
 
-Release publication is separated from compilation so a permissions or publishing problem cannot erase the successful build artifact.
+Release publication is separated from compilation so a permissions or publishing problem cannot erase the successful build artifact. Release creation never relies on `target_commitish` to correct an existing tag; GitHub ignores that field for pre-existing tags, so the Git ref itself is verified first.
 
 ## Maintenance
 
