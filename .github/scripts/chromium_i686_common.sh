@@ -84,7 +84,7 @@ ensure_swap() {
 install_system_dependencies() {
   bounded_sudo_apt_get update
   bounded_sudo_apt_get install -y \
-    git python3 python3-pip curl jq xz-utils zstd zip unzip \
+    git python3 python3-pip curl jq xz-utils zstd zip unzip file binutils \
     build-essential pkg-config ninja-build ccache \
     libgtk-3-dev libnss3-dev libasound2-dev libxss-dev libxtst-dev libxrandr-dev \
     libxcomposite-dev libxdamage-dev libxfixes-dev libxrender-dev libxkbcommon-dev \
@@ -1104,7 +1104,22 @@ validate_i686_runtime_bundle() {
     }
   done
 
-  local path file_output elf_class elf_machine
+  local path resolved file_output elf_class elf_machine
+  while IFS= read -r -d '' path; do
+    resolved="$(readlink -f "${path}" 2>/dev/null || true)"
+    if [ -z "${resolved}" ] || [ ! -e "${resolved}" ]; then
+      echo "::error::Runtime bundle contains a broken symlink: ${path}"
+      return 1
+    fi
+    case "${resolved}" in
+      "$(realpath "${root}")"/*) ;;
+      *)
+        echo "::error::Runtime bundle symlink escapes package root: ${path} -> ${resolved}"
+        return 1
+        ;;
+    esac
+  done < <(find "${root}" -type l -print0)
+
   while IFS= read -r -d '' path; do
     file_output="$(file "${path}" 2>/dev/null || true)"
     if grep -q 'ELF ' <<<"${file_output}"; then

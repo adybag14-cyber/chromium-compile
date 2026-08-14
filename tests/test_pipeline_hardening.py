@@ -289,8 +289,11 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('grep -qx "github_run_id=${BUILD_RUN_ID}"', publish)
         self.assertIn('--target "${BUILD_SHA}"', publish)
         self.assertIn("refusing to rewrite release history", publish)
-        self.assertIn("refusing --clobber", publish)
-        self.assertNotIn("gh release upload", publish)
+        self.assertIn("immutable releases are never repaired with --clobber", publish)
+        self.assertIn("--draft", publish)
+        self.assertIn("Uploading missing draft asset", publish)
+        self.assertIn("--draft=false", publish)
+        self.assertNotRegex(publish, r"bounded_gh release (?:upload|create|edit)[^\n]*--clobber")
         self.assertIn('"$(basename "${package}")"', common)
         self.assertIn("package_sha256=", common)
 
@@ -381,6 +384,28 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("@@PROGNAME", runtime)
         self.assertIn("@@channel", runtime)
         self.assertIn("--render-wrapper", common)
+
+
+    def test_publisher_is_transactional_and_does_not_depend_on_target_i386_runtime(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        self.assertIn("Create or resume transactional immutable release", publish)
+        self.assertIn("--draft", publish)
+        self.assertIn("Uploading missing draft asset", publish)
+        self.assertIn("verifying whether GitHub stored", publish)
+        self.assertIn("All draft assets are byte-identical", publish)
+        self.assertIn("--draft=false", publish)
+        self.assertNotIn("install_i386_runtime_libraries", publish)
+
+    def test_build_hosts_always_install_release_validation_tools(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        deps = common[common.index("install_system_dependencies()") : common.index("I386_BASELINE_SONAMES=(")]
+        self.assertIn("file binutils", deps)
+
+    def test_runtime_bundle_validates_symlink_containment(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("broken symlink", common)
+        self.assertIn("symlink escapes package root", common)
+        self.assertIn("readlink -f", common)
 
 
 if __name__ == "__main__":

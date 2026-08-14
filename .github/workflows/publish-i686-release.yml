@@ -94,7 +94,6 @@ jobs:
         run: |
           set -euo pipefail
           source .github/scripts/chromium_i686_common.sh
-          install_i386_runtime_libraries
           bounded_sudo_apt_get install -y --no-install-recommends file binutils xz-utils
 
       - name: Discover completed build artifact
@@ -192,7 +191,7 @@ jobs:
           bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"             tar -xJf "${package}" -C release-runtime
           validate_i686_runtime_bundle release-runtime
 
-      - name: Create immutable unofficial release
+      - name: Create or resume transactional immutable release
         if: ${{ steps.artifact.outputs.found == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -204,35 +203,106 @@ jobs:
           set -euo pipefail
           source .github/scripts/chromium_i686_common.sh
           tag="chromium-${CHROMIUM_VERSION}-linux-i686"
+          title="Chromium ${CHROMIUM_VERSION} Linux i686 (Unofficial)"
+          notes="Unofficial downstream Linux i686 build of Chromium ${CHROMIUM_VERSION}. Chromium upstream does not support or test this target. Built and ELF32-validated by GitHub Actions run ${BUILD_RUN_ID} from commit ${BUILD_SHA}."
           assets=(
             "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686.tar.xz"
             "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686.tar.xz.sha256"
             "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686-manifest.txt"
           )
 
-          if bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            existing_commit="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
-            test "${existing_commit}" = "${BUILD_SHA}" || {
-              echo "::error::Existing release ${tag} points to ${existing_commit}, not build ${BUILD_SHA}; refusing to rewrite release history."
+          release_json=""
+          if release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets 2>/dev/null)"; then
+            is_draft="$(jq -r '.isDraft' <<<"${release_json}")"
+          else
+            is_draft=true
+            existing_tag_commit="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+            if [ -n "${existing_tag_commit}" ] && [ "${existing_tag_commit}" != "${BUILD_SHA}" ]; then
+              echo "::error::Git tag ${tag} already points to ${existing_tag_commit}, not build ${BUILD_SHA}."
+              exit 1
+            fi
+
+            echo "Creating draft ${tag} targeted at exact build ${BUILD_SHA}."
+            if ! bounded_gh release create "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --target "${BUILD_SHA}" \
+                --draft \
+                --title "${title}" \
+                --notes "${notes}"; then
+              echo "::warning::Draft create returned an error; checking whether GitHub accepted it before failing."
+            fi
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+            is_draft="$(jq -r '.isDraft' <<<"${release_json}")"
+            test "${is_draft}" = true || {
+              echo "::error::Unexpected published release appeared while creating ${tag}; refusing mutation."
               exit 1
             }
-            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets)"
+          fi
+
+          if [ "${is_draft}" = false ]; then
+            existing_commit="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            test "${existing_commit}" = "${BUILD_SHA}" || {
+              echo "::error::Published release ${tag} points to ${existing_commit}, not build ${BUILD_SHA}; refusing to rewrite release history."
+              exit 1
+            }
             for asset in "${assets[@]}"; do
               name="$(basename "${asset}")"
               local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
               remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
               if [ -z "${remote_digest}" ] || [ "${remote_digest}" = "null" ] || [ "${remote_digest}" != "${local_digest}" ]; then
-                echo "::error::Existing release asset ${name} is missing or differs; refusing --clobber."
+                echo "::error::Published release asset ${name} is missing or differs; immutable releases are never repaired with --clobber."
                 exit 1
               fi
             done
-            echo "Existing ${tag} release is commit- and byte-identical; leaving immutable assets untouched."
+            echo "Published ${tag} is commit- and byte-identical; leaving immutable release untouched."
           else
-            bounded_gh release create "${tag}" "${assets[@]}"               --repo "${GITHUB_REPOSITORY}"               --target "${BUILD_SHA}"               --title "Chromium ${CHROMIUM_VERSION} Linux i686 (Unofficial)"               --notes "Unofficial downstream Linux i686 build of Chromium ${CHROMIUM_VERSION}. Chromium upstream does not support or test this target. Built and ELF32-validated by GitHub Actions run ${BUILD_RUN_ID} from commit ${BUILD_SHA}."
+            draft_target="$(jq -r '.targetCommitish // ""' <<<"${release_json}")"
+            if [ -n "${draft_target}" ] && [ "${draft_target}" != "${BUILD_SHA}" ]; then
+              echo "::error::Draft ${tag} targets ${draft_target}, not build ${BUILD_SHA}; refusing to resume it."
+              exit 1
+            fi
+
+            # Drafts are resumable. Upload only a missing asset. An existing asset
+            # must already be byte-identical; differing bytes are never overwritten.
+            for asset in "${assets[@]}"; do
+              name="$(basename "${asset}")"
+              local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+              release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+              remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
+              if [ -z "${remote_digest}" ] || [ "${remote_digest}" = "null" ]; then
+                echo "Uploading missing draft asset ${name}."
+                if ! bounded_gh release upload "${tag}" "${asset}" --repo "${GITHUB_REPOSITORY}"; then
+                  echo "::warning::Upload returned an error; verifying whether GitHub stored ${name}."
+                fi
+                release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+                remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
+              fi
+              if [ "${remote_digest}" != "${local_digest}" ]; then
+                echo "::error::Draft asset ${name} differs from the validated local artifact; refusing overwrite."
+                exit 1
+              fi
+            done
+
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+            for asset in "${assets[@]}"; do
+              name="$(basename "${asset}")"
+              local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+              remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}" | head -n1)"
+              test "${remote_digest}" = "${local_digest}"
+            done
+
+            echo "All draft assets are byte-identical; publishing ${tag}."
+            if ! bounded_gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --draft=false; then
+              echo "::warning::Publish transition returned an error; verifying final release state."
+            fi
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,assets)"
+            test "$(jq -r '.isDraft' <<<"${release_json}")" = false
+            published_commit="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            test "${published_commit}" = "${BUILD_SHA}"
           fi
 
-          title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
-          issue_number="$(bounded_gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${title}" '.[] | select(.title == $title) | .number' | head -n1)"
+          maintenance_title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
+          issue_number="$(bounded_gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${maintenance_title}" '.[] | select(.title == $title) | .number' | head -n1)"
           if [ -n "${issue_number}" ]; then
             bounded_gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "Resolved by successful immutable unofficial i686 release \`${tag}\`."
             bounded_gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --reason completed

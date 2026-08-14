@@ -105,6 +105,18 @@ def collect_runtime(source_root: Path, out_dir: Path) -> list[str]:
     missing = sorted(item for item in REQUIRED_RUNTIME if item not in selected)
     if missing:
         raise ValueError("Required Chromium Linux runtime output is missing: " + ", ".join(missing))
+
+    # Tar recursively archives directories. If Chromium lists both a component
+    # directory and files below it (for example MEIPreload), passing both would
+    # create duplicate archive members. Keep the directory and prune descendants.
+    directory_roots = {
+        rel for rel in selected if (out_dir / rel).is_dir()
+    }
+    selected = {
+        rel
+        for rel in selected
+        if not any(rel != root and rel.startswith(root + "/") for root in directory_roots)
+    }
     return sorted(selected)
 
 

@@ -81,6 +81,8 @@ if (enable_swiftshader) {
 }
 packaging_files = packaging_files_executables + packaging_files_shlibs + [
   "$root_out_dir/locales/en-US.pak",
+  "$root_out_dir/MEIPreload/manifest.json",
+  "$root_out_dir/MEIPreload/preloaded_data.pb",
 ]
 if (enable_swiftshader) {
   packaging_files += [ "$root_out_dir/vk_swiftshader_icd.json" ]
@@ -101,6 +103,9 @@ action_foreach("calculate_deb_dependencies") {}
         (out / "libvk_swiftshader.so").write_bytes(b"swift")
         (out / "vk_swiftshader_icd.json").write_text("{}", encoding="utf-8")
         (out / "future_resource.pak").write_bytes(b"pak")
+        (out / "MEIPreload").mkdir(parents=True)
+        (out / "MEIPreload" / "manifest.json").write_text("{}", encoding="utf-8")
+        (out / "MEIPreload" / "preloaded_data.pb").write_bytes(b"pb")
         wrapper = out / "installer" / "common" / "wrapper"
         wrapper.parent.mkdir(parents=True, exist_ok=True)
         wrapper.write_text("#!/bin/bash\nexport CHROME_VERSION_EXTRA=\"@@channel\"\nexec -a \"$0\" \"$HERE/@@PROGNAME\" \"$@\"\n", encoding="utf-8")
@@ -114,6 +119,9 @@ action_foreach("calculate_deb_dependencies") {}
             self.assertIn("libvk_swiftshader.so", files)
             self.assertIn("vk_swiftshader_icd.json", files)
             self.assertIn("future_resource.pak", files)
+            self.assertIn("MEIPreload", files)
+            self.assertNotIn("MEIPreload/manifest.json", files)
+            self.assertNotIn("MEIPreload/preloaded_data.pb", files)
 
     def test_renders_standalone_wrapper_from_upstream_template(self):
         with tempfile.TemporaryDirectory() as tmp:
