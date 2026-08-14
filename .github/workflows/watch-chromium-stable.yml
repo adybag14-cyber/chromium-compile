@@ -19,7 +19,7 @@ on:
 permissions:
   contents: read
   actions: write
-  issues: read
+  issues: write
 
 concurrency:
   group: chromium-i686-stable-watcher
@@ -63,3 +63,52 @@ jobs:
           fi
 
           python3 scripts/chromium_stable_watcher.py "${args[@]}"
+
+      - name: Clear recovered watcher maintenance issue
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "[i686-port] Stable watcher requires maintenance" \
+            --close-if-open
+
+  report_watcher_failure:
+    name: Report stable watcher failure
+    needs: detect
+    if: ${{ always() && needs.detect.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Open or update watcher maintenance issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[i686-port] Stable watcher requires maintenance"
+          body_file="${RUNNER_TEMP}/stable-watcher-failure.md"
+          cat > "${body_file}" <<EOF
+          The Chromium i686 stable watcher failed closed and dispatched no new work.
+
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Workflow commit: ${GITHUB_SHA}
+
+          This can indicate GitHub/API unavailability, schema drift, or a bounded state-history horizon that needs deliberate expansion. The next successful watcher run automatically closes this issue.
+          EOF
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "${title}" \
+            --body-file "${body_file}"

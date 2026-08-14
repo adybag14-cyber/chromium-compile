@@ -74,5 +74,20 @@ class WorkflowDispatchTests(unittest.TestCase):
         run_gh.assert_not_called()
 
 
+    def test_completed_exact_run_can_be_deduped_for_job_reruns(self):
+        with mock.patch.object(dispatch, "exact_any_exists", return_value=True), \
+             mock.patch.object(dispatch, "run_gh") as run_gh:
+            result = dispatch.dispatch_once(
+                "owner/repo",
+                "workflow.yml",
+                "main",
+                "Expected title",
+                ["stage=2"],
+                dedupe_completed=True,
+            )
+        self.assertEqual(result, "already-seen")
+        run_gh.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

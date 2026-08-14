@@ -123,14 +123,45 @@ def upsert_issue(repository: str, title: str, body_file: str) -> tuple[str, int]
     return "created", confirmed
 
 
+def close_issue_if_open(repository: str, title: str) -> tuple[str, int | None]:
+    existing = find_issue(repository, title)
+    if existing is None:
+        return "already-closed", None
+    try:
+        run_gh(
+            [
+                "issue",
+                "close",
+                str(existing),
+                "--repo",
+                repository,
+                "--reason",
+                "completed",
+            ]
+        )
+    except IssueError as exc:
+        # Closing is idempotent; confirm state before reporting failure.
+        confirmed = find_issue(repository, title, attempts=1)
+        if confirmed is None:
+            return "closed-after-client-error", existing
+        raise exc
+    return "closed", existing
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", required=True)
     parser.add_argument("--title", required=True)
-    parser.add_argument("--body-file", required=True)
+    parser.add_argument("--body-file")
+    parser.add_argument("--close-if-open", action="store_true")
     args = parser.parse_args()
-    action, number = upsert_issue(args.repository, args.title, args.body_file)
-    print(f"{action}:{number}")
+    if args.close_if_open:
+        action, number = close_issue_if_open(args.repository, args.title)
+    else:
+        if not args.body_file:
+            parser.error("--body-file is required unless --close-if-open is used")
+        action, number = upsert_issue(args.repository, args.title, args.body_file)
+    print(f"{action}:{'' if number is None else number}")
     return 0
 
 

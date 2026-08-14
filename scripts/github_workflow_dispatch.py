@@ -72,6 +72,13 @@ def exact_active_exists(repository: str, workflow: str, expected_title: str) -> 
     )
 
 
+def exact_any_exists(repository: str, workflow: str, expected_title: str) -> bool:
+    return any(
+        str(run.get("displayTitle", "")) == expected_title
+        for run in list_recent_runs(repository, workflow)
+    )
+
+
 def exact_recent_exists(
     repository: str,
     workflow: str,
@@ -100,8 +107,12 @@ def dispatch_once(
     inputs: Sequence[str],
     *,
     confirm_attempts: int = 8,
+    dedupe_completed: bool = False,
 ) -> str:
-    if exact_active_exists(repository, workflow, expected_title):
+    if dedupe_completed:
+        if exact_any_exists(repository, workflow, expected_title):
+            return "already-seen"
+    elif exact_active_exists(repository, workflow, expected_title):
         return "already-active"
 
     command = ["workflow", "run", workflow, "--repo", repository, "--ref", ref]
@@ -134,6 +145,7 @@ def main() -> int:
     parser.add_argument("--ref", required=True)
     parser.add_argument("--expected-title", required=True)
     parser.add_argument("--input", action="append", default=[])
+    parser.add_argument("--dedupe-completed", action="store_true")
     args = parser.parse_args()
     result = dispatch_once(
         args.repository,
@@ -141,6 +153,7 @@ def main() -> int:
         args.ref,
         args.expected_title,
         args.input,
+        dedupe_completed=args.dedupe_completed,
     )
     print(result)
     return 0

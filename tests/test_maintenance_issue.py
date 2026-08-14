@@ -63,5 +63,23 @@ class MaintenanceIssueTests(unittest.TestCase):
         self.assertEqual(run_gh.call_count, 1)
 
 
+    def test_close_if_open_is_idempotent(self):
+        with mock.patch.object(issues, "find_issue", return_value=None), \
+             mock.patch.object(issues, "run_gh") as run_gh:
+            self.assertEqual(
+                issues.close_issue_if_open("owner/repo", "target"),
+                ("already-closed", None),
+            )
+        run_gh.assert_not_called()
+
+    def test_close_timeout_confirms_closed_state(self):
+        with mock.patch.object(issues, "find_issue", side_effect=[7, None]), \
+             mock.patch.object(issues, "run_gh", side_effect=issues.IssueError("timeout")):
+            self.assertEqual(
+                issues.close_issue_if_open("owner/repo", "target"),
+                ("closed-after-client-error", 7),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

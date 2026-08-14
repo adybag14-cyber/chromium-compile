@@ -8,6 +8,7 @@ class ControlPlaneHardeningTests(unittest.TestCase):
     def test_build_continuation_and_recovery_use_exactly_once_dispatcher(self):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         self.assertGreaterEqual(workflow.count("scripts/github_workflow_dispatch.py"), 2)
+        self.assertGreaterEqual(workflow.count("--dedupe-completed"), 2)
         self.assertIn("Start next stage on a fresh runner exactly once", workflow)
         self.assertIn("Redispatch failed stage exactly once", workflow)
         self.assertIn("CHROMIUM_VERSION", workflow)
@@ -45,12 +46,22 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         watcher = (ROOT / "scripts" / "chromium_stable_watcher.py").read_text(encoding="utf-8")
         self.assertIn('"publish-i686-release.yml"', watcher)
         self.assertIn("RUN_HISTORY_DAYS", watcher)
+        self.assertIn('CHROMIUM_I686_RUN_HISTORY_DAYS", "1095"', watcher)
         self.assertIn("RUN_HISTORY_MAX_PAGES", watcher)
         self.assertIn("REST_MAX_PAGES", watcher)
         self.assertIn("VERSION_API_MAX_PAGES", watcher)
         self.assertIn("Workflow history horizon saturated", watcher)
         self.assertIn("VersionHistory repeated a page token", watcher)
         self.assertIn("refusing to silently truncate", watcher)
+
+
+    def test_watcher_failure_is_visible_and_recovery_closes_issue(self):
+        watcher_workflow = (ROOT / ".github" / "workflows" / "watch-chromium-stable.yml").read_text(encoding="utf-8")
+        self.assertIn("issues: write", watcher_workflow)
+        self.assertIn("report_watcher_failure:", watcher_workflow)
+        self.assertIn("Stable watcher requires maintenance", watcher_workflow)
+        self.assertIn("--close-if-open", watcher_workflow)
+        self.assertIn("needs.detect.result == 'failure'", watcher_workflow)
 
 
 if __name__ == "__main__":
