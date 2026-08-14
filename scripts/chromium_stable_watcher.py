@@ -321,11 +321,18 @@ def list_port_run_state(
     cutoff = datetime.now(timezone.utc) - timedelta(days=RUN_HISTORY_DAYS)
     for workflow in PORT_WORKFLOWS:
         for run in list_workflow_runs(repository, workflow, created_after=cutoff):
-            version = extract_port_version(str(run.get("display_title", "")))
-            if not version:
-                continue
             status = str(run.get("status", ""))
             conclusion = str(run.get("conclusion", ""))
+            title = str(run.get("display_title", ""))
+            version = extract_port_version(title)
+            if not version:
+                if status in ACTIVE_RUN_STATES:
+                    raise WatcherError(
+                        f"Active {workflow} run has an unparseable display title {title!r}; "
+                        "refusing to assume the global port queue is free"
+                    )
+                # Legacy completed runs predate the explicit versioned run-name contract.
+                continue
             if status in ACTIVE_RUN_STATES:
                 active.add(version)
             elif status == "completed" and conclusion in QUARANTINE_RUN_CONCLUSIONS:

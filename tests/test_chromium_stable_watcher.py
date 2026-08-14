@@ -110,6 +110,21 @@ class StableWatcherTests(unittest.TestCase):
         self.assertEqual(active, set())
         self.assertEqual(quarantined, set())
 
+    def test_active_unparseable_control_run_fails_closed(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "chromium-i686.yml":
+                return [{
+                    "status": "in_progress",
+                    "conclusion": "",
+                    "display_title": "Chromium build without version",
+                    "head_branch": "main",
+                }]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            with self.assertRaises(watcher.WatcherError):
+                watcher.list_port_run_state("owner/repository", "main")
+
     def test_feature_branch_active_run_still_owns_global_queue(self):
         def fake_runs(_repository, workflow, **_kwargs):
             if workflow == "chromium-i686.yml":
