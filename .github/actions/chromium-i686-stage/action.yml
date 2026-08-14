@@ -36,7 +36,7 @@ outputs:
     value: ${{ steps.compile.outputs.complete }}
   failure_class:
     description: Classified failure type used to decide whether a fresh runner retry is useful.
-    value: ${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.checkpoint.outputs.failure_class }}
+    value: ${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.package.outputs.failure_class || steps.checkpoint.outputs.failure_class }}
 
 runs:
   using: composite
@@ -244,11 +244,15 @@ runs:
         if-no-files-found: error
 
     - name: Package Chromium i686 Build
+      id: package
       if: ${{ steps.compile.outputs.complete == 'true' }}
       shell: bash
       run: |
         source .github/scripts/chromium_i686_common.sh
-        package_chromium_i686 "${{ inputs.version }}"
+        if ! package_chromium_i686 "${{ inputs.version }}"; then
+          echo "failure_class=${CHROMIUM_PACKAGE_FAILURE_CLASS:-deterministic_build}" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
 
     - name: Upload Build Artifact
       if: ${{ steps.compile.outputs.complete == 'true' }}
@@ -259,6 +263,7 @@ runs:
           ${{ github.workspace }}/chromium-${{ inputs.version }}-linux-i686.tar.xz
           ${{ github.workspace }}/chromium-${{ inputs.version }}-linux-i686.tar.xz.sha256
           ${{ github.workspace }}/chromium-${{ inputs.version }}-linux-i686-manifest.txt
+        if-no-files-found: error
 
     - name: Write Stage Summary
       if: ${{ always() }}
@@ -270,7 +275,7 @@ runs:
           "${{ inputs.stage }}" \
           "${{ inputs.attempt }}" \
           "${{ steps.compile.outputs.complete || 'false' }}" \
-          "${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.checkpoint.outputs.failure_class || 'none' }}"
+          "${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.package.outputs.failure_class || steps.checkpoint.outputs.failure_class || 'none' }}"
 
     - name: Fail When Final Stage Is Still Incomplete
       if: ${{ always() && inputs.final-stage == 'true' && steps.prepare.outcome == 'success' && steps.compile.outputs.complete != 'true' }}

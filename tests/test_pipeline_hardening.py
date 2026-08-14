@@ -332,5 +332,15 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("create_out_checkpoint()", common)
 
 
+    def test_packaging_failures_are_classified_before_runner_retry(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_PACKAGE_FAILURE_CLASS", common)
+        self.assertIn('CHROMIUM_PACKAGE_FAILURE_CLASS="infrastructure"', common)
+        self.assertIn('id: package', action)
+        self.assertIn("steps.package.outputs.failure_class", action)
+        self.assertIn("if-no-files-found: error", action)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -140,6 +140,7 @@ declare -A I386_SONAME_PACKAGES=(
 I386_RUNTIME_REPAIR_FAILURE_CLASS=""
 I386_RUNTIME_REPAIR_CHANGED=false
 I386_RESOLVED_PACKAGE=""
+CHROMIUM_PACKAGE_FAILURE_CLASS=""
 RUNNER_DISTRO_ID=""
 RUNNER_DISTRO_VERSION_ID=""
 I386_MULTIARCH="i386-linux-gnu"
@@ -1112,13 +1113,17 @@ EOF
 
 package_chromium_i686() {
   local version="${1:?version is required}"
+  CHROMIUM_PACKAGE_FAILURE_CLASS="deterministic_build"
   cd "${OUT_DIR}"
   local package="${WORKSPACE}/chromium-${version}-linux-i686.tar.xz"
   local checksum="${package}.sha256"
   local manifest="${WORKSPACE}/chromium-${version}-linux-i686-manifest.txt"
   local runtime_list="${WORKSPACE}/chromium-${version}-linux-i686-runtime-files.txt"
 
-  python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py"     --source-root "${CHROMIUM_SRC}"     --out-dir "${OUT_DIR}"     --output-list "${runtime_list}"
+  if ! python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py"       --source-root "${CHROMIUM_SRC}" --out-dir "${OUT_DIR}" --output-list "${runtime_list}"; then
+    echo "::error::Chromium Linux runtime definition/output closure requires maintenance."
+    return 1
+  fi
   mapfile -t files < "${runtime_list}"
   if [ "${#files[@]}" -eq 0 ]; then
     echo "::error::Chromium runtime collector produced an empty package."
@@ -1127,7 +1132,8 @@ package_chromium_i686() {
 
   rm -f "${package}" "${checksum}" "${manifest}"
   if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"       tar -cJf "${package}" "${files[@]}"; then
-    echo "::error::Failed to package Chromium runtime files"
+    CHROMIUM_PACKAGE_FAILURE_CLASS="infrastructure"
+    echo "::error::Failed or timed out while packaging Chromium runtime files."
     return 1
   fi
 
@@ -1168,14 +1174,21 @@ package_chromium_i686() {
 ' "${files[@]}"
   } > "${manifest}"
 
-  python3 "${WORKSPACE}/scripts/validate_release_archive.py" "${package}"
+  if ! python3 "${WORKSPACE}/scripts/validate_release_archive.py" "${package}"; then
+    echo "::error::Packaged runtime archive failed deterministic safety/completeness validation."
+    return 1
+  fi
 
   local smoke_dir="${WORKSPACE}/release-smoke-${version}"
   bounded_rm_rf "${smoke_dir}"
   mkdir -p "${smoke_dir}"
   bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${package}" -C "${smoke_dir}"
-  validate_i686_runtime_bundle "${smoke_dir}"
-  bounded_rm_rf "${smoke_dir}"
+  if ! validate_i686_runtime_bundle "${smoke_dir}"; then
+    echo "::error::Packaged runtime bundle failed deterministic i686 validation."
+    return 1
+  fi
+  bounded_rm_rf "${smoke_dir}" || true
 
+  CHROMIUM_PACKAGE_FAILURE_CLASS=""
   ls -lh "${package}" "${checksum}" "${manifest}"
 }
