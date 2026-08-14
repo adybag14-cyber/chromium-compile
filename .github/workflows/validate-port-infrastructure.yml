@@ -10,6 +10,12 @@ on:
       - "support/**"
       - "tests/**"
   workflow_dispatch:
+    inputs:
+      full_version:
+        description: "Optional exact Chromium version for a full source/toolchain/i686 compatibility proof without dispatching a build"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "23 6 * * 1"
 
@@ -145,6 +151,50 @@ jobs:
           install_gn_from_cipd
           "${GN_BINARY}" --version
           test "$(chromium_gn_version)" = "${expected_gn}"
+
+  validate_full_source_preflight:
+    name: Full Chromium i686 compatibility proof
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_version != '' }}
+    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CHROMIUM_VERSION: ${{ inputs.full_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate full source, pinned tools and i686 graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${CHROMIUM_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          source .github/scripts/chromium_i686_common.sh
+          source .github/scripts/chromium_i686_port.sh
+          maximize_runner_disk_space
+          install_system_dependencies
+          install_i386_runtime_libraries
+          prepare_chromium_source "${CHROMIUM_VERSION}"
+          install_depot_tools
+          install_chromium_clang
+          install_i386_sysroot
+          apply_i686_port_patches "${CHROMIUM_VERSION}"
+          write_lastchange
+          configure_ccache
+          install_gn_from_cipd
+          configure_gn
+          run_i686_compatibility_preflight
+          run_extended_i686_preflight
+
+      - name: Upload full-preflight evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chromium-${{ inputs.full_version }}-linux-i686-full-preflight
+          path: i686-preflight-ninja-query.txt
+          retention-days: 14
+          if-no-files-found: error
 
   validate_i386_runtime:
     name: Validate i386 host runtime

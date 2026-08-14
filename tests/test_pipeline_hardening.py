@@ -455,5 +455,17 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("Unsupported special source archive member", validator)
 
 
+    def test_manual_full_source_preflight_is_available_without_build_dispatch(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("full_version:", validation)
+        self.assertIn("validate_full_source_preflight:", validation)
+        self.assertIn("Full Chromium i686 compatibility proof", validation)
+        self.assertIn('prepare_chromium_source "${CHROMIUM_VERSION}"', validation)
+        self.assertIn("run_extended_i686_preflight", validation)
+        full_job = validation[validation.index("validate_full_source_preflight:") : validation.index("validate_i386_runtime:")]
+        self.assertNotIn("gh workflow run chromium-i686.yml", full_job)
+        self.assertNotIn("concurrency:", full_job)
+
+
 if __name__ == "__main__":
     unittest.main()
