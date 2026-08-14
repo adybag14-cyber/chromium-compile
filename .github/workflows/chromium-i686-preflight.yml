@@ -59,8 +59,8 @@ jobs:
           install_system_dependencies
           bounded_sudo_apt_get install -y file binutils
           install_i386_runtime_libraries
-          install_depot_tools
           prepare_chromium_source "${CHROMIUM_VERSION}"
+          install_depot_tools
           install_chromium_clang
           install_i386_sysroot
           apply_i686_port_patches "${CHROMIUM_VERSION}"
@@ -69,6 +69,7 @@ jobs:
           install_gn_from_cipd
           configure_gn
           run_i686_compatibility_preflight
+          run_extended_i686_preflight
 
       - name: Quarantine failed preflight
         if: ${{ failure() }}

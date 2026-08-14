@@ -106,7 +106,7 @@ set -e
 # A provider that installs successfully but leaves the same SONAME unresolved must
 # stop after one install rather than repeating identical apt cycles.
 I386_SONAME_PACKAGES[libStuck.so]=libstuck:i386
-ldd() { printf '%s\n' 'libStuck.so => not found'; }
+bounded_ldd() { printf '%s\n' 'libStuck.so => not found'; }
 dpkg-query() { return 1; }
 SUDO_CALLS="${RUNNER_TEMP}/sudo-calls"
 : > "${SUDO_CALLS}"
@@ -123,6 +123,18 @@ set -e
 [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] || fail "no-progress repair should be deterministic"
 [ "$(wc -l < "${SUDO_CALLS}")" -eq 1 ] || fail "no-progress repair repeated the package install"
 grep -q 'libstuck:i386' "${SUDO_CALLS}" || fail "expected package was not selected"
+
+# A failed or timed-out ldd probe must fail closed and classify the problem as
+# deterministic rather than parsing empty output or retrying on a fresh runner.
+(
+  bounded_ldd() { printf '%s\n' 'ldd probe failed' >&2; return 1; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if repair_missing_i386_runtime_for_binary "${RUNNER_TEMP}/fake-binary" >/dev/null 2>&1; then
+    fail "runtime repair succeeded despite failed bounded ldd probe"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] \
+    || fail "failed bounded ldd probe was not deterministic_build"
+)
 
 # Commands invoked inside the reported-tool loop must not be able to consume the
 # loop's pending stdin and skip later tools.

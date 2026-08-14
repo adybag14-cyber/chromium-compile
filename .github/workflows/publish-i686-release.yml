@@ -1,5 +1,5 @@
 name: Publish Chromium i686 Release
-run-name: Publish ${{ github.event.workflow_run.display_title }}
+run-name: Publish ${{ github.event.workflow_run.display_title || format('build run {0}', inputs.build_run_id) }}
 
 on:
   workflow_run:
@@ -7,6 +7,12 @@ on:
       - Chromium i686 Build (Unofficial Port)
     types:
       - completed
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Successful Chromium i686 build run ID to republish without recompiling"
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -14,19 +20,24 @@ permissions:
   issues: write
 
 concurrency:
-  group: chromium-i686-release-${{ github.event.workflow_run.id }}
+  # Release mutation is rare and correctness-sensitive. Serialize all publishers so
+  # two successful build runs can never race on the same version tag/draft.
+  group: chromium-i686-release
   cancel-in-progress: false
 
 jobs:
   publish:
     if: >-
       ${{
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_branch == github.event.repository.default_branch &&
-        github.event.workflow_run.head_repository.full_name == github.repository
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout trusted release helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,21 +47,92 @@ jobs:
       - name: Install release validation tools
         shell: bash
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y file binutils xz-utils
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          bounded_sudo_apt_get update
+          bounded_sudo_apt_get install -y --no-install-recommends jq python3 file binutils xz-utils
+
+      - name: Resolve and verify trusted build source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ github.event.workflow_run.id || inputs.build_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          [[ "${REQUESTED_RUN_ID}" =~ ^[0-9]+$ ]] || {
+            echo "::error::build_run_id must be a numeric GitHub Actions run ID"
+            exit 1
+          }
+          run_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUESTED_RUN_ID}")"
+          status="$(jq -r '.status // ""' <<<"${run_json}")"
+          conclusion="$(jq -r '.conclusion // ""' <<<"${run_json}")"
+          workflow_path="$(jq -r '.path // ""' <<<"${run_json}")"
+          head_branch="$(jq -r '.head_branch // ""' <<<"${run_json}")"
+          head_repo="$(jq -r '.head_repository.full_name // ""' <<<"${run_json}")"
+          head_sha="$(jq -r '.head_sha // ""' <<<"${run_json}")"
+          display_title="$(jq -r '.display_title // ""' <<<"${run_json}")"
+
+          test "${status}" = completed || {
+            echo "::error::Build run ${REQUESTED_RUN_ID} is not completed."
+            exit 1
+          }
+          test "${conclusion}" = success || {
+            echo "::error::Build run ${REQUESTED_RUN_ID} did not conclude successfully."
+            exit 1
+          }
+          test "${workflow_path}" = ".github/workflows/chromium-i686.yml" || {
+            echo "::error::Run ${REQUESTED_RUN_ID} is not the trusted Chromium i686 build workflow."
+            exit 1
+          }
+          test "${head_branch}" = "${DEFAULT_BRANCH}" || {
+            echo "::error::Run ${REQUESTED_RUN_ID} did not build the repository default branch."
+            exit 1
+          }
+          test "${head_repo}" = "${GITHUB_REPOSITORY}" || {
+            echo "::error::Run ${REQUESTED_RUN_ID} originated from ${head_repo}, not ${GITHUB_REPOSITORY}."
+            exit 1
+          }
+          [[ "${head_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Run ${REQUESTED_RUN_ID} has an invalid head SHA."
+            exit 1
+          }
+          echo "run_id=${REQUESTED_RUN_ID}" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+          delimiter="display_title_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+          {
+            printf 'display_title<<%s\n' "${delimiter}"
+            printf '%s\n' "${display_title}"
+            printf '%s\n' "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Discover completed build artifact
         id: artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ steps.source.outputs.run_id }}
+          BUILD_DISPLAY_TITLE: ${{ steps.source.outputs.display_title }}
+          EVENT_NAME: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
-          names="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[].name')"
+          source .github/scripts/chromium_i686_common.sh
+          expected_version="$(sed -nE 's/^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"${BUILD_DISPLAY_TITLE}")"
+          [[ "${expected_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Could not extract Chromium version from build run title: ${BUILD_DISPLAY_TITLE}"
+            exit 1
+          }
+
+          names="$(bounded_gh api --paginate             "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100"             --jq '.artifacts[] | select(.expired == false) | .name')"
           mapfile -t matches < <(grep -E '^chromium-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-linux-i686$' <<<"${names}" || true)
 
           if [ "${#matches[@]}" -eq 0 ]; then
+            if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+              echo "::error::Requested build run ${RUN_ID} has no retained final Chromium runtime artifact."
+              exit 1
+            fi
             echo "found=false" >> "${GITHUB_OUTPUT}"
             echo "This compiler stage did not produce the final runtime artifact."
             exit 0
@@ -64,6 +146,10 @@ jobs:
           artifact_name="${matches[0]}"
           version="${artifact_name#chromium-}"
           version="${version%-linux-i686}"
+          test "${version}" = "${expected_version}" || {
+            echo "::error::Artifact Chromium version ${version} does not match triggering build ${expected_version}."
+            exit 1
+          }
           echo "found=true" >> "${GITHUB_OUTPUT}"
           echo "name=${artifact_name}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
@@ -72,93 +158,228 @@ jobs:
         if: ${{ steps.artifact.outputs.found == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ steps.source.outputs.run_id }}
           ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
         shell: bash
         run: |
           set -euo pipefail
-          gh run download "${RUN_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --name "${ARTIFACT_NAME}" \
-            --dir release-assets
+          source .github/scripts/chromium_i686_common.sh
+          bounded_gh run download "${RUN_ID}"             --repo "${GITHUB_REPOSITORY}"             --name "${ARTIFACT_NAME}"             --dir release-assets
 
-      - name: Verify checksum and ELF32 architecture
+      - name: Verify provenance, checksum and i686 runtime
         if: ${{ steps.artifact.outputs.found == 'true' }}
         env:
-          VERSION: ${{ steps.artifact.outputs.version }}
+          CHROMIUM_VERSION: ${{ steps.artifact.outputs.version }}
+          BUILD_SHA: ${{ steps.source.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ steps.source.outputs.run_id }}
         shell: bash
         run: |
           set -euo pipefail
-          package="release-assets/chromium-${VERSION}-linux-i686.tar.xz"
+          source .github/scripts/chromium_i686_common.sh
+          package="release-assets/chromium-${CHROMIUM_VERSION}-linux-i686.tar.xz"
           checksum="${package}.sha256"
-          manifest="release-assets/chromium-${VERSION}-linux-i686-manifest.txt"
+          manifest="release-assets/chromium-${CHROMIUM_VERSION}-linux-i686-manifest.txt"
           test -s "${package}"
           test -s "${checksum}"
           test -s "${manifest}"
-          grep -qx "version=${VERSION}" "${manifest}"
+          grep -qx "version=${CHROMIUM_VERSION}" "${manifest}"
           grep -qx "target_cpu=x86" "${manifest}"
           grep -qx "target_os=linux" "${manifest}"
+          grep -qx "github_sha=${BUILD_SHA}" "${manifest}"
+          grep -qx "github_run_id=${BUILD_RUN_ID}" "${manifest}"
 
           expected="$(awk 'NR == 1 {print $1}' "${checksum}")"
+          checksum_name="$(awk 'NR == 1 {print $2}' "${checksum}")"
           actual="$(sha256sum "${package}" | awk '{print $1}')"
+          manifest_sha="$(awk -F= '$1 == "package_sha256" {print $2}' "${manifest}")"
           echo "Expected package SHA-256: ${expected}"
           echo "Actual package SHA-256:   ${actual}"
+          test "${checksum_name}" = "$(basename "${package}")"
           test "${actual}" = "${expected}"
+          test "${actual}" = "${manifest_sha}"
 
+          python3 scripts/validate_release_archive.py "${package}"
           mkdir release-runtime
-          tar -xJf "${package}" -C release-runtime
-          source .github/scripts/chromium_i686_port.sh
-          validate_i686_chrome_binary release-runtime/chrome
+          bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"             tar -xJf "${package}" -C release-runtime
+          validate_i686_runtime_bundle release-runtime
 
-      - name: Create or update unofficial release
+      - name: Create or resume transactional immutable release
         if: ${{ steps.artifact.outputs.found == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.artifact.outputs.version }}
-          BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+          CHROMIUM_VERSION: ${{ steps.artifact.outputs.version }}
+          BUILD_SHA: ${{ steps.source.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ steps.source.outputs.run_id }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="chromium-${VERSION}-linux-i686"
+          source .github/scripts/chromium_i686_common.sh
+          tag="chromium-${CHROMIUM_VERSION}-linux-i686"
+          title="Chromium ${CHROMIUM_VERSION} Linux i686 (Unofficial)"
+          notes="Unofficial downstream Linux i686 build of Chromium ${CHROMIUM_VERSION}. Chromium upstream does not support or test this target. Built and ELF32-validated by GitHub Actions run ${BUILD_RUN_ID} from commit ${BUILD_SHA}."
           assets=(
-            "release-assets/chromium-${VERSION}-linux-i686.tar.xz"
-            "release-assets/chromium-${VERSION}-linux-i686.tar.xz.sha256"
-            "release-assets/chromium-${VERSION}-linux-i686-manifest.txt"
+            "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686.tar.xz"
+            "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686.tar.xz.sha256"
+            "release-assets/chromium-${CHROMIUM_VERSION}-linux-i686-manifest.txt"
           )
 
-          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${tag}" "${assets[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+          tag_state="$(python3 scripts/github_release_tag.py \
+            --repository "${GITHUB_REPOSITORY}" --tag "${tag}" --sha "${BUILD_SHA}")"
+          echo "Verified exact release tag ${tag} -> ${BUILD_SHA} (${tag_state})."
+
+          release_asset_digest() {
+            local json="${1:?release json is required}"
+            local name="${2:?asset name is required}"
+            local count digest
+            count="$(jq -r --arg name "${name}" '[.assets[] | select(.name == $name)] | length' <<<"${json}")"
+            if [ "${count}" -eq 0 ]; then
+              return 4
+            fi
+            if [ "${count}" -ne 1 ]; then
+              echo "::error::Release contains ${count} assets named ${name}; refusing ambiguous publication state." >&2
+              return 1
+            fi
+            digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest // empty' <<<"${json}")"
+            if [ -z "${digest}" ]; then
+              echo "::error::GitHub did not expose a SHA-256 digest for existing release asset ${name}; required release-digest capability is unavailable." >&2
+              return 2
+            fi
+            printf '%s\n' "${digest}"
+          }
+
+          release_json=""
+          release_state="$(python3 scripts/github_release_state.py \
+            --repository "${GITHUB_REPOSITORY}" --tag "${tag}")"
+          if [ "${release_state}" = "exists" ]; then
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+            is_draft="$(jq -r '.isDraft' <<<"${release_json}")"
+          elif [ "${release_state}" = "missing" ]; then
+            is_draft=true
+            echo "Creating draft ${tag}; exact tag provenance is already pinned to ${BUILD_SHA}."
+            if ! bounded_gh release create "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --draft \
+                --title "${title}" \
+                --notes "${notes}"; then
+              echo "::warning::Draft create returned an error; checking whether GitHub accepted it before failing."
+            fi
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+            is_draft="$(jq -r '.isDraft' <<<"${release_json}")"
+            test "${is_draft}" = true || {
+              echo "::error::Unexpected published release appeared while creating ${tag}; refusing mutation."
+              exit 1
+            }
           else
-            gh release create "${tag}" "${assets[@]}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --target "${DEFAULT_BRANCH}" \
-              --title "Chromium ${VERSION} Linux i686 (Unofficial)" \
-              --notes "Unofficial downstream Linux i686 build of Chromium ${VERSION}. Chromium upstream does not support or test this target. Built and ELF32-validated by GitHub Actions run ${BUILD_RUN_ID} from commit ${BUILD_SHA}."
+            echo "::error::Unexpected release-state helper result: ${release_state}"
+            exit 1
           fi
 
-          title="[i686-port] Chromium ${VERSION} requires maintenance"
-          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --json number,title --jq ".[] | select(.title == \"${title}\") | .number" | head -n1)"
-          if [ -n "${issue_number}" ]; then
-            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "Resolved by successful unofficial i686 release \`${tag}\`."
-            gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --reason completed
+          if [ "${is_draft}" = false ]; then
+            existing_commit="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            test "${existing_commit}" = "${BUILD_SHA}" || {
+              echo "::error::Published release ${tag} points to ${existing_commit}, not build ${BUILD_SHA}; refusing to rewrite release history."
+              exit 1
+            }
+            for asset in "${assets[@]}"; do
+              name="$(basename "${asset}")"
+              local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+              if ! remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                echo "::error::Published release asset ${name} is missing or lacks verifiable digest metadata; immutable releases are never mutated in place."
+                exit 1
+              fi
+              if [ "${remote_digest}" != "${local_digest}" ]; then
+                echo "::error::Published release asset ${name} differs from the validated local artifact; immutable releases are never mutated in place."
+                exit 1
+              fi
+            done
+            echo "Published ${tag} is commit- and byte-identical; leaving immutable release untouched."
+          else
+            draft_target="$(jq -r '.targetCommitish // ""' <<<"${release_json}")"
+            echo "Draft API target_commitish=${draft_target:-unset}; exact provenance is enforced by verified Git ref ${tag} -> ${BUILD_SHA}."
+
+            # Drafts are resumable. Upload only a missing asset. An existing asset
+            # must already be byte-identical; differing bytes are never overwritten.
+            for asset in "${assets[@]}"; do
+              name="$(basename "${asset}")"
+              local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+              release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+              digest_status=0
+              if remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                :
+              else
+                digest_status=$?
+                if [ "${digest_status}" -ne 4 ]; then
+                  exit 1
+                fi
+                echo "Uploading missing draft asset ${name}."
+                if ! bounded_gh release upload "${tag}" "${asset}" --repo "${GITHUB_REPOSITORY}"; then
+                  echo "::warning::Upload returned an error; verifying whether GitHub stored ${name}."
+                fi
+                release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+                if ! remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                  echo "::error::Uploaded draft asset ${name} is not present with verifiable digest metadata."
+                  exit 1
+                fi
+              fi
+              if [ "${remote_digest}" != "${local_digest}" ]; then
+                echo "::error::Draft asset ${name} differs from the validated local artifact; refusing overwrite."
+                exit 1
+              fi
+            done
+
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,targetCommitish,assets)"
+            for asset in "${assets[@]}"; do
+              name="$(basename "${asset}")"
+              local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+              if ! remote_digest="$(release_asset_digest "${release_json}" "${name}")"; then
+                echo "::error::Draft asset ${name} lost required digest metadata before publication."
+                exit 1
+              fi
+              test "${remote_digest}" = "${local_digest}"
+            done
+
+            echo "All draft assets are byte-identical; re-verifying exact tag provenance before publication."
+            prepublish_tag_state="$(python3 scripts/github_release_tag.py \
+              --repository "${GITHUB_REPOSITORY}" --tag "${tag}" --sha "${BUILD_SHA}")"
+            echo "Pre-publication tag verification: ${prepublish_tag_state}."
+            echo "Publishing ${tag}."
+            if ! bounded_gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --draft=false; then
+              echo "::warning::Publish transition returned an error; verifying final release state."
+            fi
+            release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,assets)"
+            test "$(jq -r '.isDraft' <<<"${release_json}")" = false
+            published_commit="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            test "${published_commit}" = "${BUILD_SHA}"
+          fi
+
+          maintenance_title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
+          issue_number=""
+          if issue_number="$(bounded_gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${maintenance_title}" '.[] | select(.title == $title) | .number' | head -n1)"; then
+            if [ -n "${issue_number}" ]; then
+              bounded_gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "Resolved by successful immutable unofficial i686 release \`${tag}\`." \
+                || echo "::warning::Release succeeded but maintenance issue comment failed."
+              bounded_gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --reason completed \
+                || echo "::warning::Release succeeded but maintenance issue close failed."
+            fi
+          else
+            echo "::warning::Release succeeded but maintenance issue lookup failed; not converting publication success into a release failure."
           fi
 
       - name: Report release publication failure
-        if: ${{ failure() && steps.artifact.outputs.found == 'true' }}
+        if: ${{ failure() }}
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.artifact.outputs.version }}
+          CHROMIUM_VERSION: ${{ steps.artifact.outputs.version || 'unknown' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
           set -euo pipefail
-          title="[i686-port] Chromium ${VERSION} requires maintenance"
-          body="The build artifact passed to the release workflow, but release validation or publication failed. Release workflow: ${RUN_URL}"
-          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --json number,title --jq ".[] | select(.title == \"${title}\") | .number" | head -n1)"
+          title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
+          body="The build artifact reached the trusted release workflow, but provenance, runtime validation, or immutable publication failed. Release workflow: ${RUN_URL}"
+          issue_number="$(timeout -k 15s 300s gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${title}" '.[] | select(.title == $title) | .number' | head -n1)"
           if [ -n "${issue_number}" ]; then
-            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            timeout -k 15s 300s gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
           else
-            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+            timeout -k 15s 300s gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
           fi

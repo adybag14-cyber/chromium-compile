@@ -219,9 +219,11 @@ A separate default-branch workflow then:
 - extracts `chrome`;
 - checks it with `file` and `readelf`;
 - requires `ELF32` and `Intel 80386`;
-- creates or updates `chromium-<version>-linux-i686`.
+- verifies or creates the exact `refs/tags/chromium-<version>-linux-i686` ref at the validated build SHA;
+- creates/resumes a draft release only after that tag provenance is fixed;
+- publishes only after every retained asset digest matches, while an already-published release remains immutable.
 
-Release publication is separated from compilation so a permissions or publishing problem cannot erase the successful build artifact.
+Release publication is separated from compilation so a permissions or publishing problem cannot erase the successful build artifact. Release creation never relies on `target_commitish` to correct an existing tag; GitHub ignores that field for pre-existing tags, so the Git ref itself is verified first.
 
 ## Maintenance
 
@@ -266,3 +268,10 @@ The staged builder now treats the GitHub-hosted runner as an untrusted, replacea
 - Disk-space guards trim expendable caches before compilation/checkpoint creation and fail before a near-full runner can destroy resumable state.
 - Failed/cancelled preflight/build run history is an independent watcher quarantine source. A failed preflight also attempts to upsert `[i686-port] Chromium <version> requires maintenance` in the same workflow run, eliminating reliance on a secondary `workflow_run` event.
 - Every compiler stage writes a compact GitHub job summary with progress, checkpoint size, failure classification, free disk and ccache statistics.
+- Chromium's own `DEPS` file is the source of truth for the depot_tools commit and GN CIPD version; rolling `latest` host tooling is not used for production builds.
+- Source tarballs are validated against the authoritative GCS object's generation, content length and MD5 while computing a local SHA-256. First-seen bytes also undergo safe-member validation before extraction. After extraction, `chrome/VERSION` must exactly match the requested version and critical files are compared against the authoritative Gitiles tag.
+- Source cache contract `chromium-src-v2-<version>` stores a trust marker bound to version + GCS generation/length/MD5 + SHA-256 + successful safe-archive/Gitiles proofs. Legacy caches are accepted only as a one-time fallback, fully revalidated, then promoted to v2. Exact v2 bytes can skip redundant decompression/Gitiles scans on later stages while still rechecking the complete compressed object against GCS metadata.
+- The build includes Chromium's upstream `chrome/installer/linux:installer_deps` group. The standalone archive derives its binary/resource closure from that installer definition and renders Chromium's wrapper template as `chrome-wrapper`.
+- Resumable output checkpoints are correctness state. Cross-stage Actions ccache persistence is intentionally disabled, the immutable source archive is cached once per Chromium version, and packaging/final-artifact failures attempt a same-stage final-output recovery checkpoint before the runner disappears.
+- Release archives reject unsafe, duplicate and special tar members; every packaged ELF must be ELF32 Intel 80386. Manifest/checksum provenance must match the exact successful build run.
+- Release tags target the exact build SHA and existing release assets are immutable. A trusted manual publisher can republish a retained successful build artifact by run ID after release-logic maintenance without recompiling Chromium.
