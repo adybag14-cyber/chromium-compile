@@ -334,7 +334,11 @@ jobs:
               test "${remote_digest}" = "${local_digest}"
             done
 
-            echo "All draft assets are byte-identical; publishing ${tag}."
+            echo "All draft assets are byte-identical; re-verifying exact tag provenance before publication."
+            prepublish_tag_state="$(python3 scripts/github_release_tag.py \
+              --repository "${GITHUB_REPOSITORY}" --tag "${tag}" --sha "${BUILD_SHA}")"
+            echo "Pre-publication tag verification: ${prepublish_tag_state}."
+            echo "Publishing ${tag}."
             if ! bounded_gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --draft=false; then
               echo "::warning::Publish transition returned an error; verifying final release state."
             fi

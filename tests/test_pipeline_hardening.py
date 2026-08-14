@@ -292,6 +292,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("scripts/github_release_tag.py", publish)
         self.assertIn("scripts/github_release_state.py", publish)
         self.assertIn("Verified exact release tag", publish)
+        self.assertIn("Pre-publication tag verification", publish)
+        self.assertGreaterEqual(publish.count("scripts/github_release_tag.py"), 2)
         self.assertNotIn('existing_tag_commit="$(bounded_gh api', publish)
         self.assertIn("refusing to rewrite release history", publish)
         self.assertIn("immutable releases are never mutated in place", publish)
