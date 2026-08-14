@@ -25,6 +25,7 @@ class WorkflowDispatchTests(unittest.TestCase):
             dispatch.list_recent_runs("owner/repo", "workflow.yml", attempts=1)
         args = run_gh.call_args.args[0]
         self.assertIn(str(dispatch.RUN_LOOKUP_LIMIT), args)
+        self.assertIn("databaseId,displayTitle,headBranch,status,conclusion,createdAt", args)
         self.assertGreaterEqual(dispatch.RUN_LOOKUP_LIMIT, 1000)
 
     def test_saturated_run_lookup_without_exact_title_fails_closed(self):
@@ -34,7 +35,7 @@ class WorkflowDispatchTests(unittest.TestCase):
         ]
         with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
             with self.assertRaises(dispatch.DispatchError):
-                dispatch.exact_active_exists("owner/repo", "workflow.yml", "Expected title")
+                dispatch.exact_active_exists("owner/repo", "workflow.yml", "Expected title", "main")
 
     def test_active_exact_run_prevents_duplicate_dispatch(self):
         with mock.patch.object(dispatch, "exact_active_exists", return_value=True),              mock.patch.object(dispatch, "run_gh") as run_gh:
@@ -47,6 +48,34 @@ class WorkflowDispatchTests(unittest.TestCase):
             )
         self.assertEqual(result, "already-active")
         run_gh.assert_not_called()
+
+    def test_same_title_on_different_branch_does_not_dedupe(self):
+        runs = [
+            {
+                "displayTitle": "Expected title",
+                "headBranch": "experiment",
+                "status": "in_progress",
+                "createdAt": "2026-08-14T12:00:00Z",
+            }
+        ]
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
+            self.assertFalse(
+                dispatch.exact_active_exists("owner/repo", "workflow.yml", "Expected title", "main")
+            )
+
+    def test_same_title_on_same_branch_dedupes(self):
+        runs = [
+            {
+                "displayTitle": "Expected title",
+                "headBranch": "main",
+                "status": "in_progress",
+                "createdAt": "2026-08-14T12:00:00Z",
+            }
+        ]
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
+            self.assertTrue(
+                dispatch.exact_active_exists("owner/repo", "workflow.yml", "Expected title", "main")
+            )
 
     def test_successful_dispatch_is_called_once(self):
         with mock.patch.object(dispatch, "exact_active_exists", return_value=False),              mock.patch.object(dispatch, "run_gh") as run_gh:
@@ -116,6 +145,7 @@ class WorkflowDispatchTests(unittest.TestCase):
         parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
         old_run = {
             "displayTitle": "Expected title",
+            "headBranch": "main",
             "status": "completed",
             "createdAt": "2026-08-01T00:00:00Z",
         }

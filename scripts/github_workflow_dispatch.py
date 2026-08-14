@@ -51,7 +51,7 @@ def list_recent_runs(repository: str, workflow: str, *, attempts: int = 3) -> li
                     "--limit",
                     str(RUN_LOOKUP_LIMIT),
                     "--json",
-                    "databaseId,displayTitle,status,conclusion,createdAt",
+                    "databaseId,displayTitle,headBranch,status,conclusion,createdAt",
                 ]
             )
             payload = json.loads(result.stdout or "[]")
@@ -88,10 +88,15 @@ def workflow_run_created_at(repository: str, run_id: str) -> datetime:
 
 
 def _exact_runs_or_fail_closed(
-    repository: str, workflow: str, expected_title: str
+    repository: str, workflow: str, expected_title: str, expected_ref: str
 ) -> list[dict[str, object]]:
     runs = list_recent_runs(repository, workflow)
-    matches = [run for run in runs if str(run.get("displayTitle", "")) == expected_title]
+    matches = [
+        run
+        for run in runs
+        if str(run.get("displayTitle", "")) == expected_title
+        and str(run.get("headBranch", "")) == expected_ref
+    ]
     if not matches and len(runs) >= RUN_LOOKUP_LIMIT:
         raise DispatchError(
             f"Workflow run lookup saturated at {RUN_LOOKUP_LIMIT} entries for {workflow}; "
@@ -100,25 +105,30 @@ def _exact_runs_or_fail_closed(
     return matches
 
 
-def exact_active_exists(repository: str, workflow: str, expected_title: str) -> bool:
+def exact_active_exists(
+    repository: str, workflow: str, expected_title: str, expected_ref: str
+) -> bool:
     return any(
         str(run.get("status", "")) in ACTIVE
-        for run in _exact_runs_or_fail_closed(repository, workflow, expected_title)
+        for run in _exact_runs_or_fail_closed(repository, workflow, expected_title, expected_ref)
     )
 
 
-def exact_any_exists(repository: str, workflow: str, expected_title: str) -> bool:
-    return bool(_exact_runs_or_fail_closed(repository, workflow, expected_title))
+def exact_any_exists(
+    repository: str, workflow: str, expected_title: str, expected_ref: str
+) -> bool:
+    return bool(_exact_runs_or_fail_closed(repository, workflow, expected_title, expected_ref))
 
 
 def exact_exists_since(
     repository: str,
     workflow: str,
     expected_title: str,
+    expected_ref: str,
     not_before: datetime,
 ) -> bool:
     threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=30)
-    for run in _exact_runs_or_fail_closed(repository, workflow, expected_title):
+    for run in _exact_runs_or_fail_closed(repository, workflow, expected_title, expected_ref):
         raw = str(run.get("createdAt", ""))
         try:
             created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -133,9 +143,10 @@ def exact_recent_exists(
     repository: str,
     workflow: str,
     expected_title: str,
+    expected_ref: str,
     not_before: datetime,
 ) -> bool:
-    return exact_exists_since(repository, workflow, expected_title, not_before)
+    return exact_exists_since(repository, workflow, expected_title, expected_ref, not_before)
 
 
 def dispatch_once(
@@ -153,9 +164,9 @@ def dispatch_once(
         if not dedupe_since_run_id:
             raise ValueError("dedupe_completed requires dedupe_since_run_id")
         parent_started = workflow_run_created_at(repository, dedupe_since_run_id)
-        if exact_exists_since(repository, workflow, expected_title, parent_started):
+        if exact_exists_since(repository, workflow, expected_title, ref, parent_started):
             return "already-seen"
-    elif exact_active_exists(repository, workflow, expected_title):
+    elif exact_active_exists(repository, workflow, expected_title, ref):
         return "already-active"
 
     command = ["workflow", "run", workflow, "--repo", repository, "--ref", ref]
@@ -174,7 +185,7 @@ def dispatch_once(
         for _ in range(confirm_attempts):
             time.sleep(3)
             try:
-                if exact_recent_exists(repository, workflow, expected_title, started):
+                if exact_recent_exists(repository, workflow, expected_title, ref, started):
                     return "accepted-after-client-error"
             except DispatchError:
                 continue
