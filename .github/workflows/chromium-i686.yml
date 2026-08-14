@@ -192,6 +192,7 @@ jobs:
             --ref "${DEFAULT_BRANCH}" \
             --expected-title "${expected_title}" \
             --dedupe-completed \
+            --dedupe-since-run-id "${GITHUB_RUN_ID}" \
             --input "stage=${next_stage}" \
             --input "version=${CHROMIUM_VERSION}" \
             --input "preferred_checkpoint_run_id=" \
@@ -241,6 +242,7 @@ jobs:
             --ref "${DEFAULT_BRANCH}" \
             --expected-title "${expected_title}" \
             --dedupe-completed \
+            --dedupe-since-run-id "${GITHUB_RUN_ID}" \
             --input "stage=${STAGE}" \
             --input "version=${CHROMIUM_VERSION}" \
             --input "preferred_checkpoint_run_id=${GITHUB_RUN_ID}" \

@@ -9,6 +9,7 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         self.assertGreaterEqual(workflow.count("scripts/github_workflow_dispatch.py"), 2)
         self.assertGreaterEqual(workflow.count("--dedupe-completed"), 2)
+        self.assertEqual(workflow.count('--dedupe-since-run-id "${GITHUB_RUN_ID}"'), 2)
         self.assertIn("Start next stage on a fresh runner exactly once", workflow)
         self.assertIn("Redispatch failed stage exactly once", workflow)
         self.assertIn("CHROMIUM_VERSION", workflow)

@@ -66,6 +66,27 @@ def list_recent_runs(repository: str, workflow: str, *, attempts: int = 3) -> li
     raise last
 
 
+def workflow_run_created_at(repository: str, run_id: str) -> datetime:
+    if not run_id.isdigit():
+        raise ValueError(f"Run ID must be numeric: {run_id!r}")
+    result = run_gh(
+        [
+            "api",
+            f"repos/{repository}/actions/runs/{run_id}",
+            "--jq",
+            ".created_at",
+        ]
+    )
+    raw = (result.stdout or "").strip()
+    try:
+        created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DispatchError(f"Run {run_id} returned invalid created_at: {raw!r}") from exc
+    if created.tzinfo is None:
+        raise DispatchError(f"Run {run_id} returned timezone-naive created_at: {raw!r}")
+    return created.astimezone(timezone.utc)
+
+
 def _exact_runs_or_fail_closed(
     repository: str, workflow: str, expected_title: str
 ) -> list[dict[str, object]]:
@@ -90,7 +111,7 @@ def exact_any_exists(repository: str, workflow: str, expected_title: str) -> boo
     return bool(_exact_runs_or_fail_closed(repository, workflow, expected_title))
 
 
-def exact_recent_exists(
+def exact_exists_since(
     repository: str,
     workflow: str,
     expected_title: str,
@@ -108,6 +129,15 @@ def exact_recent_exists(
     return False
 
 
+def exact_recent_exists(
+    repository: str,
+    workflow: str,
+    expected_title: str,
+    not_before: datetime,
+) -> bool:
+    return exact_exists_since(repository, workflow, expected_title, not_before)
+
+
 def dispatch_once(
     repository: str,
     workflow: str,
@@ -117,9 +147,13 @@ def dispatch_once(
     *,
     confirm_attempts: int = 8,
     dedupe_completed: bool = False,
+    dedupe_since_run_id: str | None = None,
 ) -> str:
     if dedupe_completed:
-        if exact_any_exists(repository, workflow, expected_title):
+        if not dedupe_since_run_id:
+            raise ValueError("dedupe_completed requires dedupe_since_run_id")
+        parent_started = workflow_run_created_at(repository, dedupe_since_run_id)
+        if exact_exists_since(repository, workflow, expected_title, parent_started):
             return "already-seen"
     elif exact_active_exists(repository, workflow, expected_title):
         return "already-active"
@@ -155,6 +189,7 @@ def main() -> int:
     parser.add_argument("--expected-title", required=True)
     parser.add_argument("--input", action="append", default=[])
     parser.add_argument("--dedupe-completed", action="store_true")
+    parser.add_argument("--dedupe-since-run-id")
     args = parser.parse_args()
     result = dispatch_once(
         args.repository,
@@ -163,6 +198,7 @@ def main() -> int:
         args.expected_title,
         args.input,
         dedupe_completed=args.dedupe_completed,
+        dedupe_since_run_id=args.dedupe_since_run_id,
     )
     print(result)
     return 0

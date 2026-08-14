@@ -96,7 +96,9 @@ class WorkflowDispatchTests(unittest.TestCase):
 
 
     def test_completed_exact_run_can_be_deduped_for_job_reruns(self):
-        with mock.patch.object(dispatch, "exact_any_exists", return_value=True), \
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        with mock.patch.object(dispatch, "workflow_run_created_at", return_value=parent_started), \
+             mock.patch.object(dispatch, "exact_exists_since", return_value=True), \
              mock.patch.object(dispatch, "run_gh") as run_gh:
             result = dispatch.dispatch_once(
                 "owner/repo",
@@ -105,9 +107,47 @@ class WorkflowDispatchTests(unittest.TestCase):
                 "Expected title",
                 ["stage=2"],
                 dedupe_completed=True,
+                dedupe_since_run_id="12345",
             )
         self.assertEqual(result, "already-seen")
         run_gh.assert_not_called()
+
+    def test_historical_same_title_does_not_block_fresh_build_lineage(self):
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        old_run = {
+            "displayTitle": "Expected title",
+            "status": "completed",
+            "createdAt": "2026-08-01T00:00:00Z",
+        }
+        with mock.patch.object(dispatch, "workflow_run_created_at", return_value=parent_started), \
+             mock.patch.object(dispatch, "list_recent_runs", return_value=[old_run]), \
+             mock.patch.object(
+                 dispatch,
+                 "run_gh",
+                 return_value=subprocess.CompletedProcess(["gh"], 0, "", ""),
+             ) as run_gh:
+            result = dispatch.dispatch_once(
+                "owner/repo",
+                "workflow.yml",
+                "main",
+                "Expected title",
+                ["stage=2"],
+                dedupe_completed=True,
+                dedupe_since_run_id="12345",
+            )
+        self.assertEqual(result, "accepted")
+        self.assertEqual(run_gh.call_count, 1)
+
+    def test_completed_dedupe_requires_parent_run_scope(self):
+        with self.assertRaises(ValueError):
+            dispatch.dispatch_once(
+                "owner/repo",
+                "workflow.yml",
+                "main",
+                "Expected title",
+                ["stage=2"],
+                dedupe_completed=True,
+            )
 
 
 if __name__ == "__main__":
