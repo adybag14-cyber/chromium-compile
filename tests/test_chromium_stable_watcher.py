@@ -208,13 +208,73 @@ class StableWatcherTests(unittest.TestCase):
             with self.assertRaises(watcher.WatcherError):
                 watcher.list_rest_items("owner/repo", "releases", max_pages=2)
 
+    @staticmethod
+    def _healthy_release(version: str, **overrides):
+        release = {
+            "tag_name": f"chromium-{version}-linux-i686",
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                {
+                    "name": f"chromium-{version}-linux-i686.tar.xz",
+                    "state": "uploaded",
+                    "size": 100,
+                    "digest": "sha256:" + "a" * 64,
+                },
+                {
+                    "name": f"chromium-{version}-linux-i686.tar.xz.sha256",
+                    "state": "uploaded",
+                    "size": 100,
+                    "digest": "sha256:" + "b" * 64,
+                },
+                {
+                    "name": f"chromium-{version}-linux-i686-manifest.txt",
+                    "state": "uploaded",
+                    "size": 100,
+                    "digest": "sha256:" + "c" * 64,
+                },
+            ],
+        }
+        release.update(overrides)
+        return release
+
     def test_draft_release_does_not_mark_version_released(self):
         releases = [
-            {"tag_name": "chromium-151.0.0.1-linux-i686", "draft": True},
-            {"tag_name": "chromium-152.0.0.1-linux-i686", "draft": False},
+            self._healthy_release("151.0.0.1", draft=True),
+            self._healthy_release("152.0.0.1"),
         ]
         with mock.patch.object(watcher, "list_rest_items", return_value=releases):
+            healthy, broken = watcher.list_release_health("owner/repo")
+            self.assertEqual(healthy, {"152.0.0.1"})
+            self.assertEqual(broken, {"151.0.0.1"})
             self.assertEqual(watcher.list_release_versions("owner/repo"), {"152.0.0.1"})
+
+    def test_incomplete_release_assets_are_broken(self):
+        release = self._healthy_release("153.0.0.1")
+        release["assets"] = release["assets"][:-1]
+        with mock.patch.object(watcher, "list_rest_items", return_value=[release]):
+            healthy, broken = watcher.list_release_health("owner/repo")
+        self.assertEqual(healthy, set())
+        self.assertEqual(broken, {"153.0.0.1"})
+
+    def test_unverifiable_release_asset_is_broken(self):
+        for field, value in (("state", "new"), ("size", 0), ("digest", None)):
+            with self.subTest(field=field):
+                release = self._healthy_release("154.0.0.1")
+                release["assets"][0][field] = value
+                with mock.patch.object(watcher, "list_rest_items", return_value=[release]):
+                    healthy, broken = watcher.list_release_health("owner/repo")
+                self.assertEqual(healthy, set())
+                self.assertEqual(broken, {"154.0.0.1"})
+
+    def test_prerelease_and_duplicate_assets_are_broken(self):
+        prerelease = self._healthy_release("155.0.0.1", prerelease=True)
+        duplicate = self._healthy_release("156.0.0.1")
+        duplicate["assets"].append(dict(duplicate["assets"][0]))
+        with mock.patch.object(watcher, "list_rest_items", return_value=[prerelease, duplicate]):
+            healthy, broken = watcher.list_release_health("owner/repo")
+        self.assertEqual(healthy, set())
+        self.assertEqual(broken, {"155.0.0.1", "156.0.0.1"})
 
 
     def test_force_version_does_not_bypass_active_port_ownership(self):

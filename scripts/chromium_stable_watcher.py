@@ -243,17 +243,59 @@ def list_rest_items(
     )
 
 
-def list_release_versions(repository: str) -> set[str]:
+def list_release_health(repository: str) -> tuple[set[str], set[str]]:
     releases = list_rest_items(repository, "releases")
-    found: set[str] = set()
+    healthy: set[str] = set()
+    broken: set[str] = set()
     pattern = re.compile(r"^chromium-(\d+\.\d+\.\d+\.\d+)-linux-i686$")
+    digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
     for release in releases:
-        if bool(release.get("draft", False)):
-            continue
         match = pattern.fullmatch(str(release.get("tag_name", "")))
-        if match:
-            found.add(match.group(1))
-    return found
+        if not match:
+            continue
+        version = match.group(1)
+        expected_assets = {
+            f"chromium-{version}-linux-i686.tar.xz",
+            f"chromium-{version}-linux-i686.tar.xz.sha256",
+            f"chromium-{version}-linux-i686-manifest.txt",
+        }
+        assets = release.get("assets", [])
+        asset_map: dict[str, dict[str, object]] = {}
+        duplicate = False
+        if isinstance(assets, list):
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                name = str(asset.get("name", ""))
+                if name in asset_map:
+                    duplicate = True
+                asset_map[name] = asset
+
+        complete = not duplicate and expected_assets.issubset(asset_map)
+        if complete:
+            for name in expected_assets:
+                asset = asset_map[name]
+                if (
+                    str(asset.get("state", "")) != "uploaded"
+                    or int(asset.get("size", 0) or 0) <= 0
+                    or not digest_re.fullmatch(str(asset.get("digest", "")))
+                ):
+                    complete = False
+                    break
+
+        if (
+            bool(release.get("draft", False))
+            or bool(release.get("prerelease", False))
+            or not complete
+        ):
+            broken.add(version)
+        else:
+            healthy.add(version)
+    return healthy, broken
+
+
+def list_release_versions(repository: str) -> set[str]:
+    return list_release_health(repository)[0]
 
 
 def list_blocked_versions(repository: str) -> set[str]:
@@ -412,9 +454,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         versions = fetch_stable_versions(args.api_url, minimum)
         issue_blocked = list_blocked_versions(args.repository)
         active, run_quarantined = list_port_run_state(args.repository, args.ref)
+        released, broken_releases = list_release_health(args.repository)
+        if broken_releases:
+            formatted = ", ".join(sorted(broken_releases, key=version_key))
+            raise WatcherError(
+                "Published/draft Chromium i686 release state is incomplete or unverifiable for: "
+                f"{formatted}. Refusing to rebuild around a broken immutable publication record."
+            )
         state = PortState(
             known=known,
-            released=list_release_versions(args.repository),
+            released=released,
             blocked=issue_blocked | run_quarantined,
             active=active,
         )
