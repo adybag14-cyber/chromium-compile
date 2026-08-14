@@ -232,7 +232,8 @@ class PipelineHardeningTests(unittest.TestCase):
     def test_fallback_checkpoint_is_downloaded_on_demand(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         self.assertNotIn("- name: Try Fallback Checkpoint", action)
-        self.assertIn("Preferred checkpoint unavailable or invalid; downloading fallback checkpoint on demand.", action)
+        self.assertIn("Preferred checkpoint unavailable or invalid; validating fallback provenance before download.", action)
+        self.assertIn("Fallback provenance accepted; downloading checkpoint on demand.", action)
         self.assertIn('restore_out_checkpoint "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true', action)
         self.assertIn("Fallback checkpoint download failed; continuing with fresh output/ccache", action)
 
