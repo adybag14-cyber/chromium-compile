@@ -537,5 +537,23 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("cache-hit != 'true'", save)
 
 
+    def test_checkpoint_restore_has_archive_and_run_provenance_boundaries(self):
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("validate_checkpoint_source_run()", resume)
+        self.assertIn("scripts/validate_checkpoint_archive.py", resume)
+        self.assertLess(
+            resume.index("scripts/validate_checkpoint_archive.py"),
+            resume.index("tar -I 'zstd -T0 -d' -xf"),
+        )
+        self.assertGreaterEqual(action.count("validate_checkpoint_source_run"), 2)
+        self.assertIn("preferred-checkpoint-run-id", action)
+        self.assertIn("fallback-checkpoint-run-id", action)
+        self.assertIn("CHECKPOINT_PROVENANCE_FAILURE_CLASS", action)
+        self.assertIn("bash tests/test_checkpoint_provenance.sh", validation)
+
+
+
 if __name__ == "__main__":
     unittest.main()

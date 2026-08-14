@@ -124,6 +124,14 @@ runs:
         resume_archive=""
         preferred_candidate="${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst"
         if [ -s "${preferred_candidate}" ]; then
+          if ! validate_checkpoint_source_run \
+              "${{ inputs.preferred-checkpoint-run-id }}" \
+              "${{ inputs.version }}" \
+              "${{ inputs.stage }}" \
+              "${{ inputs.preferred-checkpoint-artifact }}"; then
+            echo "failure_class=${CHECKPOINT_PROVENANCE_FAILURE_CLASS:-deterministic_build}" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
           if checkpoint_bundle_is_usable "${preferred_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
             resume_archive="${preferred_candidate}"
           else
@@ -133,7 +141,16 @@ runs:
         fi
 
         if [ -z "${resume_archive}" ] && [ -n "${{ inputs.fallback-checkpoint-artifact }}" ]; then
-          echo "Preferred checkpoint unavailable or invalid; downloading fallback checkpoint on demand."
+          echo "Preferred checkpoint unavailable or invalid; validating fallback provenance before download."
+          if ! validate_checkpoint_source_run \
+              "${{ inputs.fallback-checkpoint-run-id }}" \
+              "${{ inputs.version }}" \
+              "${{ inputs.stage }}" \
+              "${{ inputs.fallback-checkpoint-artifact }}"; then
+            echo "failure_class=${CHECKPOINT_PROVENANCE_FAILURE_CLASS:-deterministic_build}" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          echo "Fallback provenance accepted; downloading checkpoint on demand."
           mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"
           if bounded_gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
             --repo "${GITHUB_REPOSITORY}" \

@@ -101,6 +101,99 @@ verify_i386_runtime_dependencies() {
   verify_or_repair_i386_runtime_dependencies
 }
 
+
+CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
+
+validate_checkpoint_source_run() {
+  local run_id="${1:?checkpoint run id is required}"
+  local expected_version="${2:?expected Chromium version is required}"
+  local current_stage="${3:?current stage is required}"
+  local artifact_name="${4:?checkpoint artifact name is required}"
+  CHECKPOINT_PROVENANCE_FAILURE_CLASS=deterministic_build
+
+  [[ "${run_id}" =~ ^[0-9]+$ ]] || {
+    echo "::error::Checkpoint run id is not numeric: ${run_id}"
+    return 1
+  }
+  [[ "${expected_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "::error::Checkpoint Chromium version is invalid: ${expected_version}"
+    return 1
+  }
+  [[ "${current_stage}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "::error::Checkpoint consumer stage is invalid: ${current_stage}"
+    return 1
+  }
+  if [[ ! "${artifact_name}" =~ ^chromium-i686-out-stage-([1-9][0-9]*)$ ]]; then
+    echo "::error::Checkpoint artifact name is outside the stage contract: ${artifact_name}"
+    return 1
+  fi
+  local producer_stage="${BASH_REMATCH[1]}"
+  if [ "${producer_stage}" -ne "${current_stage}" ] \
+      && [ "${producer_stage}" -ne "$((current_stage - 1))" ]; then
+    echo "::error::Checkpoint artifact stage ${producer_stage} is incompatible with consumer stage ${current_stage}."
+    return 1
+  fi
+
+  local run_json
+  if ! run_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not establish checkpoint run provenance for Actions run ${run_id}."
+    return 1
+  fi
+  local workflow_path head_repo head_branch title
+  workflow_path="$(jq -r '.path // ""' <<<"${run_json}")"
+  head_repo="$(jq -r '.head_repository.full_name // ""' <<<"${run_json}")"
+  head_branch="$(jq -r '.head_branch // ""' <<<"${run_json}")"
+  title="$(jq -r '.display_title // ""' <<<"${run_json}")"
+
+  test "${workflow_path}" = ".github/workflows/chromium-i686.yml" || {
+    echo "::error::Checkpoint run ${run_id} belongs to ${workflow_path}, not the Chromium i686 build workflow."
+    return 1
+  }
+  test "${head_repo}" = "${GITHUB_REPOSITORY}" || {
+    echo "::error::Checkpoint run ${run_id} originated from ${head_repo}, not ${GITHUB_REPOSITORY}."
+    return 1
+  }
+  test "${head_branch}" = "${GITHUB_REF_NAME}" || {
+    echo "::error::Checkpoint run ${run_id} is from branch ${head_branch}, not ${GITHUB_REF_NAME}."
+    return 1
+  }
+  [[ "${title}" == "Chromium i686 ${expected_version}"* ]] || {
+    echo "::error::Checkpoint run title does not match Chromium ${expected_version}: ${title}"
+    return 1
+  }
+  local title_stage
+  title_stage="$(sed -nE 's/.*stage ([0-9]+).*/\1/p' <<<"${title}")"
+  test "${title_stage}" = "${producer_stage}" || {
+    echo "::error::Checkpoint run title stage ${title_stage:-unknown} does not match artifact stage ${producer_stage}."
+    return 1
+  }
+
+  local artifacts_json total count expired
+  if ! artifacts_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")"; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not verify checkpoint artifact ownership for Actions run ${run_id}."
+    return 1
+  fi
+  total="$(jq -r '.total_count // 0' <<<"${artifacts_json}")"
+  if [ "${total}" -gt 100 ]; then
+    echo "::error::Checkpoint run ${run_id} has ${total} artifacts; refusing truncated artifact provenance lookup."
+    return 1
+  fi
+  count="$(jq -r --arg name "${artifact_name}" '[.artifacts[]? | select(.name == $name)] | length' <<<"${artifacts_json}")"
+  expired="$(jq -r --arg name "${artifact_name}" '[.artifacts[]? | select(.name == $name and .expired == true)] | length' <<<"${artifacts_json}")"
+  test "${count}" -eq 1 || {
+    echo "::error::Expected exactly one checkpoint artifact ${artifact_name} on run ${run_id}; found ${count}."
+    return 1
+  }
+  test "${expired}" -eq 0 || {
+    echo "::error::Checkpoint artifact ${artifact_name} on run ${run_id} is expired."
+    return 1
+  }
+  CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
+  echo "Verified checkpoint provenance: run ${run_id}, branch ${head_branch}, stage ${producer_stage}, artifact ${artifact_name}."
+}
+
 checkpoint_bundle_is_usable() {
   local archive="${1:?checkpoint archive is required}"
   local expected_version="${2:?expected version is required}"
@@ -134,6 +227,12 @@ checkpoint_bundle_is_usable() {
     sha256sum -c "$(basename "${checksum}")"
   ); then
     echo "::error::Checkpoint archive SHA-256 verification failed."
+    return 1
+  fi
+
+  if ! bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+      python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" "${archive}"; then
+    echo "::error::Checkpoint archive member/link safety validation failed: ${archive}"
     return 1
   fi
 

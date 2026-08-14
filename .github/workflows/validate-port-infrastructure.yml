@@ -54,6 +54,12 @@ jobs:
           set -euo pipefail
           bash tests/test_i386_runtime_repair.sh
 
+      - name: Exercise checkpoint provenance contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_checkpoint_provenance.sh
+
       - name: Reject floating first-party action tags
         shell: bash
         run: |
