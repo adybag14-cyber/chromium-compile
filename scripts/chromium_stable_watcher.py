@@ -271,7 +271,9 @@ def list_blocked_versions(repository: str) -> set[str]:
     return found
 
 
-def list_port_run_state(repository: str) -> tuple[set[str], set[str]]:
+def list_port_run_state(
+    repository: str, production_ref: str | None = None
+) -> tuple[set[str], set[str]]:
     active: set[str] = set()
     quarantined: set[str] = set()
     cutoff = datetime.now(timezone.utc) - timedelta(days=RUN_HISTORY_DAYS)
@@ -285,7 +287,17 @@ def list_port_run_state(repository: str) -> tuple[set[str], set[str]]:
             if status in ACTIVE_RUN_STATES:
                 active.add(version)
             elif status == "completed" and conclusion in QUARANTINE_RUN_CONCLUSIONS:
-                quarantined.add(version)
+                if production_ref is None:
+                    quarantined.add(version)
+                    continue
+                head_branch = str(run.get("head_branch", ""))
+                if not head_branch:
+                    raise WatcherError(
+                        f"Terminal {workflow} run for Chromium {version} lacks head_branch; "
+                        "refusing to guess whether it belongs to the production ref"
+                    )
+                if head_branch == production_ref:
+                    quarantined.add(version)
     return active, quarantined
 
 
@@ -393,13 +405,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.force_version:
         version_key(args.force_version)
         versions = [args.force_version]
-        active, _run_quarantine = list_port_run_state(args.repository)
+        active, _run_quarantine = list_port_run_state(args.repository, args.ref)
         state = PortState(known=known, released=set(), blocked=set(), active=active)
         candidates = [] if active else [args.force_version]
     else:
         versions = fetch_stable_versions(args.api_url, minimum)
         issue_blocked = list_blocked_versions(args.repository)
-        active, run_quarantined = list_port_run_state(args.repository)
+        active, run_quarantined = list_port_run_state(args.repository, args.ref)
         state = PortState(
             known=known,
             released=list_release_versions(args.repository),

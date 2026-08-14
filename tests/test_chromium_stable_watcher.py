@@ -79,6 +79,58 @@ class StableWatcherTests(unittest.TestCase):
                 {"151.0.7922.108", "152.0.0.1", "153.0.0.1"},
             )
 
+    def test_feature_branch_failure_does_not_quarantine_production(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "chromium-i686.yml":
+                return [
+                    {
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "display_title": "Chromium i686 155.0.1.2 - stage 2 - attempt 0",
+                        "head_branch": "experiment",
+                    }
+                ]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            active, quarantined = watcher.list_port_run_state("owner/repository", "main")
+        self.assertEqual(active, set())
+        self.assertEqual(quarantined, set())
+
+    def test_feature_branch_active_run_still_owns_global_queue(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "chromium-i686.yml":
+                return [
+                    {
+                        "status": "in_progress",
+                        "conclusion": "",
+                        "display_title": "Chromium i686 155.0.1.2 - stage 2 - attempt 0",
+                        "head_branch": "experiment",
+                    }
+                ]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            active, quarantined = watcher.list_port_run_state("owner/repository", "main")
+        self.assertEqual(active, {"155.0.1.2"})
+        self.assertEqual(quarantined, set())
+
+    def test_terminal_run_without_branch_fails_closed_for_production_quarantine(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "chromium-i686-preflight.yml":
+                return [
+                    {
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "display_title": "Chromium i686 preflight 155.0.1.2",
+                    }
+                ]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            with self.assertRaises(watcher.WatcherError):
+                watcher.list_port_run_state("owner/repository", "main")
+
     def test_workflow_history_saturation_fails_closed(self):
         full_page = {"workflow_runs": [{"display_title": "old"}] * 100}
         with mock.patch.object(watcher, "gh_json", return_value=full_page):
