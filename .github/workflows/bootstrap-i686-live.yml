@@ -1,78 +1,85 @@
 name: Bootstrap Chromium i686 Live Build
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/bootstrap-i686-live.yml
   workflow_dispatch:
 
 permissions:
   contents: write
   actions: write
 
+concurrency:
+  group: chromium-i686-bootstrap
+  cancel-in-progress: false
+
 jobs:
   dispatch:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Dispatch or locate production compatibility preflight
+      - name: Checkout bootstrap helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dispatch or record the baseline exactly once
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: "150.0.7871.186"
+          CHROMIUM_VERSION: "150.0.7871.186"
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
           set -euo pipefail
-
-          find_run() {
-            gh run list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --workflow chromium-i686-preflight.yml \
-              --limit 50 \
-              --json displayTitle,status,conclusion,createdAt,url \
-              --jq ".[] | select(.displayTitle == \"Chromium i686 preflight ${VERSION}\")" \
-              | head -n 1
-          }
-
-          run_json="$(find_run || true)"
+          tag="chromium-${CHROMIUM_VERSION}-linux-i686"
+          released=false
           dispatched=false
-          if [ -z "${run_json}" ]; then
-            gh workflow run chromium-i686-preflight.yml \
-              --repo "${GITHUB_REPOSITORY}" \
-              --ref main \
-              -f version="${VERSION}" \
-              -f dispatch_build="true"
-            dispatched=true
-            sleep 12
-            run_json="$(find_run || true)"
+
+          if timeout -k 10s 60s gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            released=true
+            echo "${tag} already exists; bootstrap will never redispatch a released baseline."
+          else
+            expected_title="Chromium i686 preflight ${CHROMIUM_VERSION}"
+            result="$(python3 scripts/github_workflow_dispatch.py \
+              --repository "${GITHUB_REPOSITORY}" \
+              --workflow chromium-i686-preflight.yml \
+              --ref "${DEFAULT_BRANCH}" \
+              --expected-title "${expected_title}" \
+              --input "version=${CHROMIUM_VERSION}" \
+              --input "dispatch_build=true")"
+            if [ "${result}" != "already-active" ]; then
+              dispatched=true
+            fi
           fi
 
-          if [ -z "${run_json}" ]; then
-            run_json='{"displayTitle":"not yet visible","status":"requested","conclusion":null,"createdAt":null,"url":null}'
-          fi
+          run_json="$(timeout -k 10s 60s gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow chromium-i686-preflight.yml \
+            --limit 100 \
+            --json displayTitle,status,conclusion,createdAt,url \
+            | jq -c --arg title "Chromium i686 preflight ${CHROMIUM_VERSION}" \
+                '[.[] | select(.displayTitle == $title)] | first // {displayTitle:"not visible",status:"unknown",conclusion:null,createdAt:null,url:null}')"
 
           jq -n \
-            --arg version "${VERSION}" \
+            --arg version "${CHROMIUM_VERSION}" \
+            --argjson released "${released}" \
             --argjson dispatched "${dispatched}" \
             --arg timestamp "$(date --iso-8601=seconds)" \
             --argjson run "${run_json}" \
-            '{schema:1,version:$version,dispatched_by_this_run:$dispatched,recorded_at:$timestamp,preflight:$run}' \
+            '{schema:2,version:$version,release_exists:$released,dispatched_by_this_run:$dispatched,recorded_at:$timestamp,preflight:$run}' \
             > bootstrap-status.json
 
           encoded="$(base64 -w0 bootstrap-status.json)"
-          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/support/bootstrap-status.json" --jq .sha 2>/dev/null || true)"
+          existing_sha="$(timeout -k 10s 60s gh api \
+            "repos/${GITHUB_REPOSITORY}/contents/support/bootstrap-status.json" --jq .sha 2>/dev/null || true)"
           args=(
             --method PUT
             -H "Accept: application/vnd.github+json"
             "repos/${GITHUB_REPOSITORY}/contents/support/bootstrap-status.json"
             -f message="Record live Chromium i686 bootstrap status"
             -f content="${encoded}"
-            -f branch="main"
+            -f branch="${DEFAULT_BRANCH}"
           )
           if [ -n "${existing_sha}" ]; then
             args+=(-f sha="${existing_sha}")
           fi
-          gh api "${args[@]}" >/dev/null
-
+          timeout -k 15s 120s gh api "${args[@]}" >/dev/null
           cat bootstrap-status.json

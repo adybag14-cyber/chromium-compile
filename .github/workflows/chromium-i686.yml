@@ -156,6 +156,7 @@ jobs:
   continue_pipeline:
     permissions:
       actions: write
+      contents: read
     name: Dispatch next compiler stage
     needs: build
     if: >-
@@ -167,7 +168,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Start next stage on a fresh runner
+      - name: Checkout dispatch helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Start next stage on a fresh runner exactly once
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_STAGE: ${{ needs.build.outputs.stage }}
@@ -177,19 +184,23 @@ jobs:
         run: |
           set -euo pipefail
           next_stage=$((CURRENT_STAGE + 1))
+          expected_title="Chromium i686 ${CHROMIUM_VERSION} - stage ${next_stage} - attempt 0"
           echo "Dispatching stage ${next_stage} with checkpoint from run ${GITHUB_RUN_ID}."
-          gh workflow run chromium-i686.yml \
-            --repo "${GITHUB_REPOSITORY}" \
+          python3 scripts/github_workflow_dispatch.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow chromium-i686.yml \
             --ref "${DEFAULT_BRANCH}" \
-            -f stage="${next_stage}" \
-            -f version="${CHROMIUM_VERSION}" \
-            -f preferred_checkpoint_run_id="" \
-            -f fallback_checkpoint_run_id="${GITHUB_RUN_ID}" \
-            -f retry_count="0"
+            --expected-title "${expected_title}" \
+            --input "stage=${next_stage}" \
+            --input "version=${CHROMIUM_VERSION}" \
+            --input "preferred_checkpoint_run_id=" \
+            --input "fallback_checkpoint_run_id=${GITHUB_RUN_ID}" \
+            --input "retry_count=0"
 
   recover_bad_runner:
     permissions:
       actions: write
+      contents: read
     name: Recover stage on a fresh runner
     needs: build
     if: >-
@@ -202,7 +213,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Redispatch failed stage
+      - name: Checkout dispatch helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Redispatch failed stage exactly once
         env:
           GH_TOKEN: ${{ github.token }}
           STAGE: ${{ needs.build.outputs.stage || inputs.stage || '1' }}
@@ -214,13 +231,69 @@ jobs:
         run: |
           set -euo pipefail
           next_retry=$((RETRY_COUNT + 1))
+          expected_title="Chromium i686 ${CHROMIUM_VERSION} - stage ${STAGE} - attempt ${next_retry}"
           echo "Runner/environment failure during stage ${STAGE}; dispatching recovery attempt ${next_retry}."
           echo "The recovery run will first try a same-stage checkpoint from run ${GITHUB_RUN_ID}, then fall back to ${FALLBACK_RUN_ID:-a fresh stage}."
-          gh workflow run chromium-i686.yml \
-            --repo "${GITHUB_REPOSITORY}" \
+          python3 scripts/github_workflow_dispatch.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow chromium-i686.yml \
             --ref "${DEFAULT_BRANCH}" \
-            -f stage="${STAGE}" \
-            -f version="${CHROMIUM_VERSION}" \
-            -f preferred_checkpoint_run_id="${GITHUB_RUN_ID}" \
-            -f fallback_checkpoint_run_id="${FALLBACK_RUN_ID}" \
-            -f retry_count="${next_retry}"
+            --expected-title "${expected_title}" \
+            --input "stage=${STAGE}" \
+            --input "version=${CHROMIUM_VERSION}" \
+            --input "preferred_checkpoint_run_id=${GITHUB_RUN_ID}" \
+            --input "fallback_checkpoint_run_id=${FALLBACK_RUN_ID}" \
+            --input "retry_count=${next_retry}"
+
+  report_terminal_failure:
+    name: Record terminal port failure
+    needs:
+      - build
+      - recover_bad_runner
+    if: >-
+      ${{
+        always() &&
+        (needs.build.result == 'failure' || needs.build.result == 'cancelled') &&
+        needs.recover_bad_runner.result != 'success'
+      }}
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Open or update terminal maintenance issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ needs.build.outputs.version || inputs.version }}
+          STAGE: ${{ needs.build.outputs.stage || inputs.stage || '1' }}
+          RETRY_COUNT: ${{ needs.build.outputs.retry_count || inputs.retry_count || '0' }}
+          FAILURE_CLASS: ${{ needs.build.outputs.failure_class || 'unknown' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
+          body_file="${RUNNER_TEMP}/chromium-i686-terminal-failure.md"
+          cat > "${body_file}" <<EOF
+          Chromium ${CHROMIUM_VERSION} reached a terminal Linux i686 pipeline failure.
+
+          - Stage: ${STAGE}
+          - Runner attempt: ${RETRY_COUNT}
+          - Failure class: ${FAILURE_CLASS}
+          - Build result: ${{ needs.build.result }}
+          - Recovery job result: ${{ needs.recover_bad_runner.result }}
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Workflow commit: ${GITHUB_SHA}
+
+          The stable watcher also treats recent terminal workflow history as backup quarantine state. Use a forced/manual retry only after the underlying compatibility or infrastructure issue is addressed.
+          EOF
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "${title}" \
+            --body-file "${body_file}"

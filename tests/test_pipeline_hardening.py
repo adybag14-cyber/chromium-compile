@@ -105,7 +105,7 @@ class PipelineHardeningTests(unittest.TestCase):
         watcher = (ROOT / "scripts" / "chromium_stable_watcher.py").read_text(encoding="utf-8")
         self.assertIn("issues: write", preflight)
         self.assertIn("Quarantine failed preflight", preflight)
-        self.assertIn("gh issue list --repo \"${GITHUB_REPOSITORY}\" --state open --limit 1000", preflight)
+        self.assertIn("scripts/github_maintenance_issue.py", preflight)
         self.assertIn("Failed workflow history is itself treated as quarantine state", preflight)
         self.assertIn("list_quarantined_run_versions", watcher)
         self.assertIn("issue_blocked | run_quarantined", watcher)

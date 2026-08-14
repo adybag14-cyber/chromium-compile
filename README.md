@@ -34,7 +34,7 @@ For every newly observed Linux stable version, the automation aims to produce on
 2. an active compatibility preflight or staged build; or
 3. an open maintenance issue describing the upstream breakage.
 
-Only one automatic version is processed at a time. A failed version is not repeatedly dispatched, but later stable versions still receive their own compatibility attempt. Completed failed/cancelled preflight or build runs are themselves quarantine records; maintenance issues mirror that state for humans but are not the only loop-prevention mechanism.
+Only one port version owns the queue at a time. A failed version is not repeatedly dispatched, but later stable versions still receive their own compatibility attempt. Completed terminal preflight/build/publisher runs are recent backup quarantine records; maintenance issues mirror terminal state for humans and releases are the durable success record. Manual `force_version` bypasses historical quarantine for a deliberate retry, but never bypasses an active port owner.
 
 This process cannot guarantee that every future source release remains portable to i686 without additional work. It guarantees detection, an attempted port, validation, and visible failure reporting.
 
@@ -266,7 +266,11 @@ The staged builder now treats the GitHub-hosted runner as an untrusted, replacea
 - Missing generated-tool SONAMEs use a controlled resolver: known mappings are preferences only, release-local package candidates are verified, and bounded Ubuntu i386 `apt-file` metadata is a last-resort fallback. An unavailable old mapping automatically falls through to discovery on a newer LTS.
 - First-party GitHub Actions are upgraded and pinned to immutable commit SHAs.
 - Disk-space guards trim expendable caches before compilation/checkpoint creation and fail before a near-full runner can destroy resumable state.
-- Failed/cancelled preflight/build run history is an independent watcher quarantine source. A failed preflight also attempts to upsert `[i686-port] Chromium <version> requires maintenance` in the same workflow run, eliminating reliance on a secondary `workflow_run` event.
+- Recent terminal preflight/build/publisher run history is an independent watcher quarantine source. The watcher reads only the three relevant workflows over a bounded one-year horizon, bounds release/issue pagination, rejects repeated VersionHistory page tokens, and fails closed if a configured history horizon saturates instead of silently forgetting state.
+- Workflow dispatches use an exactly-once helper: an already-active exact run suppresses a duplicate, and a client/network failure after `workflow_dispatch` is confirmed against Actions state before the write is considered failed. Non-idempotent dispatch calls are never blindly retried.
+- Maintenance issues use an exact-title upsert helper with bounded reads and post-error confirmation. A timed-out issue creation cannot fall through to a second create, and a failed comment cannot erase the existing quarantine issue.
+- Preflight and terminal build failures attempt same-run issue mirrors; the secondary `workflow_run` reporter also covers publisher failures as redundancy.
+- The old Chromium 150 bootstrap is manual-only and refuses to redispatch when the baseline release tag already exists.
 - Every compiler stage writes a compact GitHub job summary with progress, checkpoint size, failure classification, free disk and ccache statistics.
 - Chromium's own `DEPS` file is the source of truth for the depot_tools commit and GN CIPD version; rolling `latest` host tooling is not used for production builds.
 - Source tarballs are validated against the authoritative GCS object's generation, content length and MD5 while computing a local SHA-256. First-seen bytes also undergo safe-member validation before extraction. After extraction, `chrome/VERSION` must exactly match the requested version and critical files are compared against the authoritative Gitiles tag.

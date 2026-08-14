@@ -96,12 +96,10 @@ jobs:
           Failed workflow history is itself treated as quarantine state, so this issue is a human-visible mirror rather than the only loop-prevention mechanism.
           EOF
 
-          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title --jq ".[] | select(.title == \"${title}\") | .number" | head -n1)"
-          if [ -n "${issue_number}" ]; then
-            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body-file "${body_file}"
-          else
-            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body_file}"
-          fi
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "${title}" \
+            --body-file "${body_file}"
 
       - name: Upload preflight evidence
         if: ${{ success() }}
@@ -121,11 +119,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh workflow run chromium-i686.yml \
-            --repo "${GITHUB_REPOSITORY}" \
+          expected_title="Chromium i686 ${CHROMIUM_VERSION} - stage 1 - attempt 0"
+          python3 scripts/github_workflow_dispatch.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow chromium-i686.yml \
             --ref "${DEFAULT_BRANCH}" \
-            -f stage=1 \
-            -f version="${CHROMIUM_VERSION}" \
-            -f preferred_checkpoint_run_id="" \
-            -f fallback_checkpoint_run_id="" \
-            -f retry_count=0
+            --expected-title "${expected_title}" \
+            --input "stage=1" \
+            --input "version=${CHROMIUM_VERSION}" \
+            --input "preferred_checkpoint_run_id=" \
+            --input "fallback_checkpoint_run_id=" \
+            --input "retry_count=0"
