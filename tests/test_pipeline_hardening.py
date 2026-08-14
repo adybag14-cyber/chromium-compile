@@ -371,6 +371,8 @@ class PipelineHardeningTests(unittest.TestCase):
     def test_release_workflow_supports_trusted_manual_republish(self):
         publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", publish)
+        self.assertIn("github.event.workflow_run.head_branch == github.event.repository.default_branch", publish)
+        self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", publish)
         self.assertIn("build_run_id:", publish)
         self.assertIn("Resolve and verify trusted build source", publish)
         self.assertIn('workflow_path}" = ".github/workflows/chromium-i686.yml"', publish)
