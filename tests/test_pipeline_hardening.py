@@ -238,7 +238,7 @@ class PipelineHardeningTests(unittest.TestCase):
 
     def test_checkpoint_integrity_failures_return_immediately(self):
         resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
-        self.assertIn('if ! zstd -q -t "${archive}"', resume)
+        self.assertIn('if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${archive}"', resume)
         self.assertIn('Checkpoint archive SHA-256 verification failed.', resume)
         self.assertIn('Checkpoint manifest compatibility validation failed.', resume)
 
@@ -246,6 +246,90 @@ class PipelineHardeningTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
         self.assertIn("@[0-9a-f]{40}", workflow)
         self.assertNotIn("@v[0-9]", workflow)
+
+
+    def test_chromium_tooling_is_pinned_from_source_deps(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("chromium_tool_pins.py", common)
+        self.assertIn("depot_tools_revision", common)
+        self.assertIn("chromium_gn_version", common)
+        self.assertNotIn("cipd install gn/gn/linux-amd64 latest", common)
+        self.assertIn("DEPOT_TOOLS_UPDATE=0", common)
+        self.assertLess(action.index('prepare_chromium_source'), action.index('install_depot_tools'))
+        self.assertLess(preflight.index('prepare_chromium_source'), preflight.index('install_depot_tools'))
+
+    def test_source_archive_and_extracted_version_are_validated(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("validate_chromium_source_tarball()", common)
+        self.assertIn("validate_extracted_chromium_version()", common)
+        self.assertIn("--connect-timeout 30", common)
+        self.assertIn("--max-time", common)
+        self.assertIn("Discarding corrupt cached Chromium source archive", common)
+
+    def test_build_tracks_upstream_linux_installer_runtime(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        port = (ROOT / ".github" / "scripts" / "chromium_i686_port.sh").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn('chrome/installer/linux:installer_deps', common)
+        self.assertIn("chromium_linux_runtime.py", common)
+        self.assertIn("validate_i686_runtime_bundle", common)
+        self.assertIn("run_extended_i686_preflight", common)
+        self.assertIn("run_extended_i686_preflight", preflight)
+        self.assertIn("chrome_crashpad_handler", common)
+        self.assertIn("libEGL.so", common)
+        self.assertIn("libGLESv2.so", common)
+        self.assertNotIn("run_extended_i686_preflight", port)
+
+    def test_release_provenance_is_exact_and_immutable(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn('grep -qx "github_sha=${BUILD_SHA}"', publish)
+        self.assertIn('grep -qx "github_run_id=${BUILD_RUN_ID}"', publish)
+        self.assertIn('--target "${BUILD_SHA}"', publish)
+        self.assertIn("refusing to rewrite release history", publish)
+        self.assertIn("refusing --clobber", publish)
+        self.assertNotIn("gh release upload", publish)
+        self.assertIn('"$(basename "${package}")"', common)
+        self.assertIn("package_sha256=", common)
+
+    def test_checkpoint_has_reserve_and_explicit_contract(self):
+        workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_CHECKPOINT_MINUTES || '330'", workflow)
+        self.assertIn("CHECKPOINT_CONTRACT_VERSION", common)
+        self.assertIn("checkpoint_contract_version", resume)
+        self.assertIn("CHECKPOINT_GN_VERSION", resume)
+        self.assertIn("CHECKPOINT_DEPOT_REVISION", resume)
+        self.assertIn("CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS", resume)
+
+
+    def test_latest_upstream_contract_is_probed_in_ci(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("validate_upstream_contract:", validation)
+        self.assertIn("resolve_latest_version", validation)
+        self.assertIn("chromium_tool_pins.py", validation)
+        self.assertIn("chromium_linux_runtime.py", validation)
+        self.assertIn("install_depot_tools", validation)
+        self.assertIn("install_gn_from_cipd", validation)
+        self.assertIn("report_upstream_contract_drift:", validation)
+
+    def test_publisher_avoids_generic_version_environment_name(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_VERSION", publish)
+        self.assertNotIn("\n          VERSION: ${{ steps.artifact.outputs.version }}", publish)
+
+
+    def test_release_has_single_trusted_publication_boundary(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        self.assertNotIn("publish_chromium_release()", common)
+        self.assertNotIn("Publish GitHub Release", action)
+        self.assertNotIn("publish-release:", action)
+        self.assertNotIn("gh release upload", common)
+        self.assertNotIn("create_out_checkpoint()", common)
 
 
 if __name__ == "__main__":

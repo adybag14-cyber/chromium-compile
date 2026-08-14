@@ -17,6 +17,23 @@ export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
 CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS="${CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS:-300}"
 CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS="${CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS:-180}"
 CHROMIUM_I686_SWAP_TIMEOUT_SECONDS="${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS:-180}"
+CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS="${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS:-1800}"
+CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS="${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS:-1800}"
+CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS:-1800}"
+CHROMIUM_I686_GH_TIMEOUT_SECONDS="${CHROMIUM_I686_GH_TIMEOUT_SECONDS:-600}"
+CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
+export DEPOT_TOOLS_UPDATE=0
+
+
+bounded_external() {
+  local seconds="${1:?timeout seconds are required}"
+  shift
+  timeout -k 30s "${seconds}s" "$@"
+}
+
+bounded_gh() {
+  bounded_external "${CHROMIUM_I686_GH_TIMEOUT_SECONDS}" gh "$@"
+}
 
 bounded_rm_rf() {
   timeout -k 15s "${CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS}s" rm -rf -- "$@"
@@ -716,12 +733,41 @@ write_stage_summary() {
 }
 
 install_depot_tools() {
+  local deps_file="${CHROMIUM_SRC}/DEPS"
+  test -s "${deps_file}"
+  local revision
+  revision="$(python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${deps_file}" --field depot_tools_revision)"
+  [[ "${revision}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "::error::Invalid Chromium-pinned depot_tools revision: ${revision}"
+    return 1
+  }
+
   bounded_rm_rf "${DEPOT_TOOLS}"
-  git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "${DEPOT_TOOLS}"
+  mkdir -p "${DEPOT_TOOLS}"
+  git -C "${DEPOT_TOOLS}" init -q
+  git -C "${DEPOT_TOOLS}" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
+  echo "Fetching Chromium-pinned depot_tools revision ${revision}."
+  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}"     git -C "${DEPOT_TOOLS}" fetch --depth=1 origin "${revision}"
+  git -C "${DEPOT_TOOLS}" checkout -q --detach FETCH_HEAD
+  test "$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" = "${revision}"
+
+  export DEPOT_TOOLS_UPDATE=0
+  echo "DEPOT_TOOLS_UPDATE=0" >> "${GITHUB_ENV}"
   echo "${DEPOT_TOOLS}" >> "${GITHUB_PATH}"
   echo "${DEPOT_TOOLS}/.cipd_bin" >> "${GITHUB_PATH}"
   export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
-  "${DEPOT_TOOLS}/update_depot_tools"
+
+  # Bootstrap the CIPD client without allowing depot_tools to roll itself.
+  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" "${DEPOT_TOOLS}/cipd" version
+  echo "Pinned depot_tools revision: $(git -C "${DEPOT_TOOLS}" rev-parse HEAD)"
+}
+
+chromium_gn_version() {
+  python3 "${WORKSPACE}/scripts/chromium_tool_pins.py"     --deps "${CHROMIUM_SRC}/DEPS" --field gn_version
+}
+
+chromium_depot_tools_revision() {
+  python3 "${WORKSPACE}/scripts/chromium_tool_pins.py"     --deps "${CHROMIUM_SRC}/DEPS" --field depot_tools_revision
 }
 
 resolve_latest_version() {
@@ -744,34 +790,77 @@ print(version)
 PY
 }
 
+validate_extracted_chromium_version() {
+  local expected="${1:?expected version is required}"
+  local version_file="${CHROMIUM_SRC}/chrome/VERSION"
+  test -s "${version_file}"
+  local major minor build patch actual
+  major="$(awk -F= '$1 == "MAJOR" {print $2}' "${version_file}")"
+  minor="$(awk -F= '$1 == "MINOR" {print $2}' "${version_file}")"
+  build="$(awk -F= '$1 == "BUILD" {print $2}' "${version_file}")"
+  patch="$(awk -F= '$1 == "PATCH" {print $2}' "${version_file}")"
+  actual="${major}.${minor}.${build}.${patch}"
+  if [ "${actual}" != "${expected}" ]; then
+    echo "::error::Extracted Chromium version ${actual} does not match requested ${expected}."
+    return 1
+  fi
+  echo "Verified extracted Chromium version: ${actual}"
+}
+
+validate_chromium_source_tarball() {
+  local tarball="${1:?source tarball is required}"
+  local version="${2:?version is required}"
+  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" xz -t "${tarball}"; then
+    echo "::error::Chromium ${version} source archive failed xz integrity validation: ${tarball}"
+    return 1
+  fi
+  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" tar -tJf "${tarball}" >/dev/null; then
+    echo "::error::Chromium ${version} source archive failed tar structure validation: ${tarball}"
+    return 1
+  fi
+}
+
 prepare_chromium_source() {
   local version="${1:?version is required}"
   local cache_dir="${WORKSPACE}/.chromium-source-cache"
   local tarball="${cache_dir}/chromium-${version}.tar.xz"
   bounded_rm_rf "${CHROMIUM_SRC}"
   mkdir -p "${CHROMIUM_SRC}" "${cache_dir}"
+
+  if [ -s "${tarball}" ] && ! validate_chromium_source_tarball "${tarball}" "${version}"; then
+    echo "::warning::Discarding corrupt cached Chromium source archive and downloading it again."
+    rm -f "${tarball}" "${tarball}.sha256"
+  fi
+
   if [ -s "${tarball}" ]; then
-    echo "Using cached Chromium ${version} source tarball at ${tarball}"
+    echo "Using validated cached Chromium ${version} source tarball at ${tarball}"
   else
     echo "Downloading Chromium ${version} source tarball..."
-    curl --fail --retry 5 --retry-delay 10 -L \
-      "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz" \
-      -o "${tarball}.partial"
+    rm -f "${tarball}.partial"
+    if ! curl --fail --location --retry 5 --retry-all-errors --retry-delay 10         --connect-timeout 30 --max-time "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}"         "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz"         -o "${tarball}.partial"; then
+      rm -f "${tarball}.partial"
+      return 1
+    fi
+    validate_chromium_source_tarball "${tarball}.partial" "${version}"
     mv "${tarball}.partial" "${tarball}"
   fi
+
   if [ ! -s "${tarball}.sha256" ]; then
     (cd "${cache_dir}" && sha256sum "$(basename "${tarball}")" > "$(basename "${tarball}").sha256")
   fi
   (cd "${cache_dir}" && sha256sum -c "$(basename "${tarball}.sha256")")
+
   echo "Extracting Chromium ${version} source..."
-  tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1
+  validate_extracted_chromium_version "${version}"
+  python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${CHROMIUM_SRC}/DEPS"
   echo "Extraction complete. Source size:"
   du -sh "${CHROMIUM_SRC}"
 }
 
 install_chromium_clang() {
   cd "${CHROMIUM_SRC}"
-  python3 tools/clang/scripts/update.py
+  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" python3 tools/clang/scripts/update.py
   test -x third_party/llvm-build/Release+Asserts/bin/clang
   test -s third_party/llvm-build/Release+Asserts/cr_build_revision
   echo "Chromium clang revision:"
@@ -780,7 +869,7 @@ install_chromium_clang() {
 
 install_i386_sysroot() {
   cd "${CHROMIUM_SRC}"
-  python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
+  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}"     python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
 }
 
 patch_build_gn_for_x86_linux() {
@@ -822,16 +911,28 @@ configure_ccache() {
 
 install_gn_from_cipd() {
   cd "${CHROMIUM_SRC}"
+  local expected_version
+  expected_version="$(chromium_gn_version)"
   if [ -x "${GN_BINARY}" ]; then
-    "${GN_BINARY}" --version || true
+    echo "Existing GN binary: $("${GN_BINARY}" --version || true)"
     return 0
   fi
 
-  echo "Installing prebuilt GN from CIPD..."
+  local host_arch
+  case "$(uname -m)" in
+    x86_64|amd64) host_arch=amd64 ;;
+    aarch64|arm64) host_arch=arm64 ;;
+    *)
+      echo "::error::Unsupported GN host architecture: $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  echo "Installing Chromium-pinned GN ${expected_version} from CIPD..."
   mkdir -p "$(dirname "${GN_BINARY}")"
-  cipd install gn/gn/linux-amd64 latest -root "$(dirname "${GN_BINARY}")"
+  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}"     cipd install "gn/gn/linux-${host_arch}" "${expected_version}" -root "$(dirname "${GN_BINARY}")"
   test -x "${GN_BINARY}"
-  "${GN_BINARY}" --version || true
+  "${GN_BINARY}" --version
 }
 
 configure_gn() {
@@ -878,7 +979,8 @@ run_build_until_checkpoint() {
     pass_log="${WORKSPACE}/build-stage-pass-${pass}.log"
     set +e
     set +o pipefail
-    timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j3 chrome 2>&1 | tee -a "${BUILD_LOG}"
+    local -a build_targets=(chrome "chrome/installer/linux:installer_deps")
+    timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j3 "${build_targets[@]}" 2>&1 | tee -a "${BUILD_LOG}"
     status=${PIPESTATUS[0]}
     set -o pipefail
     set -e
@@ -944,73 +1046,136 @@ run_build_until_checkpoint() {
   return 1
 }
 
-create_out_checkpoint() {
-  if [ ! -d "${OUT_DIR}" ]; then
-    echo "::error::Expected build output directory not found: ${OUT_DIR}"
-    exit 1
-  fi
-  mkdir -p "${CHECKPOINT_DIR}"
-  rm -f "${CHECKPOINT_ARCHIVE}"
-  echo "Creating ninja output checkpoint..."
-  du -sh "${OUT_DIR}" || true
-  tar -C "${CHROMIUM_SRC}/out" -I 'zstd -T0 -1' -cf "${CHECKPOINT_ARCHIVE}" Release_x86
-  ls -lh "${CHECKPOINT_ARCHIVE}"
+validate_i686_runtime_bundle() {
+  local root="${1:?Runtime bundle root is required}"
+  local -a required=(
+    chrome
+    chrome_crashpad_handler
+    chrome_management_service
+    chrome_sandbox
+    libEGL.so
+    libGLESv2.so
+    icudtl.dat
+    resources.pak
+    locales
+  )
+  local item
+  for item in "${required[@]}"; do
+    test -e "${root}/${item}" || {
+      echo "::error::Required runtime path is missing from package: ${item}"
+      return 1
+    }
+  done
+
+  local path file_output elf_class elf_machine
+  while IFS= read -r -d '' path; do
+    file_output="$(file "${path}" 2>/dev/null || true)"
+    if grep -q 'ELF ' <<<"${file_output}"; then
+      printf '%s\n' "${file_output}"
+      elf_class="$(readelf -h "${path}" | awk -F: '/Class:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')"
+      elf_machine="$(readelf -h "${path}" | awk -F: '/Machine:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')"
+      if [ "${elf_class}" != "ELF32" ] || ! grep -q 'Intel 80386' <<<"${elf_machine}"; then
+        echo "::error::Runtime bundle contains a non-i686 ELF file: ${path}"
+        return 1
+      fi
+    fi
+  done < <(find "${root}" -type f -print0)
+}
+
+run_extended_i686_preflight() {
+  python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py" \
+    --source-root "${CHROMIUM_SRC}" --validate-definition
+
+  echo "Confirming that the generated Ninja graph contains the upstream Linux installer dependency group."
+  ninja -C "${OUT_DIR}" -t query 'chrome/installer/linux:installer_deps' \
+    >> "${WORKSPACE}/i686-preflight-ninja-query.txt"
+  grep -q '^chrome/installer/linux:installer_deps:' "${WORKSPACE}/i686-preflight-ninja-query.txt"
+
+  local sysroot
+  sysroot="$(find "${CHROMIUM_SRC}/build/linux" -maxdepth 1 -type d -name '*_i386-sysroot' -print -quit)"
+  test -n "${sysroot}"
+  local clang="${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/bin/clang"
+  local canary_c="${RUNNER_TEMP:-${WORKSPACE}}/chromium-i686-target-canary.c"
+  local canary_bin="${RUNNER_TEMP:-${WORKSPACE}}/chromium-i686-target-canary"
+  cat > "${canary_c}" <<'EOF'
+#include <stdio.h>
+int main(void) { puts("chromium i686 target canary ok"); return 0; }
+EOF
+  bounded_external 120 "${clang}" --target=i386-linux-gnu --sysroot="${sysroot}" \
+    -fuse-ld=lld "${canary_c}" -o "${canary_bin}"
+  local file_output
+  file_output="$(file "${canary_bin}")"
+  printf '%s\n' "${file_output}"
+  grep -Eq 'ELF 32-bit.*Intel (80386|i386)' <<<"${file_output}"
+  "${canary_bin}"
 }
 
 package_chromium_i686() {
   local version="${1:?version is required}"
   cd "${OUT_DIR}"
   local package="${WORKSPACE}/chromium-${version}-linux-i686.tar.xz"
+  local checksum="${package}.sha256"
   local manifest="${WORKSPACE}/chromium-${version}-linux-i686-manifest.txt"
+  local runtime_list="${WORKSPACE}/chromium-${version}-linux-i686-runtime-files.txt"
+
+  python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py"     --source-root "${CHROMIUM_SRC}"     --out-dir "${OUT_DIR}"     --output-list "${runtime_list}"
+  mapfile -t files < "${runtime_list}"
+  if [ "${#files[@]}" -eq 0 ]; then
+    echo "::error::Chromium runtime collector produced an empty package."
+    return 1
+  fi
+
+  rm -f "${package}" "${checksum}" "${manifest}"
+  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"       tar -cJf "${package}" "${files[@]}"; then
+    echo "::error::Failed to package Chromium runtime files"
+    return 1
+  fi
+
+  local package_sha source_sha clang_revision gn_version depot_revision port_hash
+  package_sha="$(sha256sum "${package}" | awk '{print $1}')"
+  (
+    cd "${WORKSPACE}"
+    printf '%s  %s
+' "${package_sha}" "$(basename "${package}")" > "$(basename "${checksum}")"
+  )
+  source_sha="$(awk 'NR == 1 {print $1}' "${WORKSPACE}/.chromium-source-cache/chromium-${version}.tar.xz.sha256")"
+  clang_revision="$(cat "${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision")"
+  gn_version="$(chromium_gn_version)"
+  depot_revision="$(chromium_depot_tools_revision)"
+  port_hash="$(compute_port_config_sha256 "${version}")"
+
   {
+    echo "manifest_schema=2"
     echo "version=${version}"
     echo "target_cpu=x86"
     echo "target_os=linux"
     echo "source_tarball=https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz"
+    echo "source_tar_sha256=${source_sha}"
+    echo "package_sha256=${package_sha}"
     echo "github_sha=${GITHUB_SHA}"
-    echo
-    find . -maxdepth 1 -type f -printf '%P\n' | sort
-  } > "${manifest}"
-
-  shopt -s nullglob
-  local files=(chrome)
-  local optional
-  for optional in chrome_sandbox locales; do
-    if [ -e "${optional}" ]; then
-      files+=("${optional}")
-    fi
-  done
-  local extra_runtime=(*.pak *.bin *.dat)
-  files+=("${extra_runtime[@]}")
-  {
+    echo "github_run_id=${GITHUB_RUN_ID}"
+    echo "clang_revision=${clang_revision}"
+    echo "gn_version=${gn_version}"
+    echo "depot_tools_revision=${depot_revision}"
+    echo "port_config_sha256=${port_hash}"
+    echo "checkpoint_contract_version=${CHECKPOINT_CONTRACT_VERSION}"
+    echo "runner_os=${RUNNER_OS:-unknown}"
+    echo "runner_image=${ImageOS:-unknown}"
+    echo "runner_image_version=${ImageVersion:-unknown}"
     echo
     echo "packaged_files:"
-    printf '%s\n' "${files[@]}"
-  } >> "${manifest}"
+    printf '%s
+' "${files[@]}"
+  } > "${manifest}"
 
-  tar -cJf "${package}" "${files[@]}" || {
-    echo "::error::Failed to package Chromium runtime files"
-    find . -maxdepth 1 -type f -printf '%P\n' | sort
-    exit 1
-  }
-  sha256sum "${package}" > "${package}.sha256"
-  ls -lh "${package}" "${package}.sha256" "${manifest}"
-}
+  python3 "${WORKSPACE}/scripts/validate_release_archive.py" "${package}"
 
-publish_chromium_release() {
-  local version="${1:?version is required}"
-  local package="${WORKSPACE}/chromium-${version}-linux-i686.tar.xz"
-  local checksum="${package}.sha256"
-  local manifest="${WORKSPACE}/chromium-${version}-linux-i686-manifest.txt"
-  local release_tag="chromium-${version}-linux-i686"
-  export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  local smoke_dir="${WORKSPACE}/release-smoke-${version}"
+  bounded_rm_rf "${smoke_dir}"
+  mkdir -p "${smoke_dir}"
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${package}" -C "${smoke_dir}"
+  validate_i686_runtime_bundle "${smoke_dir}"
+  bounded_rm_rf "${smoke_dir}"
 
-  if gh release view "${release_tag}" >/dev/null 2>&1; then
-    gh release upload "${release_tag}" "${package}" "${checksum}" "${manifest}" --clobber
-  else
-    gh release create "${release_tag}" "${package}" "${checksum}" "${manifest}" \
-      --target "${GITHUB_SHA}" \
-      --title "Chromium ${version} Linux i686" \
-      --notes "Chromium ${version} Linux i686 build from GitHub Actions run ${GITHUB_RUN_ID}."
-  fi
+  ls -lh "${package}" "${checksum}" "${manifest}"
 }

@@ -106,6 +106,46 @@ jobs:
           ! grep -q 'if (generate_location_tags)' "${temp}/tools/metrics/BUILD.gn"
 
 
+  validate_upstream_contract:
+    name: Validate latest Chromium source contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve latest source-declared tool pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          version="$(resolve_latest_version)"
+          echo "Probing Chromium ${version} source contract."
+          mkdir -p "${CHROMIUM_SRC}/chrome/installer/linux"
+          for rel in DEPS chrome/installer/linux/BUILD.gn; do
+            encoded="${RUNNER_TEMP}/$(basename "${rel}").b64"
+            bounded_external 120 curl --fail --location --retry 4 --retry-all-errors \
+              --connect-timeout 20 --max-time 120 \
+              "https://chromium.googlesource.com/chromium/src/+/refs/tags/${version}/${rel}?format=TEXT" \
+              -o "${encoded}"
+            base64 --decode "${encoded}" > "${CHROMIUM_SRC}/${rel}"
+          done
+
+          pins="$(python3 scripts/chromium_tool_pins.py --deps "${CHROMIUM_SRC}/DEPS")"
+          echo "Resolved pins: ${pins}"
+          python3 scripts/chromium_linux_runtime.py \
+            --source-root "${CHROMIUM_SRC}" --validate-definition
+
+          expected_depot="$(python3 scripts/chromium_tool_pins.py --deps "${CHROMIUM_SRC}/DEPS" --field depot_tools_revision)"
+          expected_gn="$(python3 scripts/chromium_tool_pins.py --deps "${CHROMIUM_SRC}/DEPS" --field gn_version)"
+          install_depot_tools
+          test "$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" = "${expected_depot}"
+          install_gn_from_cipd
+          "${GN_BINARY}" --version
+          test "$(chromium_gn_version)" = "${expected_gn}"
+
   validate_i386_runtime:
     name: Validate i386 host runtime
     runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
@@ -221,6 +261,32 @@ jobs:
             exit 1
           fi
 
+  report_upstream_contract_drift:
+    name: Report Chromium source-contract drift
+    needs: validate_upstream_contract
+    if: ${{ always() && github.event_name == 'schedule' && needs.validate_upstream_contract.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update source-contract issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title='[i686-port] Chromium source/tool contract drift'
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="The scheduled latest-Chromium source contract probe failed. Chromium may have changed DEPS tool pins, Linux installer definitions, or upstream hosting. Review ${run_url} before the next production version."
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${title}" '.[] | select(.title == $title) | .number' | head -n1)"
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+          fi
+
   report_lts_drift:
     name: Report Ubuntu LTS compatibility drift
     needs: validate_lts_compatibility
@@ -240,7 +306,7 @@ jobs:
           title='[i686-port] Ubuntu LTS compatibility drift'
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           body="The scheduled Ubuntu LTS compatibility matrix failed. Review ${run_url} before changing CHROMIUM_I686_RUNNER or relying on a newer GitHub-hosted image."
-          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --json number,title --jq '.[] | select(.title == "[i686-port] Ubuntu LTS compatibility drift") | .number' | head -n1)"
+          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title --jq '.[] | select(.title == "[i686-port] Ubuntu LTS compatibility drift") | .number' | head -n1)"
           if [ -n "${issue_number}" ]; then
             gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
           else

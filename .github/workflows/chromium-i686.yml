@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  JOB_CHECKPOINT_MINUTES: "350"
+  JOB_CHECKPOINT_MINUTES: ${{ vars.CHROMIUM_I686_CHECKPOINT_MINUTES || '330' }}
   CHECKPOINT_RETENTION_DAYS: "14"
   CCACHE_MAX_SIZE: 8G
   MAX_RUNNER_RETRIES: ${{ vars.CHROMIUM_RUNNER_RETRIES || '2' }}
@@ -152,7 +152,6 @@ jobs:
           fallback-checkpoint-artifact: ${{ steps.checkpoint.outputs.fallback_artifact }}
           fallback-checkpoint-run-id: ${{ inputs.fallback_checkpoint_run_id }}
           final-stage: ${{ steps.control.outputs.stage == steps.control.outputs.max_stage && 'true' || 'false' }}
-          publish-release: "false"
 
   continue_pipeline:
     permissions:
@@ -172,7 +171,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT_STAGE: ${{ needs.build.outputs.stage }}
-          VERSION: ${{ needs.build.outputs.version }}
+          CHROMIUM_VERSION: ${{ needs.build.outputs.version }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
@@ -183,7 +182,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --ref "${DEFAULT_BRANCH}" \
             -f stage="${next_stage}" \
-            -f version="${VERSION}" \
+            -f version="${CHROMIUM_VERSION}" \
             -f preferred_checkpoint_run_id="" \
             -f fallback_checkpoint_run_id="${GITHUB_RUN_ID}" \
             -f retry_count="0"
@@ -207,7 +206,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STAGE: ${{ needs.build.outputs.stage || inputs.stage || '1' }}
-          VERSION: ${{ needs.build.outputs.version || inputs.version }}
+          CHROMIUM_VERSION: ${{ needs.build.outputs.version || inputs.version }}
           RETRY_COUNT: ${{ needs.build.outputs.retry_count || inputs.retry_count || '0' }}
           FALLBACK_RUN_ID: ${{ inputs.fallback_checkpoint_run_id }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -221,7 +220,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --ref "${DEFAULT_BRANCH}" \
             -f stage="${STAGE}" \
-            -f version="${VERSION}" \
+            -f version="${CHROMIUM_VERSION}" \
             -f preferred_checkpoint_run_id="${GITHUB_RUN_ID}" \
             -f fallback_checkpoint_run_id="${FALLBACK_RUN_ID}" \
             -f retry_count="${next_retry}"

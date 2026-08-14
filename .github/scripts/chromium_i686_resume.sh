@@ -113,7 +113,7 @@ checkpoint_bundle_is_usable() {
   fi
 
   echo "Validating checkpoint compression stream: ${archive}"
-  if ! zstd -q -t "${archive}"; then
+  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${archive}"; then
     echo "::error::Checkpoint compression stream is corrupt: ${archive}"
     return 1
   fi
@@ -136,6 +136,7 @@ checkpoint_bundle_is_usable() {
   fi
 
   if ! EXPECTED_VERSION="${expected_version}" CURRENT_STAGE="${current_stage}" \
+  EXPECTED_CHECKPOINT_CONTRACT="${CHECKPOINT_CONTRACT_VERSION}" \
   CHECKPOINT_MANIFEST_PATH="${manifest}" python3 - <<'PY'
 import json
 import os
@@ -144,6 +145,12 @@ from pathlib import Path
 manifest = json.loads(Path(os.environ["CHECKPOINT_MANIFEST_PATH"]).read_text())
 if manifest.get("schema_version") != 1:
     raise SystemExit("Unsupported checkpoint manifest schema")
+contract = int(manifest.get("checkpoint_contract_version", 1))
+expected_contract = int(os.environ["EXPECTED_CHECKPOINT_CONTRACT"])
+if contract != expected_contract:
+    raise SystemExit(
+        f"Checkpoint contract {contract} is incompatible with expected {expected_contract}"
+    )
 if manifest.get("chromium_version") != os.environ["EXPECTED_VERSION"]:
     raise SystemExit("Checkpoint Chromium version does not match requested version")
 stage = int(manifest.get("checkpoint_stage", -1))
@@ -184,6 +191,20 @@ PY
     echo "::error::Checkpoint port configuration differs from the current GN/patch configuration."
     return 1
   fi
+
+  local current_gn current_depot manifest_gn manifest_depot
+  current_gn="$(chromium_gn_version)"
+  current_depot="$(chromium_depot_tools_revision)"
+  manifest_gn="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gn_version", ""))' "${manifest}")"
+  manifest_depot="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("depot_tools_revision", ""))' "${manifest}")"
+  if [ -n "${manifest_gn}" ] && [ "${manifest_gn}" != "${current_gn}" ]; then
+    echo "::error::Checkpoint GN pin differs from the Chromium source DEPS pin."
+    return 1
+  fi
+  if [ -n "${manifest_depot}" ] && [ "${manifest_depot}" != "${current_depot}" ]; then
+    echo "::error::Checkpoint depot_tools pin differs from the Chromium source DEPS pin."
+    return 1
+  fi
 }
 
 restore_out_checkpoint() {
@@ -204,7 +225,8 @@ restore_out_checkpoint() {
   fi
   echo "Restoring previous Ninja output checkpoint from ${archive}"
   bounded_rm_rf "${OUT_DIR}"
-  tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+    tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"
   du -sh "${OUT_DIR}" || true
 
   local bundle_dir manifest
@@ -252,7 +274,7 @@ create_out_checkpoint() {
     "${OUT_DIR}/.ninja_log" \
     "${OUT_DIR}/.ninja_deps" 2>/dev/null || true
 
-  tar \
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" tar \
     --format=posix \
     --pax-option='delete=atime,delete=ctime' \
     -C "${CHROMIUM_SRC}/out" \
@@ -260,7 +282,7 @@ create_out_checkpoint() {
     -cf "${CHECKPOINT_ARCHIVE}" \
     Release_x86
 
-  zstd -q -t "${CHECKPOINT_ARCHIVE}"
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${CHECKPOINT_ARCHIVE}"
   (
     cd "${CHECKPOINT_DIR}"
     sha256sum "$(basename "${CHECKPOINT_ARCHIVE}")" > "$(basename "${CHECKPOINT_SHA256}")"
@@ -269,12 +291,14 @@ create_out_checkpoint() {
 
   local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${version}.tar.xz.sha256"
   test -s "${source_checksum_file}"
-  local source_sha clang_revision port_hash args_hash ninja_hash
+  local source_sha clang_revision port_hash args_hash ninja_hash gn_version depot_revision
   source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"
   clang_revision="$(cat "${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision")"
   port_hash="$(compute_port_config_sha256 "${version}")"
   args_hash="$(sha256sum "${OUT_DIR}/args.gn" | awk '{print $1}')"
   ninja_hash="$(sha256sum "${OUT_DIR}/build.ninja" | awk '{print $1}')"
+  gn_version="$(chromium_gn_version)"
+  depot_revision="$(chromium_depot_tools_revision)"
 
   CHECKPOINT_VERSION="${version}" \
   CHECKPOINT_STAGE="${stage}" \
@@ -283,6 +307,9 @@ create_out_checkpoint() {
   CHECKPOINT_PORT_HASH="${port_hash}" \
   CHECKPOINT_ARGS_HASH="${args_hash}" \
   CHECKPOINT_NINJA_HASH="${ninja_hash}" \
+  CHECKPOINT_GN_VERSION="${gn_version}" \
+  CHECKPOINT_DEPOT_REVISION="${depot_revision}" \
+  CHECKPOINT_CONTRACT_VERSION_VALUE="${CHECKPOINT_CONTRACT_VERSION}" \
   CHECKPOINT_MANIFEST_PATH="${CHECKPOINT_MANIFEST}" \
   python3 - <<'PY'
 import json
@@ -301,6 +328,9 @@ payload = {
     "port_config_sha256": os.environ["CHECKPOINT_PORT_HASH"],
     "args_gn_sha256": os.environ["CHECKPOINT_ARGS_HASH"],
     "build_ninja_sha256": os.environ["CHECKPOINT_NINJA_HASH"],
+    "gn_version": os.environ["CHECKPOINT_GN_VERSION"],
+    "depot_tools_revision": os.environ["CHECKPOINT_DEPOT_REVISION"],
+    "checkpoint_contract_version": int(os.environ["CHECKPOINT_CONTRACT_VERSION_VALUE"]),
     "workflow_sha": os.environ.get("GITHUB_SHA", "unknown"),
     "runner_os": os.environ.get("RUNNER_OS", "unknown"),
     "runner_image": os.environ.get("ImageOS", "unknown"),
