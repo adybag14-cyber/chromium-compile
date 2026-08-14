@@ -266,7 +266,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("validate_extracted_chromium_version()", common)
         self.assertIn("--connect-timeout 30", common)
         self.assertIn("--max-time", common)
-        self.assertIn("Discarding corrupt cached Chromium source archive", common)
+        self.assertIn("Discarding structurally unsafe cached Chromium source archive", common)
+        self.assertIn("Discarding cached Chromium source bytes that do not match the authoritative GCS object", common)
 
     def test_build_tracks_upstream_linux_installer_runtime(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
