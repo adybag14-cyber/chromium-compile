@@ -6,55 +6,91 @@ import argparse
 import base64
 import hashlib
 import json
-import urllib.request
+import re
+import subprocess
 from pathlib import Path
-from urllib.parse import urlparse
+
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
+SOURCE_BUCKET = "chromium-browser-official"
+SOURCE_DOWNLOAD_TEMPLATE = (
+    "https://commondatastorage.googleapis.com/chromium-browser-official/"
+    "chromium-{version}.tar.xz"
+)
+SOURCE_METADATA_TEMPLATE = (
+    "https://storage.googleapis.com/storage/v1/b/chromium-browser-official/o/"
+    "chromium-{version}.tar.xz?fields=bucket,name,generation,size,md5Hash,crc32c,etag"
+)
 
 
-ALLOWED_SOURCE_HOSTS = frozenset({"commondatastorage.googleapis.com", "storage.googleapis.com"})
+def validate_version(version: str) -> str:
+    if not VERSION_RE.fullmatch(version):
+        raise ValueError(f"Invalid Chromium version: {version!r}")
+    return version
 
 
-def fetch_metadata(url: str, timeout: int = 60) -> dict[str, object]:
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_SOURCE_HOSTS:
-        raise ValueError(f"Refusing source metadata from untrusted URL: {url!r}")
-    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "chromium-i686-source-verifier/1"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        final_url = response.geturl()
-        final = urlparse(final_url)
-        if final.scheme != "https" or final.hostname not in ALLOWED_SOURCE_HOSTS:
-            raise ValueError(f"Source metadata request redirected to untrusted URL: {final_url!r}")
-        headers = response.headers
-        hashes = headers.get_all("x-goog-hash") or []
-        tokens: dict[str, str] = {}
-        for header in hashes:
-            for part in header.split(","):
-                if "=" in part:
-                    key, value = part.strip().split("=", 1)
-                    tokens[key] = value
-        md5 = tokens.get("md5", "")
-        generation = headers.get("x-goog-generation", "")
-        length = headers.get("x-goog-stored-content-length") or headers.get("Content-Length") or ""
-        etag = headers.get("ETag", "").strip('"')
+def source_download_url(version: str) -> str:
+    return SOURCE_DOWNLOAD_TEMPLATE.format(version=validate_version(version))
+
+
+def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
+    version = validate_version(version)
+    metadata_url = SOURCE_METADATA_TEMPLATE.format(version=version)
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--connect-timeout",
+                "20",
+                "--max-time",
+                str(timeout),
+                metadata_url,
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout + 10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ValueError(f"Could not read Chromium {version} GCS metadata: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "curl failed").strip()
+        raise ValueError(f"Could not read Chromium {version} GCS metadata: {detail}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"GCS returned invalid metadata JSON for Chromium {version}") from exc
+    if payload.get("bucket") != SOURCE_BUCKET:
+        raise ValueError(f"GCS metadata returned unexpected bucket: {payload.get('bucket')!r}")
+    if payload.get("name") != f"chromium-{version}.tar.xz":
+        raise ValueError(f"GCS metadata returned unexpected object: {payload.get('name')!r}")
+    generation = str(payload.get("generation", ""))
+    length = str(payload.get("size", ""))
+    md5 = str(payload.get("md5Hash", ""))
+    crc32c = str(payload.get("crc32c", ""))
+    etag = str(payload.get("etag", ""))
     if not generation.isdigit():
         raise ValueError(f"GCS source object lacks numeric generation: {generation!r}")
-    if not str(length).isdigit():
+    if not length.isdigit():
         raise ValueError(f"GCS source object lacks numeric content length: {length!r}")
     if not md5:
-        raise ValueError("GCS source object lacks x-goog-hash md5 metadata")
+        raise ValueError("GCS source object lacks md5Hash metadata")
     try:
         raw_md5 = base64.b64decode(md5, validate=True)
     except Exception as exc:
         raise ValueError(f"Invalid GCS md5 metadata: {md5!r}") from exc
     if len(raw_md5) != 16:
         raise ValueError(f"Unexpected GCS md5 length: {len(raw_md5)}")
-    if etag and etag.lower() != raw_md5.hex():
-        raise ValueError("GCS ETag disagrees with x-goog-hash md5")
     return {
-        "url": url,
+        "url": source_download_url(version),
         "generation": generation,
         "content_length": int(length),
         "md5_base64": md5,
+        "crc32c": crc32c,
         "etag": etag,
     }
 
@@ -95,15 +131,8 @@ def marker_matches(path: Path, *, version: str, metadata: dict[str, object], sha
     )
 
 
-def write_marker(
-    path: Path,
-    *,
-    version: str,
-    metadata: dict[str, object],
-    sha256: str,
-    safe_archive: bool,
-    gitiles_identity: bool,
-) -> None:
+def write_marker(path: Path, *, version: str, metadata: dict[str, object], sha256: str, safe_archive: bool, gitiles_identity: bool) -> None:
+    validate_version(version)
     if not (safe_archive and gitiles_identity):
         raise ValueError("Refusing to write source trust marker without both validation proofs")
     payload = {
@@ -122,50 +151,36 @@ def write_marker(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--url")
+    parser.add_argument("--version", required=True)
     parser.add_argument("--file", type=Path)
     parser.add_argument("--metadata-out", type=Path)
     parser.add_argument("--metadata-in", type=Path)
     parser.add_argument("--marker", type=Path)
-    parser.add_argument("--version")
     parser.add_argument("--check-marker", action="store_true")
     parser.add_argument("--write-marker", action="store_true")
     parser.add_argument("--safe-archive-verified", action="store_true")
     parser.add_argument("--gitiles-identity-verified", action="store_true")
     args = parser.parse_args()
-
+    version = validate_version(args.version)
     if args.metadata_in:
         metadata = json.loads(args.metadata_in.read_text(encoding="utf-8"))
     else:
-        if not args.url:
-            parser.error("--url is required unless --metadata-in is used")
-        metadata = fetch_metadata(args.url)
-
+        metadata = fetch_metadata(version)
     result: dict[str, object] = dict(metadata)
     if args.file:
         result.update(verify_file(args.file, metadata))
     if args.metadata_out:
         args.metadata_out.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
-
     if args.check_marker:
-        if not args.marker or not args.version or "sha256" not in result:
-            parser.error("--check-marker requires --marker, --version, and verified --file metadata")
-        if not marker_matches(args.marker, version=args.version, metadata=result, sha256=str(result["sha256"])):
+        if not args.marker or "sha256" not in result:
+            parser.error("--check-marker requires --marker and verified --file metadata")
+        if not marker_matches(args.marker, version=version, metadata=result, sha256=str(result["sha256"])):
             print(json.dumps(result, sort_keys=True))
             return 3
-
     if args.write_marker:
-        if not args.marker or not args.version or "sha256" not in result:
-            parser.error("--write-marker requires --marker, --version, and metadata containing sha256")
-        write_marker(
-            args.marker,
-            version=args.version,
-            metadata=result,
-            sha256=str(result["sha256"]),
-            safe_archive=args.safe_archive_verified,
-            gitiles_identity=args.gitiles_identity_verified,
-        )
-
+        if not args.marker or "sha256" not in result:
+            parser.error("--write-marker requires --marker and metadata containing sha256")
+        write_marker(args.marker, version=version, metadata=result, sha256=str(result["sha256"]), safe_archive=args.safe_archive_verified, gitiles_identity=args.gitiles_identity_verified)
     print(json.dumps(result, sort_keys=True))
     return 0
 
