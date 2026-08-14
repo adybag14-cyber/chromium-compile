@@ -126,8 +126,10 @@ def exact_exists_since(
     expected_title: str,
     expected_ref: str,
     not_before: datetime,
+    *,
+    grace_seconds: int = 0,
 ) -> bool:
-    threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=30)
+    threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=grace_seconds)
     for run in _exact_runs_or_fail_closed(repository, workflow, expected_title, expected_ref):
         raw = str(run.get("createdAt", ""))
         try:
@@ -146,7 +148,9 @@ def exact_recent_exists(
     expected_ref: str,
     not_before: datetime,
 ) -> bool:
-    return exact_exists_since(repository, workflow, expected_title, expected_ref, not_before)
+    return exact_exists_since(
+        repository, workflow, expected_title, expected_ref, not_before, grace_seconds=30
+    )
 
 
 def dispatch_once(

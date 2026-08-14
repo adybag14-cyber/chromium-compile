@@ -141,6 +141,28 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.assertEqual(result, "already-seen")
         run_gh.assert_not_called()
 
+    def test_run_just_before_parent_start_does_not_block_new_lineage(self):
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        runs = [
+            {
+                "displayTitle": "Expected title",
+                "headBranch": "main",
+                "status": "completed",
+                "createdAt": "2026-08-14T11:59:50Z",
+            }
+        ]
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
+            self.assertFalse(
+                dispatch.exact_exists_since(
+                    "owner/repo", "workflow.yml", "Expected title", "main", parent_started
+                )
+            )
+            self.assertTrue(
+                dispatch.exact_recent_exists(
+                    "owner/repo", "workflow.yml", "Expected title", "main", parent_started
+                )
+            )
+
     def test_historical_same_title_does_not_block_fresh_build_lineage(self):
         parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
         old_run = {
