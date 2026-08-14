@@ -274,7 +274,7 @@ create_out_checkpoint() {
     "${OUT_DIR}/.ninja_log" \
     "${OUT_DIR}/.ninja_deps" 2>/dev/null || true
 
-  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" tar \
+  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" tar \
     --format=posix \
     --pax-option='delete=atime,delete=ctime' \
     -C "${CHROMIUM_SRC}/out" \
@@ -282,7 +282,7 @@ create_out_checkpoint() {
     -cf "${CHECKPOINT_ARCHIVE}" \
     Release_x86
 
-  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${CHECKPOINT_ARCHIVE}"
+  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${CHECKPOINT_ARCHIVE}"
   (
     cd "${CHECKPOINT_DIR}"
     sha256sum "$(basename "${CHECKPOINT_ARCHIVE}")" > "$(basename "${CHECKPOINT_SHA256}")"

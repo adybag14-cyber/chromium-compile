@@ -301,12 +301,14 @@ class PipelineHardeningTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
-        self.assertIn("CHROMIUM_I686_CHECKPOINT_MINUTES || '330'", workflow)
+        self.assertIn("CHROMIUM_I686_CHECKPOINT_MINUTES || '340'", workflow)
         self.assertIn("CHECKPOINT_CONTRACT_VERSION", common)
         self.assertIn("checkpoint_contract_version", resume)
         self.assertIn("CHECKPOINT_GN_VERSION", resume)
         self.assertIn("CHECKPOINT_DEPOT_REVISION", resume)
         self.assertIn("CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS", resume)
+        self.assertIn("CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS", resume)
 
 
     def test_latest_upstream_contract_is_probed_in_ci(self):
