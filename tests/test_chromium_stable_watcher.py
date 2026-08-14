@@ -58,6 +58,19 @@ class StableWatcherTests(unittest.TestCase):
         with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
             self.assertEqual(watcher.list_active_versions("owner/repository"), {"155.0.1.2"})
 
+    def test_active_versions_include_manual_publisher_title(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "publish-i686-release.yml":
+                return [{
+                    "status": "in_progress",
+                    "conclusion": "",
+                    "display_title": "Publish Chromium i686 155.0.1.2 from build run 123456",
+                }]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            self.assertEqual(watcher.list_active_versions("owner/repository"), {"155.0.1.2"})
+
     def test_failed_run_history_quarantines_preflight_build_and_publisher(self):
         def fake_runs(_repository, workflow, **_kwargs):
             mapping = {
