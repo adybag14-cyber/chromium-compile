@@ -33,10 +33,12 @@ jobs:
           released=false
           dispatched=false
 
-          if timeout -k 10s 60s gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          release_state="$(python3 scripts/github_release_state.py \
+            --repository "${GITHUB_REPOSITORY}" --tag "${tag}")"
+          if [ "${release_state}" = "exists" ]; then
             released=true
             echo "${tag} already exists; bootstrap will never redispatch a released baseline."
-          else
+          elif [ "${release_state}" = "missing" ]; then
             expected_title="Chromium i686 preflight ${CHROMIUM_VERSION}"
             result="$(python3 scripts/github_workflow_dispatch.py \
               --repository "${GITHUB_REPOSITORY}" \
@@ -48,6 +50,9 @@ jobs:
             if [ "${result}" != "already-active" ]; then
               dispatched=true
             fi
+          else
+            echo "::error::Unexpected release-state helper result: ${release_state}"
+            exit 1
           fi
 
           run_json="$(timeout -k 10s 60s gh run list \
