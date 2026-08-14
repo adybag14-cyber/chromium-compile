@@ -440,8 +440,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         version_key(args.force_version)
         versions = [args.force_version]
         active, _run_quarantine = list_port_run_state(args.repository, args.ref)
-        state = PortState(known=known, released=set(), blocked=set(), active=active)
-        candidates = [] if active else [args.force_version]
+        released, broken_releases = list_release_health(args.repository)
+        if broken_releases:
+            formatted = ", ".join(sorted(broken_releases, key=version_key))
+            raise WatcherError(
+                "Published/draft Chromium i686 release state is incomplete or unverifiable for: "
+                f"{formatted}. Refusing to force a build around a broken immutable publication record."
+            )
+        state = PortState(known=known, released=released, blocked=set(), active=active)
+        if active:
+            candidates = []
+        elif args.force_version in released:
+            candidates = []
+            print(
+                f"Chromium {args.force_version} already has a healthy immutable release; "
+                "force_version cannot launch a replacement build."
+            )
+        elif version_key(args.force_version) <= version_key(minimum):
+            raise WatcherError(
+                f"Chromium {args.force_version} is not newer than baseline {minimum}; "
+                "use the manual preflight workflow for historical testing."
+            )
+        else:
+            candidates = [args.force_version]
     else:
         versions = fetch_stable_versions(args.api_url, minimum)
         issue_blocked = list_blocked_versions(args.repository)

@@ -98,9 +98,9 @@ GitHub Releases are immutable provenance records. Before a release is created, t
 
 ## Control-plane state and idempotence
 
-The watcher intentionally reads a bounded recent history instead of paginating the repository's entire lifetime on every six-hour run. It queries only the preflight, staged-build, and trusted publisher workflows, defaults to a 365-day quarantine window and at most 1,000 runs per relevant workflow, and fails closed if that horizon is saturated. Open maintenance issues remain the durable human failure record and release tags remain the durable success record. VersionHistory, releases and open-issue collections also have explicit pagination limits; repeated page tokens or saturated limits are maintenance failures, never silent truncation.
+The watcher intentionally reads a bounded recent history instead of paginating the repository's entire lifetime on every six-hour run. It queries only the preflight, staged-build, and trusted publisher workflows, defaults to a 1,095-day (three-year) quarantine window and at most 1,000 runs per relevant workflow, and fails closed if that horizon is saturated. Open maintenance issues remain the durable human failure record, while only a healthy immutable release with the complete uploaded/digested asset set counts as durable success. VersionHistory, releases and open-issue collections also have explicit pagination limits; repeated page tokens or saturated limits are maintenance failures, never silent truncation.
 
-A manual `force_version` bypasses historical release/quarantine filtering only after a fix; it does **not** bypass an active port run. The global queue remains single-owner.
+A manual `force_version` bypasses historical quarantine only after a fix. It does **not** bypass an active port run, a healthy immutable release, or the baseline/older history; use the manual preflight workflow for historical testing. The global queue remains single-owner.
 
 All workflow dispatches that can start expensive work should use `scripts/github_workflow_dispatch.py`. The helper performs an exact-active-run guard and sends the non-idempotent `workflow_dispatch` write only once. If the client times out or loses the response, it polls the exact expected run title and accepts server-side evidence rather than blindly issuing a duplicate write.
 
