@@ -96,6 +96,10 @@ The standalone tarball is derived from Chromium's Linux `installer_deps` runtime
 
 GitHub Releases are immutable provenance records. Before a release is created, the publisher resolves the exact `refs/tags/<tag>` ref; an existing tag is accepted only when it dereferences to the successful build SHA, while a missing tag is created once at that SHA and read-confirmed before release mutation. Release creation therefore does not depend on `target_commitish` (GitHub ignores it for pre-existing tags). Every remote asset digest must equal the local artifact; never restore `--clobber`. If release logic changes after a successful build, use **Publish Chromium i686 Release → Run workflow** with the retained successful `build_run_id`; the publisher independently verifies workflow identity, repository, default branch, completion, provenance and artifact contents before publication.
 
+## Checkpoint provenance and extraction
+
+Checkpoint artifacts are provenance-bound to the same repository, chromium-i686.yml, current default branch, expected Chromium version/compatible producer stage, and exactly one non-expired artifact. A streaming pre-extraction validator rejects traversal, absolute paths, special files, duplicate members, escaping or broken links, and missing Ninja graph files. Existing checksum, source, toolchain, port-configuration and checkpoint-contract manifest validation remains mandatory.
+
 ## Control-plane state and idempotence
 
 The watcher intentionally reads a bounded recent history instead of paginating the repository's entire lifetime on every six-hour run. It queries only the preflight, staged-build, and trusted publisher workflows, defaults to a 1,095-day (three-year) quarantine window and at most 1,000 runs per relevant workflow, and fails closed if that horizon is saturated. Open maintenance issues remain the durable human failure record, while only a healthy immutable release with the complete uploaded/digested asset set counts as durable success. VersionHistory, releases and open-issue collections also have explicit pagination limits; repeated page tokens or saturated limits are maintenance failures, never silent truncation.
