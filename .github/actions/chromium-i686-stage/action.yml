@@ -96,7 +96,9 @@ runs:
       continue-on-error: true
       with:
         path: ${{ github.workspace }}/.chromium-source-cache
-        key: chromium-src-${{ inputs.version }}
+        key: chromium-src-v2-${{ inputs.version }}
+        restore-keys: |
+          chromium-src-${{ inputs.version }}
 
     - name: Prepare Chromium Source
       id: prepare
@@ -179,7 +181,7 @@ runs:
       continue-on-error: true
       with:
         path: ${{ github.workspace }}/.chromium-source-cache
-        key: chromium-src-${{ inputs.version }}
+        key: chromium-src-v2-${{ inputs.version }}
 
     - name: Log Storage Before Compile
       if: ${{ steps.prepare.outcome == 'success' }}

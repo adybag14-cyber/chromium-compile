@@ -352,7 +352,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("Restore ccache", action)
         self.assertNotIn("Save ccache", action)
         self.assertNotIn("chromium-i686-ccache-", action)
-        self.assertIn("key: chromium-src-${{ inputs.version }}", action)
+        self.assertIn("key: chromium-src-v2-${{ inputs.version }}", action)
+        self.assertIn("chromium-src-${{ inputs.version }}", action)
         self.assertIn("steps.source_cache.outputs.cache-hit != 'true'", action)
         self.assertNotIn("key: chromium-src-${{ inputs.version }}-${{ github.run_id }}", action)
         self.assertIn("Preserve completed output after packaging or artifact failure", action)
@@ -465,6 +466,33 @@ class PipelineHardeningTests(unittest.TestCase):
         full_job = validation[validation.index("validate_full_source_preflight:") : validation.index("validate_i386_runtime:")]
         self.assertNotIn("gh workflow run chromium-i686.yml", full_job)
         self.assertNotIn("concurrency:", full_job)
+
+
+    def test_source_cache_fast_path_is_bound_to_authoritative_object_identity(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        verifier = (ROOT / "scripts" / "chromium_source_object.py").read_text(encoding="utf-8")
+        self.assertIn("chromium_source_object.py", common)
+        self.assertIn("x-goog-generation", verifier)
+        self.assertIn("x-goog-hash", verifier)
+        self.assertIn("md5_base64", verifier)
+        self.assertIn("sha256", verifier)
+        self.assertIn("safe_archive", verifier)
+        self.assertIn("gitiles_identity", verifier)
+        self.assertIn("skipping redundant decompression scan", common)
+        self.assertIn("validate_chromium_critical_source_identity", common)
+        self.assertNotIn('xz -t "${tarball}"', common)
+
+
+    def test_source_cache_contract_can_migrate_legacy_cache_to_marker_v2(self):
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        restore_pos = action.index("Restore Chromium source tarball cache")
+        save_pos = action.index("Save Chromium source tarball cache")
+        restore = action[restore_pos:save_pos]
+        save = action[save_pos:]
+        self.assertIn("key: chromium-src-v2-${{ inputs.version }}", restore)
+        self.assertIn("chromium-src-${{ inputs.version }}", restore)
+        self.assertIn("key: chromium-src-v2-${{ inputs.version }}", save)
+        self.assertIn("cache-hit != 'true'", save)
 
 
 if __name__ == "__main__":

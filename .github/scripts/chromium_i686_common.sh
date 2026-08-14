@@ -847,10 +847,6 @@ validate_extracted_chromium_version() {
 validate_chromium_source_tarball() {
   local tarball="${1:?source tarball is required}"
   local version="${2:?version is required}"
-  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" xz -t "${tarball}"; then
-    echo "::error::Chromium ${version} source archive failed xz integrity validation: ${tarball}"
-    return 1
-  fi
   if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
       python3 "${WORKSPACE}/scripts/validate_chromium_source_archive.py" \
         "${tarball}" --version "${version}"; then
@@ -897,36 +893,84 @@ prepare_chromium_source() {
   local version="${1:?version is required}"
   local cache_dir="${WORKSPACE}/.chromium-source-cache"
   local tarball="${cache_dir}/chromium-${version}.tar.xz"
+  local source_url="https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz"
+  local metadata="${cache_dir}/chromium-${version}.source-object.json"
+  local marker="${cache_dir}/chromium-${version}.validated.json"
+  local trusted_marker=false
+  local source_sha=""
   bounded_rm_rf "${CHROMIUM_SRC}"
   mkdir -p "${CHROMIUM_SRC}" "${cache_dir}"
 
-  if [ -s "${tarball}" ] && ! validate_chromium_source_tarball "${tarball}" "${version}"; then
-    echo "::warning::Discarding corrupt cached Chromium source archive and downloading it again."
-    rm -f "${tarball}" "${tarball}.sha256"
+  if [ -s "${tarball}" ]; then
+    echo "Verifying cached Chromium ${version} bytes against authoritative GCS object metadata."
+    if bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+        python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
+          --url "${source_url}" --file "${tarball}" --metadata-out "${metadata}"; then
+      source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"
+      if python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
+          --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
+          --check-marker >/dev/null 2>&1; then
+        trusted_marker=true
+        echo "Cached Chromium ${version} matches a prior safe-archive + Gitiles identity marker; skipping redundant decompression scan."
+      else
+        echo "Cached bytes are authoritative but have no matching safety marker; performing the full archive scan."
+        if ! validate_chromium_source_tarball "${tarball}" "${version}"; then
+          echo "::warning::Discarding structurally unsafe cached Chromium source archive."
+          rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}"
+          source_sha=""
+        fi
+      fi
+    else
+      echo "::warning::Discarding cached Chromium source bytes that do not match the authoritative GCS object."
+      rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}"
+    fi
   fi
 
-  if [ -s "${tarball}" ]; then
-    echo "Using validated cached Chromium ${version} source tarball at ${tarball}"
-  else
+  if [ ! -s "${tarball}" ]; then
     echo "Downloading Chromium ${version} source tarball..."
-    rm -f "${tarball}.partial"
-    if ! curl --fail --location --retry 5 --retry-all-errors --retry-delay 10         --connect-timeout 30 --max-time "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}"         "https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz"         -o "${tarball}.partial"; then
+    rm -f "${tarball}.partial" "${metadata}"
+    if ! curl --fail --location --retry 5 --retry-all-errors --retry-delay 10 \
+        --connect-timeout 30 --max-time "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" \
+        "${source_url}" -o "${tarball}.partial"; then
       rm -f "${tarball}.partial"
       return 1
     fi
-    validate_chromium_source_tarball "${tarball}.partial" "${version}"
+    if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+        python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
+          --url "${source_url}" --file "${tarball}.partial" --metadata-out "${metadata}"; then
+      rm -f "${tarball}.partial" "${metadata}"
+      return 1
+    fi
+    source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"
+    if python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
+        --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
+        --check-marker >/dev/null 2>&1; then
+      trusted_marker=true
+      echo "Redownloaded bytes exactly match an existing trusted validation marker."
+    else
+      validate_chromium_source_tarball "${tarball}.partial" "${version}"
+    fi
     mv "${tarball}.partial" "${tarball}"
   fi
 
-  if [ ! -s "${tarball}.sha256" ]; then
-    (cd "${cache_dir}" && sha256sum "$(basename "${tarball}")" > "$(basename "${tarball}").sha256")
-  fi
-  (cd "${cache_dir}" && sha256sum -c "$(basename "${tarball}.sha256")")
+  test -n "${source_sha}" || {
+    source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"
+  }
+  printf '%s  %s\n' "${source_sha}" "$(basename "${tarball}")" > "${tarball}.sha256"
 
   echo "Extracting Chromium ${version} source..."
-  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+    tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1
   validate_extracted_chromium_version "${version}"
-  validate_chromium_critical_source_identity "${version}"
+  if [ "${trusted_marker}" != "true" ]; then
+    validate_chromium_critical_source_identity "${version}"
+    python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
+      --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
+      --write-marker >/dev/null
+    echo "Recorded SHA-bound source safety/Gitiles identity marker for Chromium ${version}."
+  else
+    echo "Reused prior Gitiles identity proof for the exact same GCS generation, MD5, length and SHA-256."
+  fi
   python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${CHROMIUM_SRC}/DEPS"
   echo "Extraction complete. Source size:"
   du -sh "${CHROMIUM_SRC}"
