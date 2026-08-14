@@ -907,7 +907,7 @@ prepare_chromium_source() {
     echo "Verifying cached Chromium ${version} bytes against authoritative GCS object metadata."
     if bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
         python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
-          --url "${source_url}" --file "${tarball}" --metadata-out "${metadata}"; then
+          --version "${version}" --file "${tarball}" --metadata-out "${metadata}"; then
       source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"
       if python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
           --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
@@ -939,7 +939,7 @@ prepare_chromium_source() {
     fi
     if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
         python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
-          --url "${source_url}" --file "${tarball}.partial" --metadata-out "${metadata}"; then
+          --version "${version}" --file "${tarball}.partial" --metadata-out "${metadata}"; then
       rm -f "${tarball}.partial" "${metadata}"
       return 1
     fi

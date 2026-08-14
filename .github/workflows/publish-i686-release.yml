@@ -1,5 +1,5 @@
 name: Publish Chromium i686 Release
-run-name: Publish ${{ github.event.workflow_run.display_title || format('build run {0}', inputs.build_run_id) }}
+run-name: Publish ${{ github.event.workflow_run.display_title || format('Chromium i686 {0} from build run {1}', inputs.version, inputs.build_run_id) }}
 
 on:
   workflow_run:
@@ -11,6 +11,10 @@ on:
     inputs:
       build_run_id:
         description: "Successful Chromium i686 build run ID to republish without recompiling"
+        required: true
+        type: string
+      version:
+        description: "Exact Chromium version expected from the selected build run"
         required: true
         type: string
 
@@ -115,6 +119,7 @@ jobs:
           RUN_ID: ${{ steps.source.outputs.run_id }}
           BUILD_DISPLAY_TITLE: ${{ steps.source.outputs.display_title }}
           EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -124,6 +129,16 @@ jobs:
             echo "::error::Could not extract Chromium version from build run title: ${BUILD_DISPLAY_TITLE}"
             exit 1
           }
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            [[ "${REQUESTED_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "::error::Manual republish version must use the exact Chromium version format."
+              exit 1
+            }
+            test "${REQUESTED_VERSION}" = "${expected_version}" || {
+              echo "::error::Manual republish requested Chromium ${REQUESTED_VERSION}, but build run ${RUN_ID} is ${expected_version}."
+              exit 1
+            }
+          fi
 
           names="$(bounded_gh api --paginate             "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100"             --jq '.artifacts[] | select(.expired == false) | .name')"
           mapfile -t matches < <(grep -E '^chromium-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-linux-i686$' <<<"${names}" || true)
