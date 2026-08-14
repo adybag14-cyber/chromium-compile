@@ -170,6 +170,19 @@ class StableWatcherTests(unittest.TestCase):
                     max_pages=2,
                 )
 
+    def test_exact_full_workflow_history_horizon_with_empty_sentinel_succeeds(self):
+        full_page = {"workflow_runs": [{"display_title": "old"}] * 100}
+        empty_page = {"workflow_runs": []}
+        with mock.patch.object(watcher, "gh_json", side_effect=[full_page, full_page, empty_page]) as gh_json:
+            runs = watcher.list_workflow_runs(
+                "owner/repository",
+                "chromium-i686.yml",
+                created_after=watcher.datetime.now(watcher.timezone.utc),
+                max_pages=2,
+            )
+        self.assertEqual(len(runs), 200)
+        self.assertEqual(gh_json.call_count, 3)
+
     def test_gh_timeout_becomes_watcher_error(self):
         with mock.patch.object(
             watcher.subprocess,
@@ -235,6 +248,13 @@ class StableWatcherTests(unittest.TestCase):
         with mock.patch.object(watcher, "gh_json", return_value=[{}] * 100):
             with self.assertRaises(watcher.WatcherError):
                 watcher.list_rest_items("owner/repo", "releases", max_pages=2)
+
+    def test_exact_full_rest_horizon_with_empty_sentinel_succeeds(self):
+        full = [{}] * 100
+        with mock.patch.object(watcher, "gh_json", side_effect=[full, full, []]) as gh_json:
+            items = watcher.list_rest_items("owner/repo", "releases", max_pages=2)
+        self.assertEqual(len(items), 200)
+        self.assertEqual(gh_json.call_count, 3)
 
     @staticmethod
     def _healthy_release(version: str, **overrides):

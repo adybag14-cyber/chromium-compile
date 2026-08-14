@@ -16,6 +16,10 @@ class IssueError(RuntimeError):
     """Raised when maintenance issue state cannot be established safely."""
 
 
+class IssueStateError(IssueError):
+    """Raised for deterministic issue-state/schema ambiguity that retries cannot fix."""
+
+
 def run_gh(args: Sequence[str], *, timeout: int = 90) -> subprocess.CompletedProcess[str]:
     command = ["gh", *args]
     try:
@@ -52,26 +56,35 @@ def find_issue(repository: str, title: str, *, attempts: int = 3) -> int | None:
                     "number,title",
                 ]
             )
+        except IssueError as exc:
+            last = exc
+            if attempt < attempts:
+                time.sleep(min(2 ** (attempt - 1), 5))
+                continue
+            raise
+
+        try:
             payload = json.loads(result.stdout or "[]")
-            if not isinstance(payload, list):
-                raise IssueError("gh issue list returned non-list JSON")
-            if len(payload) >= ISSUE_LIST_LIMIT:
-                raise IssueError(
-                    f"Open issue lookup saturated at {ISSUE_LIST_LIMIT} entries; "
-                    "refusing to guess whether an exact maintenance issue exists beyond the horizon"
-                )
+        except json.JSONDecodeError as exc:
+            raise IssueStateError("gh issue list returned invalid JSON") from exc
+        if not isinstance(payload, list):
+            raise IssueStateError("gh issue list returned non-list JSON")
+        if len(payload) >= ISSUE_LIST_LIMIT:
+            raise IssueStateError(
+                f"Open issue lookup saturated at {ISSUE_LIST_LIMIT} entries; "
+                "refusing to guess whether an exact maintenance issue exists beyond the horizon"
+            )
+        try:
             matches = [
                 int(item["number"])
                 for item in payload
                 if isinstance(item, dict) and item.get("title") == title and "number" in item
             ]
-            if len(matches) > 1:
-                raise IssueError(f"Multiple open issues have the exact maintenance title: {title}")
-            return matches[0] if matches else None
-        except (IssueError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            last = exc if isinstance(exc, IssueError) else IssueError(str(exc))
-            if attempt < attempts:
-                time.sleep(min(2 ** (attempt - 1), 5))
+        except (TypeError, ValueError) as exc:
+            raise IssueStateError("gh issue list returned an invalid issue number") from exc
+        if len(matches) > 1:
+            raise IssueStateError(f"Multiple open issues have the exact maintenance title: {title}")
+        return matches[0] if matches else None
     assert last is not None
     raise last
 

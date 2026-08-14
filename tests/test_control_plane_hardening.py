@@ -50,6 +50,9 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("Publish Chromium i686 Release", reporter)
         self.assertIn("scripts/github_maintenance_issue.py", reporter)
         self.assertIn("timeout -k 10s 90s gh run view", reporter)
+        self.assertIn("group: chromium-i686-maintenance-issues", reporter)
+        self.assertIn("[i686-port] Chromium pipeline requires maintenance", reporter)
+        self.assertIn("unparseable version", reporter)
 
     def test_watcher_state_queries_are_bounded_and_include_publisher(self):
         watcher = (ROOT / "scripts" / "chromium_stable_watcher.py").read_text(encoding="utf-8")
@@ -69,7 +72,14 @@ class ControlPlaneHardeningTests(unittest.TestCase):
 
     def test_watcher_failure_is_visible_and_recovery_closes_issue(self):
         watcher_workflow = (ROOT / ".github" / "workflows" / "watch-chromium-stable.yml").read_text(encoding="utf-8")
-        self.assertIn("issues: write", watcher_workflow)
+        top_permissions = watcher_workflow[watcher_workflow.index("permissions:"):watcher_workflow.index("concurrency:")]
+        detect_block = watcher_workflow[watcher_workflow.index("  detect:"):watcher_workflow.index("  report_watcher_failure:")]
+        self.assertNotIn("actions: write", top_permissions)
+        self.assertNotIn("issues: write", top_permissions)
+        self.assertIn("actions: write", detect_block)
+        self.assertIn("issues: write", detect_block)
+        self.assertIn("continue-on-error: true", detect_block)
+        self.assertIn("future runs will retry it", detect_block)
         self.assertIn("report_watcher_failure:", watcher_workflow)
         self.assertIn("Stable watcher requires maintenance", watcher_workflow)
         self.assertIn("--close-if-open", watcher_workflow)

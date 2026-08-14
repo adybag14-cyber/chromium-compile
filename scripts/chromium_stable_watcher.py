@@ -168,7 +168,7 @@ def list_workflow_runs(
         raise ValueError("max_pages must be at least 1")
     collected: list[dict[str, object]] = []
     encoded_workflow = urllib.parse.quote(workflow, safe="")
-    for page in range(1, max_pages + 1):
+    for page in range(1, max_pages + 2):
         params = {
             "per_page": "100",
             "page": str(page),
@@ -187,14 +187,18 @@ def list_workflow_runs(
         page_runs = payload.get("workflow_runs", [])
         if not isinstance(page_runs, list):
             raise WatcherError(f"Actions response lacks workflow_runs for {workflow}")
+        if page > max_pages:
+            if page_runs:
+                raise WatcherError(
+                    f"Workflow history horizon saturated for {workflow} at {max_pages * 100} "
+                    "runs in the quarantine window; refusing to guess about port state"
+                )
+            return collected
         valid = [item for item in page_runs if isinstance(item, dict)]
         collected.extend(valid)
         if len(page_runs) < 100:
             return collected
-    raise WatcherError(
-        f"Workflow history horizon saturated for {workflow} at {max_pages * 100} "
-        "runs in the quarantine window; refusing to guess about port state"
-    )
+    raise AssertionError("unreachable workflow pagination state")
 
 
 def extract_port_version(title: str) -> str | None:
@@ -225,7 +229,7 @@ def list_rest_items(
         raise ValueError("max_pages must be at least 1")
     found: list[dict[str, object]] = []
     separator = "&" if "?" in resource else "?"
-    for page in range(1, max_pages + 1):
+    for page in range(1, max_pages + 2):
         payload = gh_json(
             [
                 "api",
@@ -234,13 +238,17 @@ def list_rest_items(
         )
         if not isinstance(payload, list):
             raise WatcherError(f"Unexpected GitHub REST response for {resource}")
+        if page > max_pages:
+            if payload:
+                raise WatcherError(
+                    f"GitHub REST horizon saturated for {resource} at {max_pages * 100} items; "
+                    "refusing to silently truncate port state"
+                )
+            return found
         found.extend(item for item in payload if isinstance(item, dict))
         if len(payload) < 100:
             return found
-    raise WatcherError(
-        f"GitHub REST horizon saturated for {resource} at {max_pages * 100} items; "
-        "refusing to silently truncate port state"
-    )
+    raise AssertionError("unreachable REST pagination state")
 
 
 def list_release_health(repository: str) -> tuple[set[str], set[str]]:

@@ -15,6 +15,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: chromium-i686-maintenance-issues
+  cancel-in-progress: false
+
 jobs:
   report:
     if: >-
@@ -45,9 +49,13 @@ jobs:
         run: |
           set -euo pipefail
           version="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<<"${DISPLAY_TITLE}" | head -n1 || true)"
-          if [ -z "${version}" ]; then
-            echo "::error::Could not extract a Chromium version from: ${DISPLAY_TITLE}"
-            exit 1
+          if [ -n "${version}" ]; then
+            title="[i686-port] Chromium ${version} requires maintenance"
+            subject="Chromium ${version}"
+          else
+            echo "::warning::Could not extract a Chromium version from ${DISPLAY_TITLE}; using the generic pipeline maintenance record."
+            title="[i686-port] Chromium pipeline requires maintenance"
+            subject="A Chromium i686 pipeline run with an unparseable version"
           fi
 
           if [ "${WORKFLOW_NAME}" = "Chromium i686 Build (Unofficial Port)" ]; then
@@ -63,10 +71,9 @@ jobs:
 
           log_excerpt="$(timeout -k 10s 90s gh run view "${RUN_ID}" \
             --repo "${GITHUB_REPOSITORY}" --log-failed 2>&1 | tail -n 80 || true)"
-          title="[i686-port] Chromium ${version} requires maintenance"
           body_file="${RUNNER_TEMP}/i686-port-failure.md"
           cat > "${body_file}" <<EOF
-          Chromium ${version} did not complete the unofficial Linux i686 port pipeline.
+          ${subject} did not complete the unofficial Linux i686 port pipeline.
 
           - Workflow: ${WORKFLOW_NAME}
           - Conclusion: ${CONCLUSION}

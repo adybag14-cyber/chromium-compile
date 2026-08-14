@@ -11,7 +11,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
-RUN_LOOKUP_LIMIT = int(os.environ.get("CHROMIUM_I686_DISPATCH_LOOKUP_LIMIT", "1000"))
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, minimum), maximum)
+
+
+RUN_LOOKUP_LIMIT = _bounded_int_env(
+    "CHROMIUM_I686_DISPATCH_LOOKUP_LIMIT", 1000, 100, 5000
+)
+CONFIRM_DELAYS_SECONDS = (2, 3, 5, 8, 12, 15, 20, 25)
 
 
 class DispatchError(RuntimeError):
@@ -185,14 +199,17 @@ def dispatch_once(
         return "accepted"
     except DispatchError as dispatch_error:
         # Do not blindly retry a non-idempotent workflow_dispatch call: GitHub may
-        # have accepted it just before the client/network failed.
-        for _ in range(confirm_attempts):
-            time.sleep(3)
+        # have accepted it just before the client/network failed. Check immediately,
+        # then use bounded backoff so Actions has time to materialize a delayed run.
+        for attempt in range(confirm_attempts):
             try:
                 if exact_recent_exists(repository, workflow, expected_title, ref, started):
                     return "accepted-after-client-error"
             except DispatchError:
-                continue
+                pass
+            if attempt + 1 < confirm_attempts:
+                delay = CONFIRM_DELAYS_SECONDS[min(attempt, len(CONFIRM_DELAYS_SECONDS) - 1)]
+                time.sleep(delay)
         raise dispatch_error
 
 

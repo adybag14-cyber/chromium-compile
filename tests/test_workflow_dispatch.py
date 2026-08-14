@@ -15,6 +15,14 @@ SPEC.loader.exec_module(dispatch)
 
 
 class WorkflowDispatchTests(unittest.TestCase):
+    def test_dispatch_lookup_env_is_validated_and_clamped(self):
+        with mock.patch.dict(dispatch.os.environ, {"X": "garbage"}, clear=False):
+            self.assertEqual(dispatch._bounded_int_env("X", 1000, 100, 5000), 1000)
+        with mock.patch.dict(dispatch.os.environ, {"X": "1"}, clear=False):
+            self.assertEqual(dispatch._bounded_int_env("X", 1000, 100, 5000), 100)
+        with mock.patch.dict(dispatch.os.environ, {"X": "999999"}, clear=False):
+            self.assertEqual(dispatch._bounded_int_env("X", 1000, 100, 5000), 5000)
+
     def test_run_lookup_uses_long_horizon(self):
         payload = "[]"
         with mock.patch.object(
@@ -102,8 +110,8 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.assertEqual(result, "accepted-after-client-error")
         self.assertEqual(run_gh.call_count, 1)
 
-    def test_unconfirmed_dispatch_error_fails_without_write_retry(self):
-        with mock.patch.object(dispatch, "exact_active_exists", return_value=False),              mock.patch.object(dispatch, "run_gh", side_effect=dispatch.DispatchError("timeout")) as run_gh,              mock.patch.object(dispatch, "exact_recent_exists", return_value=False),              mock.patch.object(dispatch.time, "sleep"):
+    def test_unconfirmed_dispatch_error_fails_without_write_retry_and_backs_off(self):
+        with mock.patch.object(dispatch, "exact_active_exists", return_value=False),              mock.patch.object(dispatch, "run_gh", side_effect=dispatch.DispatchError("timeout")) as run_gh,              mock.patch.object(dispatch, "exact_recent_exists", return_value=False) as confirm,              mock.patch.object(dispatch.time, "sleep") as sleep:
             with self.assertRaises(dispatch.DispatchError):
                 dispatch.dispatch_once(
                     "owner/repo",
@@ -111,9 +119,11 @@ class WorkflowDispatchTests(unittest.TestCase):
                     "main",
                     "Expected title",
                     ["version=1.2.3.4"],
-                    confirm_attempts=2,
+                    confirm_attempts=3,
                 )
         self.assertEqual(run_gh.call_count, 1)
+        self.assertEqual(confirm.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 3])
 
     def test_invalid_input_is_rejected_before_dispatch(self):
         with mock.patch.object(dispatch, "exact_active_exists", return_value=False),              mock.patch.object(dispatch, "run_gh") as run_gh:
