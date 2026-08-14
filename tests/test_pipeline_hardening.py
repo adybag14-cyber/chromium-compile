@@ -342,5 +342,45 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", action)
 
 
+    def test_checkpoint_artifacts_precede_optional_cache_and_preserve_final_output(self):
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        self.assertNotIn("Restore ccache", action)
+        self.assertNotIn("Save ccache", action)
+        self.assertNotIn("chromium-i686-ccache-", action)
+        self.assertIn("key: chromium-src-${{ inputs.version }}", action)
+        self.assertIn("steps.source_cache.outputs.cache-hit != 'true'", action)
+        self.assertNotIn("key: chromium-src-${{ inputs.version }}-${{ github.run_id }}", action)
+        self.assertIn("Preserve completed output after packaging or artifact failure", action)
+        self.assertIn("Upload Final Output Recovery Checkpoint", action)
+        self.assertIn("steps.build_artifact.outcome == 'failure'", action)
+        self.assertIn("steps.final_recovery.outputs.failure_class", action)
+
+    def test_release_workflow_supports_trusted_manual_republish(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", publish)
+        self.assertIn("build_run_id:", publish)
+        self.assertIn("Resolve and verify trusted build source", publish)
+        self.assertIn('workflow_path}" = ".github/workflows/chromium-i686.yml"', publish)
+        self.assertIn('head_branch}" = "${DEFAULT_BRANCH}"', publish)
+        self.assertIn('head_repo}" = "${GITHUB_REPOSITORY}"', publish)
+        self.assertIn("has no retained final Chromium runtime artifact", publish)
+
+    def test_host_optional_probes_cannot_hang_or_require_swap(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("continuing without swap", common)
+        self.assertIn("capture_ldd_output()", common)
+        self.assertIn("timeout -k 3s 15s ldd", common)
+        self.assertIn("timeout -k 10s 120s ccache --cleanup", common)
+
+    def test_standalone_runtime_requires_rendered_wrapper(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        runtime = (ROOT / "scripts" / "chromium_linux_runtime.py").read_text(encoding="utf-8")
+        self.assertIn("chrome-wrapper", common)
+        self.assertIn("render_standalone_wrapper", runtime)
+        self.assertIn("@@PROGNAME", runtime)
+        self.assertIn("@@channel", runtime)
+        self.assertIn("--render-wrapper", common)
+
+
 if __name__ == "__main__":
     unittest.main()

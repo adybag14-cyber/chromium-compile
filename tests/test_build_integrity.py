@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import os
 import pathlib
 import sys
 import tarfile
@@ -84,6 +85,9 @@ packaging_files = packaging_files_executables + packaging_files_shlibs + [
 if (enable_swiftshader) {
   packaging_files += [ "$root_out_dir/vk_swiftshader_icd.json" ]
 }
+copy("common_packaging_files") {
+  sources = [ "common/wrapper" ]
+}
 action_foreach("calculate_deb_dependencies") {}
 """,
             encoding="utf-8",
@@ -97,6 +101,9 @@ action_foreach("calculate_deb_dependencies") {}
         (out / "libvk_swiftshader.so").write_bytes(b"swift")
         (out / "vk_swiftshader_icd.json").write_text("{}", encoding="utf-8")
         (out / "future_resource.pak").write_bytes(b"pak")
+        wrapper = out / "installer" / "common" / "wrapper"
+        wrapper.parent.mkdir(parents=True, exist_ok=True)
+        wrapper.write_text("#!/bin/bash\nexport CHROME_VERSION_EXTRA=\"@@channel\"\nexec -a \"$0\" \"$HERE/@@PROGNAME\" \"$@\"\n", encoding="utf-8")
         return source, out
 
     def test_collects_upstream_runtime_and_future_resources(self):
@@ -107,6 +114,18 @@ action_foreach("calculate_deb_dependencies") {}
             self.assertIn("libvk_swiftshader.so", files)
             self.assertIn("vk_swiftshader_icd.json", files)
             self.assertIn("future_resource.pak", files)
+
+    def test_renders_standalone_wrapper_from_upstream_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, out = self._fixture(pathlib.Path(tmp))
+            target = runtime.render_standalone_wrapper(out)
+            text = target.read_text(encoding="utf-8")
+            self.assertIn("chrome", text)
+            self.assertNotIn("@@PROGNAME", text)
+            self.assertNotIn("@@channel", text)
+            if os.name != "nt":
+                self.assertTrue(target.stat().st_mode & 0o111)
+            self.assertIn("target.chmod(0o755)", (ROOT / "scripts" / "chromium_linux_runtime.py").read_text(encoding="utf-8"))
 
     def test_missing_required_output_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,6 +159,36 @@ class ReleaseArchiveTests(unittest.TestCase):
             self._archive(path, names)
             with self.assertRaises(ValueError):
                 archive_validator.validate_archive(path)
+
+    def test_rejects_duplicate_member_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            with tarfile.open(path, "w:xz") as archive:
+                for name in names + ["chrome"]:
+                    data = b"runtime"
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+            with self.assertRaises(ValueError):
+                archive_validator.validate_archive(path)
+
+    def test_rejects_fifo_member(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            with tarfile.open(path, "w:xz") as archive:
+                for name in names:
+                    data = b"runtime"
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+                fifo = tarfile.TarInfo("runtime.fifo")
+                fifo.type = tarfile.FIFOTYPE
+                archive.addfile(fifo)
+            with self.assertRaises(ValueError):
+                archive_validator.validate_archive(path)
+
 
 
 if __name__ == "__main__":

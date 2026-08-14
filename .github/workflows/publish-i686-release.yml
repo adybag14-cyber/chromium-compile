@@ -1,5 +1,5 @@
 name: Publish Chromium i686 Release
-run-name: Publish ${{ github.event.workflow_run.display_title }}
+run-name: Publish ${{ github.event.workflow_run.display_title || format('build run {0}', inputs.build_run_id) }}
 
 on:
   workflow_run:
@@ -7,6 +7,12 @@ on:
       - Chromium i686 Build (Unofficial Port)
     types:
       - completed
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Successful Chromium i686 build run ID to republish without recompiling"
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -14,16 +20,15 @@ permissions:
   issues: write
 
 concurrency:
-  group: chromium-i686-release-${{ github.event.workflow_run.id }}
+  group: chromium-i686-release-${{ github.event.workflow_run.id || inputs.build_run_id }}
   cancel-in-progress: false
 
 jobs:
   publish:
     if: >-
       ${{
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_branch == github.event.repository.default_branch &&
-        github.event.workflow_run.head_repository.full_name == github.repository
+        github.event_name == 'workflow_dispatch' ||
+        github.event.workflow_run.conclusion == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -32,6 +37,57 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Resolve and verify trusted build source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ github.event.workflow_run.id || inputs.build_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          [[ "${REQUESTED_RUN_ID}" =~ ^[0-9]+$ ]] || {
+            echo "::error::build_run_id must be a numeric GitHub Actions run ID"
+            exit 1
+          }
+          run_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${REQUESTED_RUN_ID}")"
+          status="$(jq -r '.status // ""' <<<"${run_json}")"
+          conclusion="$(jq -r '.conclusion // ""' <<<"${run_json}")"
+          workflow_path="$(jq -r '.path // ""' <<<"${run_json}")"
+          head_branch="$(jq -r '.head_branch // ""' <<<"${run_json}")"
+          head_repo="$(jq -r '.head_repository.full_name // ""' <<<"${run_json}")"
+          head_sha="$(jq -r '.head_sha // ""' <<<"${run_json}")"
+          display_title="$(jq -r '.display_title // ""' <<<"${run_json}")"
+
+          test "${status}" = completed || {
+            echo "::error::Build run ${REQUESTED_RUN_ID} is not completed."
+            exit 1
+          }
+          test "${conclusion}" = success || {
+            echo "::error::Build run ${REQUESTED_RUN_ID} did not conclude successfully."
+            exit 1
+          }
+          test "${workflow_path}" = ".github/workflows/chromium-i686.yml" || {
+            echo "::error::Run ${REQUESTED_RUN_ID} is not the trusted Chromium i686 build workflow."
+            exit 1
+          }
+          test "${head_branch}" = "${DEFAULT_BRANCH}" || {
+            echo "::error::Run ${REQUESTED_RUN_ID} did not build the repository default branch."
+            exit 1
+          }
+          test "${head_repo}" = "${GITHUB_REPOSITORY}" || {
+            echo "::error::Run ${REQUESTED_RUN_ID} originated from ${head_repo}, not ${GITHUB_REPOSITORY}."
+            exit 1
+          }
+          [[ "${head_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Run ${REQUESTED_RUN_ID} has an invalid head SHA."
+            exit 1
+          }
+          echo "run_id=${REQUESTED_RUN_ID}" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+          echo "display_title=${display_title}" >> "${GITHUB_OUTPUT}"
 
       - name: Install release validation tools
         shell: bash
@@ -45,8 +101,9 @@ jobs:
         id: artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          BUILD_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
+          RUN_ID: ${{ steps.source.outputs.run_id }}
+          BUILD_DISPLAY_TITLE: ${{ steps.source.outputs.display_title }}
+          EVENT_NAME: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -61,6 +118,10 @@ jobs:
           mapfile -t matches < <(grep -E '^chromium-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-linux-i686$' <<<"${names}" || true)
 
           if [ "${#matches[@]}" -eq 0 ]; then
+            if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+              echo "::error::Requested build run ${RUN_ID} has no retained final Chromium runtime artifact."
+              exit 1
+            fi
             echo "found=false" >> "${GITHUB_OUTPUT}"
             echo "This compiler stage did not produce the final runtime artifact."
             exit 0
@@ -86,7 +147,7 @@ jobs:
         if: ${{ steps.artifact.outputs.found == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ steps.source.outputs.run_id }}
           ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
         shell: bash
         run: |
@@ -98,8 +159,8 @@ jobs:
         if: ${{ steps.artifact.outputs.found == 'true' }}
         env:
           CHROMIUM_VERSION: ${{ steps.artifact.outputs.version }}
-          BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
-          BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+          BUILD_SHA: ${{ steps.source.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ steps.source.outputs.run_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -136,8 +197,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHROMIUM_VERSION: ${{ steps.artifact.outputs.version }}
-          BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
-          BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+          BUILD_SHA: ${{ steps.source.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ steps.source.outputs.run_id }}
         shell: bash
         run: |
           set -euo pipefail

@@ -83,3 +83,13 @@ checkpoint-manifest.json
 ```
 
 Legacy checkpoints without the manifest/checksum bundle are rejected by default. During a one-version migration, set `CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION` to that exact Chromium version and remove or change it after the in-flight chain has produced a manifest-bearing checkpoint. Do not remove manifest compatibility checks merely to make a stale checkpoint restore. If build-affecting GN arguments or downstream patches change, starting from a compatible older-stage checkpoint or a fresh output directory is safer than reusing mismatched Ninja state.
+
+## Reproducible toolchain and release invariants
+
+Production builds must use the `gn_version` and depot_tools commit declared by the requested Chromium source `DEPS`. Do not replace these with `latest` tags. The validation workflow probes the latest stable Chromium `DEPS` and Linux installer definition on every relevant PR and on the scheduled compatibility run; source-contract drift becomes a maintenance issue before the next large build.
+
+The source archive cache is keyed only by the exact Chromium version, validated with xz/tar before use, and checked against the extracted `chrome/VERSION`. The staged `out/Release_x86` checkpoint—not Actions ccache—is the cross-run compilation state. Checkpoint creation/upload therefore precedes optional/performance work, and a completed compile whose package or final artifact upload fails attempts to publish a same-stage recovery checkpoint.
+
+The standalone tarball is derived from Chromium's Linux `installer_deps` runtime contract, includes a rendered `chrome-wrapper`, rejects unsafe/duplicate/special archive members, and validates every ELF as 32-bit Intel 80386. The release manifest records source/package hashes, build run/SHA, clang revision, GN/depot_tools pins, port hash, checkpoint contract and runner image.
+
+GitHub Releases are immutable provenance records. New tags target the exact successful build SHA. An existing same-version tag is accepted only when it resolves to the same build commit and every remote asset digest equals the local artifact; never restore `--clobber`. If release logic changes after a successful build, use **Publish Chromium i686 Release → Run workflow** with the retained successful `build_run_id`; the publisher independently verifies workflow identity, repository, default branch, completion, provenance and artifact contents before publication.

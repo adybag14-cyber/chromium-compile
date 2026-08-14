@@ -20,10 +20,15 @@ def validate_archive(path: Path) -> None:
         for member in archive.getmembers():
             if _unsafe(member.name):
                 raise ValueError(f"Unsafe archive member path: {member.name}")
+            normalized = PurePosixPath(member.name).as_posix().rstrip("/")
+            if normalized in names:
+                raise ValueError(f"Duplicate archive member path: {normalized}")
+            if member.isdev() or member.isfifo():
+                raise ValueError(f"Unsupported special archive member: {member.name}")
             if member.issym() or member.islnk():
                 if _unsafe(member.linkname):
                     raise ValueError(f"Unsafe archive link target: {member.name} -> {member.linkname}")
-            names.add(PurePosixPath(member.name).as_posix().rstrip("/"))
+            names.add(normalized)
     missing: list[str] = []
     for required in sorted(REQUIRED_RUNTIME):
         if required == "locales":

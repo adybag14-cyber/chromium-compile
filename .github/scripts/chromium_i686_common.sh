@@ -64,11 +64,20 @@ ensure_swap() {
     swapon --show
     return 0
   fi
-  echo "Adding 8G swap file to reduce OOM risk during Chromium linking..."
-  timeout -k 15s "${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS}s" sudo fallocate -l 8G /swapfile || timeout -k 15s "${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS}s" sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
-  sudo chmod 600 /swapfile
-  sudo mkswap /swapfile
-  sudo swapon /swapfile
+
+  echo "Attempting an 8G best-effort swap file to reduce OOM risk during Chromium linking..."
+  sudo rm -f /swapfile || true
+  if ! timeout -k 15s "${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS}s" sudo fallocate -l 8G /swapfile       && ! timeout -k 15s "${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS}s"         sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=none; then
+    echo "::warning::Could not allocate swap on this runner; continuing with physical memory and normal OOM classification."
+    sudo rm -f /swapfile || true
+    return 0
+  fi
+  if ! sudo chmod 600 /swapfile       || ! timeout -k 10s 60s sudo mkswap /swapfile >/dev/null       || ! timeout -k 10s 60s sudo swapon /swapfile; then
+    echo "::warning::Runner does not permit swap activation; continuing without swap."
+    sudo swapoff /swapfile 2>/dev/null || true
+    sudo rm -f /swapfile || true
+    return 0
+  fi
   swapon --show
 }
 
@@ -476,6 +485,22 @@ is_i386_host_executable() {
   grep -Eq 'ELF 32-bit.*(pie )?executable, Intel (80386|i386)' <<<"${file_output}"
 }
 
+capture_ldd_output() {
+  local binary="${1:?binary is required}"
+  local output_name="${2:?output variable name is required}"
+  local output status=0
+  if output="$(timeout -k 3s 15s ldd "${binary}" 2>&1)"; then
+    printf -v "${output_name}" '%s' "${output}"
+    return 0
+  else
+    status=$?
+  fi
+  printf -v "${output_name}" '%s' "${output}"
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+  echo "::error::ldd failed or timed out for generated ELF32 tool ${binary} (status ${status}); refusing an unbounded runtime probe."
+  return 1
+}
+
 repair_missing_i386_runtime_for_binary() {
   local binary="${1:?binary is required}"
   local ldd_output soname package round current_missing previous_missing=""
@@ -484,7 +509,10 @@ repair_missing_i386_runtime_for_binary() {
   I386_RUNTIME_REPAIR_CHANGED=false
 
   for round in 1 2 3; do
-    ldd_output="$(ldd "${binary}" 2>&1 || true)"
+    if ! capture_ldd_output "${binary}" ldd_output; then
+      printf '%s\n' "${ldd_output}"
+      return 1
+    fi
     printf '%s\n' "${ldd_output}"
     mapfile -t missing_sonames < <(awk '/=> not found/ {print $1}' <<<"${ldd_output}" | sort -u)
     if [ "${#missing_sonames[@]}" -eq 0 ]; then
@@ -535,7 +563,10 @@ repair_missing_i386_runtime_for_binary() {
     I386_RUNTIME_REPAIR_CHANGED=true
   done
 
-  ldd_output="$(ldd "${binary}" 2>&1 || true)"
+  if ! capture_ldd_output "${binary}" ldd_output; then
+    printf '%s\n' "${ldd_output}"
+    return 1
+  fi
   printf '%s\n' "${ldd_output}"
   if grep -q '=> not found' <<<"${ldd_output}"; then
     I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
@@ -669,7 +700,7 @@ ensure_build_disk_space() {
 
   echo "::warning::Disk space is below the preferred threshold; trimming expendable caches."
   ccache --max-size=2G || true
-  ccache --cleanup || true
+  timeout -k 10s 120s ccache --cleanup || true
   rm -f "${WORKSPACE}/.chromium-source-cache"/chromium-*.tar.xz || true
   timeout -k 10s 60s sudo apt-get clean || true
 
@@ -1051,6 +1082,7 @@ validate_i686_runtime_bundle() {
   local root="${1:?Runtime bundle root is required}"
   local -a required=(
     chrome
+    chrome-wrapper
     chrome_crashpad_handler
     chrome_management_service
     chrome_sandbox
@@ -1120,7 +1152,8 @@ package_chromium_i686() {
   local manifest="${WORKSPACE}/chromium-${version}-linux-i686-manifest.txt"
   local runtime_list="${WORKSPACE}/chromium-${version}-linux-i686-runtime-files.txt"
 
-  if ! python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py"       --source-root "${CHROMIUM_SRC}" --out-dir "${OUT_DIR}" --output-list "${runtime_list}"; then
+  if ! python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py"       --source-root "${CHROMIUM_SRC}" --out-dir "${OUT_DIR}" --output-list "${runtime_list}" \
+      --render-wrapper; then
     echo "::error::Chromium Linux runtime definition/output closure requires maintenance."
     return 1
   fi

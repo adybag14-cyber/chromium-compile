@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 
 REQUIRED_RUNTIME = {
     "chrome",
+    "chrome-wrapper",
     "chrome_crashpad_handler",
     "chrome_management_service",
     "chrome_sandbox",
@@ -38,6 +39,8 @@ def _safe_rel(value: str) -> str:
 def installer_runtime_candidates(source_root: Path) -> set[str]:
     build_gn = source_root / "chrome" / "installer" / "linux" / "BUILD.gn"
     text = build_gn.read_text(encoding="utf-8")
+    if '"common/wrapper"' not in text:
+        raise ValueError("Chromium Linux installer no longer declares common/wrapper; review standalone launcher packaging")
     start = text.find("packaging_files_executables = [")
     end = text.find('action_foreach("calculate_deb_dependencies")')
     if start < 0 or end <= start:
@@ -60,6 +63,20 @@ def installer_runtime_candidates(source_root: Path) -> set[str]:
             + ", ".join(sorted(missing_definition))
         )
     return found
+
+
+def render_standalone_wrapper(out_dir: Path) -> Path:
+    template = out_dir / "installer" / "common" / "wrapper"
+    if not template.is_file():
+        raise ValueError(f"Chromium installer wrapper output is missing: {template}")
+    text = template.read_text(encoding="utf-8")
+    if "@@PROGNAME" not in text or "@@channel" not in text:
+        raise ValueError("Chromium Linux wrapper placeholders changed; review standalone launcher rendering")
+    rendered = text.replace("@@PROGNAME", "chrome").replace("@@channel", "")
+    target = out_dir / "chrome-wrapper"
+    target.write_text(rendered, encoding="utf-8", newline="\n")
+    target.chmod(0o755)
+    return target
 
 
 def collect_runtime(source_root: Path, out_dir: Path) -> list[str]:
@@ -97,6 +114,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--output-list", type=Path)
     parser.add_argument("--validate-definition", action="store_true")
+    parser.add_argument("--render-wrapper", action="store_true")
     args = parser.parse_args()
     candidates = installer_runtime_candidates(args.source_root)
     if args.validate_definition:
@@ -104,6 +122,8 @@ def main() -> int:
         return 0
     if args.out_dir is None or args.output_list is None:
         parser.error("--out-dir and --output-list are required unless --validate-definition is used")
+    if args.render_wrapper:
+        render_standalone_wrapper(args.out_dir)
     files = collect_runtime(args.source_root, args.out_dir)
     args.output_list.write_text("\n".join(files) + "\n", encoding="utf-8")
     print(f"Collected {len(files)} Chromium Linux runtime paths.")
