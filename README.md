@@ -34,7 +34,7 @@ For every newly observed Linux stable version, the automation aims to produce on
 2. an active compatibility preflight or staged build; or
 3. an open maintenance issue describing the upstream breakage.
 
-Only one automatic version is processed at a time. A failed version is not repeatedly dispatched, but later stable versions still receive their own compatibility attempt.
+Only one automatic version is processed at a time. A failed version is not repeatedly dispatched, but later stable versions still receive their own compatibility attempt. Completed failed/cancelled preflight or build runs are themselves quarantine records; maintenance issues mirror that state for humans but are not the only loop-prevention mechanism.
 
 This process cannot guarantee that every future source release remains portable to i686 without additional work. It guarantees detection, an attempted port, validation, and visible failure reporting.
 
@@ -253,6 +253,7 @@ This is an unofficial downstream port:
 
 The staged builder now treats the GitHub-hosted runner as an untrusted, replaceable execution environment rather than assuming that its image remains stable.
 
+- Runner platform detection is isolated from workflow variables: `/etc/os-release` is sourced only inside a subshell, and Chromium inputs use collision-resistant names so generic distro keys such as `VERSION` cannot overwrite the requested Chromium version.
 - Required i386 host libraries are expressed as SONAMEs and resolved against the active Ubuntu release instead of assuming one LTS package naming scheme.
 - Generated ELF32 **executables** are discovered dynamically; ELF32 shared target objects are excluded. Missing host libraries are repaired in bounded cycles only when the host actually changes.
 - Compiler failures are classified as `runtime_environment`, `infrastructure`, or `deterministic_build`. Deterministic compiler/source failures do not consume fresh-runner retries.
@@ -263,4 +264,5 @@ The staged builder now treats the GitHub-hosted runner as an untrusted, replacea
 - Missing generated-tool SONAMEs use a controlled resolver: known mappings are preferences only, release-local package candidates are verified, and bounded Ubuntu i386 `apt-file` metadata is a last-resort fallback. An unavailable old mapping automatically falls through to discovery on a newer LTS.
 - First-party GitHub Actions are upgraded and pinned to immutable commit SHAs.
 - Disk-space guards trim expendable caches before compilation/checkpoint creation and fail before a near-full runner can destroy resumable state.
+- Failed/cancelled preflight/build run history is an independent watcher quarantine source. A failed preflight also attempts to upsert `[i686-port] Chromium <version> requires maintenance` in the same workflow run, eliminating reliance on a secondary `workflow_run` event.
 - Every compiler stage writes a compact GitHub job summary with progress, checkpoint size, failure classification, free disk and ccache statistics.

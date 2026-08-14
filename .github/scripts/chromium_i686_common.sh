@@ -150,15 +150,30 @@ bounded_apt_get_simulate() {
 }
 
 detect_runner_platform() {
-  if [ ! -r /etc/os-release ]; then
-    echo "::error::Cannot identify Linux runner: /etc/os-release is unavailable."
+  local os_release_file="${CHROMIUM_I686_OS_RELEASE_FILE:-/etc/os-release}"
+  if [ ! -r "${os_release_file}" ]; then
+    echo "::error::Cannot identify Linux runner: ${os_release_file} is unavailable."
     return 1
   fi
-  local ID="" VERSION_ID=""
-  # shellcheck disable=SC1091
-  source /etc/os-release
-  RUNNER_DISTRO_ID="${ID:-unknown}"
-  RUNNER_DISTRO_VERSION_ID="${VERSION_ID:-unknown}"
+
+  local platform_line
+  # os-release deliberately uses generic names such as VERSION and ID. Source it
+  # only in a subshell so platform probing can never overwrite caller/workflow state.
+  if ! platform_line="$(
+    (
+      set +u
+      # shellcheck disable=SC1090
+      source "${os_release_file}"
+      printf '%s\t%s\n' "${ID:-unknown}" "${VERSION_ID:-unknown}"
+    )
+  )"; then
+    echo "::error::Failed to parse runner platform metadata from ${os_release_file}."
+    return 1
+  fi
+  IFS=$'\t' read -r RUNNER_DISTRO_ID RUNNER_DISTRO_VERSION_ID <<<"${platform_line}"
+  RUNNER_DISTRO_ID="${RUNNER_DISTRO_ID:-unknown}"
+  RUNNER_DISTRO_VERSION_ID="${RUNNER_DISTRO_VERSION_ID:-unknown}"
+
   I386_MULTIARCH="$(dpkg-architecture -ai386 -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
   I386_MULTIARCH="${I386_MULTIARCH:-i386-linux-gnu}"
   echo "Runner platform: ${RUNNER_DISTRO_ID} ${RUNNER_DISTRO_VERSION_ID}; i386 multiarch tuple: ${I386_MULTIARCH}"

@@ -11,6 +11,29 @@ fail() {
   exit 1
 }
 
+# Platform detection must never leak generic os-release variables into its caller.
+# This reproduces the regression that turned Chromium 151.0.7922.108 into
+# "22.04.5 LTS (Jammy Jellyfish)" during source URL construction.
+OS_RELEASE_FIXTURE="${RUNNER_TEMP}/os-release"
+cat > "${OS_RELEASE_FIXTURE}" <<'EOF'
+ID=ubuntu
+VERSION_ID="99.04"
+VERSION="99.04 LTS (Future Fixture)"
+EOF
+VERSION="151.0.7922.108"
+ID="caller-id"
+VERSION_ID="caller-version-id"
+CHROMIUM_I686_OS_RELEASE_FILE="${OS_RELEASE_FIXTURE}"
+dpkg-architecture() { printf '%s\n' i386-linux-gnu; }
+detect_runner_platform >/dev/null
+[ "${VERSION}" = "151.0.7922.108" ] || fail "platform detection clobbered caller VERSION"
+[ "${ID}" = "caller-id" ] || fail "platform detection clobbered caller ID"
+[ "${VERSION_ID}" = "caller-version-id" ] || fail "platform detection clobbered caller VERSION_ID"
+[ "${RUNNER_DISTRO_ID}" = ubuntu ] || fail "platform detection did not read distro ID"
+[ "${RUNNER_DISTRO_VERSION_ID}" = 99.04 ] || fail "platform detection did not read distro version"
+unset CHROMIUM_I686_OS_RELEASE_FILE
+unset -f dpkg-architecture
+
 # Avoid network access. Each test controls apt-file/apt-cache behavior explicitly.
 ensure_apt_file_i386_metadata() { return 0; }
 

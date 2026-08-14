@@ -17,6 +17,7 @@ from typing import Iterable, Sequence
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
 ACTIVE_RUN_STATES = {"queued", "in_progress", "requested", "waiting", "pending"}
+QUARANTINE_RUN_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}
 DEFAULT_API = (
     "https://versionhistory.googleapis.com/v1/"
     "chrome/platforms/linux/channels/stable/versions"
@@ -184,6 +185,50 @@ def list_active_versions(repository: str) -> set[str]:
     return found
 
 
+def list_quarantined_run_versions(repository: str) -> set[str]:
+    """Return versions with a completed failed/cancelled port run.
+
+    Run history is an independent safety record: even if issue reporting fails,
+    the stable watcher must not redispatch the same broken version automatically.
+    A manual --force-version retry intentionally bypasses this quarantine.
+    """
+    payload = gh_json(
+        [
+            "api",
+            f"repos/{repository}/actions/runs?per_page=100",
+            "--paginate",
+            "--slurp",
+        ]
+    )
+    pages = payload if isinstance(payload, list) else [payload]
+    runs: list[object] = []
+    for page in pages:
+        if isinstance(page, dict):
+            page_runs = page.get("workflow_runs", [])
+            if isinstance(page_runs, list):
+                runs.extend(page_runs)
+
+    found: set[str] = set()
+    pattern = re.compile(r"Chromium i686(?: preflight)? (\d+\.\d+\.\d+\.\d+)")
+    allowed_workflow_paths = {
+        ".github/workflows/chromium-i686-preflight.yml",
+        ".github/workflows/chromium-i686.yml",
+    }
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        if run.get("status") != "completed":
+            continue
+        if str(run.get("conclusion", "")) not in QUARANTINE_RUN_CONCLUSIONS:
+            continue
+        if str(run.get("path", "")) not in allowed_workflow_paths:
+            continue
+        match = pattern.search(str(run.get("display_title", "")))
+        if match:
+            found.add(match.group(1))
+    return found
+
+
 @dataclass(frozen=True)
 class PortState:
     known: set[str]
@@ -267,6 +312,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     minimum, known = load_baseline(args.baseline)
     state = PortState(known=known, released=set(), blocked=set(), active=set())
+    issue_blocked: set[str] = set()
+    run_quarantined: set[str] = set()
 
     if args.force_version:
         version_key(args.force_version)
@@ -274,10 +321,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidates = [args.force_version]
     else:
         versions = fetch_stable_versions(args.api_url, minimum)
+        issue_blocked = list_blocked_versions(args.repository)
+        run_quarantined = list_quarantined_run_versions(args.repository)
         state = PortState(
             known=known,
             released=list_release_versions(args.repository),
-            blocked=list_blocked_versions(args.repository),
+            blocked=issue_blocked | run_quarantined,
             active=list_active_versions(args.repository),
         )
         candidates = select_candidates(versions, minimum, state, args.max_new_builds)
@@ -291,7 +340,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"- Baseline: `{minimum}`",
         f"- Stable versions above baseline observed: `{len(versions)}`",
         f"- Active port runs: `{len(state.active)}`",
-        f"- Open maintenance issues: `{len(state.blocked)}`",
+        f"- Open maintenance issues: `{len(issue_blocked)}`",
+        f"- Failed/cancelled run quarantines: `{len(run_quarantined)}`",
+        f"- Total blocked versions: `{len(state.blocked)}`",
         f"- Candidate builds dispatched: `{len(candidates)}`",
     ]
     if candidates:

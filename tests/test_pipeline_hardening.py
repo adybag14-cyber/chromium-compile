@@ -92,6 +92,25 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("shared target objects are intentionally excluded", common)
         self.assertIn("(pie )?executable", common)
 
+    def test_platform_detection_isolated_from_workflow_variables(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_OS_RELEASE_FILE", common)
+        self.assertIn("only in a subshell so platform probing can never overwrite caller/workflow state", common)
+        self.assertIn("CHROMIUM_VERSION: ${{ inputs.version }}", preflight)
+        self.assertNotIn("\n          VERSION: ${{ inputs.version }}", preflight)
+
+    def test_preflight_failure_quarantine_has_independent_loop_prevention(self):
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        watcher = (ROOT / "scripts" / "chromium_stable_watcher.py").read_text(encoding="utf-8")
+        self.assertIn("issues: write", preflight)
+        self.assertIn("Quarantine failed preflight", preflight)
+        self.assertIn("gh issue list --repo \"${GITHUB_REPOSITORY}\" --state open --limit 1000", preflight)
+        self.assertIn("Failed workflow history is itself treated as quarantine state", preflight)
+        self.assertIn("list_quarantined_run_versions", watcher)
+        self.assertIn("issue_blocked | run_quarantined", watcher)
+        self.assertIn("QUARANTINE_RUN_CONCLUSIONS", watcher)
+
     def test_runtime_resolver_does_not_mutate_errexit(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         resolver = common[common.index("resolve_i386_package_for_soname()") : common.index("install_i386_runtime_libraries()") ]
@@ -145,6 +164,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("Ubuntu LTS compatibility drift", validation)
         self.assertIn("CHROMIUM_I686_RUNNER", build)
         self.assertIn("CHROMIUM_I686_RUNNER", preflight)
+        self.assertIn('VERSION="151.0.7922.108"', validation)
+        self.assertIn('test "${VERSION}" = "${version_sentinel}"', validation)
 
     def test_runtime_failure_uses_exact_failed_tool_before_scanning(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")

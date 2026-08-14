@@ -65,6 +65,47 @@ class StableWatcherTests(unittest.TestCase):
                 {"155.0.1.2"},
             )
 
+    def test_failed_run_history_quarantines_version_without_issue(self):
+        payload = [
+            {
+                "workflow_runs": [
+                    {
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "name": "Chromium i686 preflight 151.0.7922.108",
+                        "path": ".github/workflows/chromium-i686-preflight.yml",
+                        "display_title": "Chromium i686 preflight 151.0.7922.108",
+                    },
+                    {
+                        "status": "completed",
+                        "conclusion": "success",
+                        "name": "Chromium i686 preflight 151.0.7922.75",
+                        "path": ".github/workflows/chromium-i686-preflight.yml",
+                        "display_title": "Chromium i686 preflight 151.0.7922.75",
+                    },
+                    {
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "name": "Unrelated Workflow",
+                        "path": ".github/workflows/unrelated.yml",
+                        "display_title": "Chromium i686 preflight 199.0.0.1",
+                    },
+                    {
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "name": "Chromium i686 152.0.0.1 - stage 2 - attempt 0",
+                        "path": ".github/workflows/chromium-i686.yml",
+                        "display_title": "Chromium i686 152.0.0.1 - stage 2 - attempt 0",
+                    },
+                ]
+            }
+        ]
+        with mock.patch.object(watcher, "gh_json", return_value=payload):
+            self.assertEqual(
+                watcher.list_quarantined_run_versions("owner/repository"),
+                {"151.0.7922.108", "152.0.0.1"},
+            )
+
     def test_baseline_and_older_versions_are_ignored(self):
         empty = watcher.PortState(set(), set(), set(), set())
         self.assertEqual(

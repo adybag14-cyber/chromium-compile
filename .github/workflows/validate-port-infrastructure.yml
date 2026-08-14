@@ -183,7 +183,10 @@ jobs:
           source .github/scripts/chromium_i686_common.sh
           maximize_runner_disk_space
           install_system_dependencies
+          VERSION="151.0.7922.108"
+          version_sentinel="${VERSION}"
           install_i386_runtime_libraries
+          test "${VERSION}" = "${version_sentinel}"
           bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils
 
           cat > "${RUNNER_TEMP}/lts-i386-canary.c" <<'EOF'
