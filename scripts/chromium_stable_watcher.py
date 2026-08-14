@@ -15,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -417,14 +417,6 @@ def dispatch_preflight(repository: str, ref: str, version: str, dry_run: bool) -
     else:
         print(f"Dispatched Chromium {version} i686 compatibility preflight.")
 
-def append_summary(lines: Iterable[str]) -> None:
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", required=True)
@@ -487,7 +479,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary.append(f"- Versions: `{', '.join(candidates)}`")
     else:
         summary.append("- Result: no unprocessed stable release was found.")
-    append_summary(summary)
     print("\n".join(summary))
     return 0
 

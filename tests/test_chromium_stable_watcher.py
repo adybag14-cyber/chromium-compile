@@ -278,7 +278,7 @@ class StableWatcherTests(unittest.TestCase):
 
 
     def test_force_version_does_not_bypass_active_port_ownership(self):
-        with mock.patch.object(watcher, "list_port_run_state", return_value=({"154.0.0.1"}, set())),              mock.patch.object(watcher, "dispatch_preflight") as dispatch_call,              mock.patch.object(watcher, "append_summary"):
+        with mock.patch.object(watcher, "list_port_run_state", return_value=({"154.0.0.1"}, set())),              mock.patch.object(watcher, "dispatch_preflight") as dispatch_call:
             rc = watcher.main([
                 "--repository", "owner/repo",
                 "--force-version", "155.0.0.1",
