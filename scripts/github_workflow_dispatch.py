@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
+RUN_LOOKUP_LIMIT = int(os.environ.get("CHROMIUM_I686_DISPATCH_LOOKUP_LIMIT", "1000"))
 
 
 class DispatchError(RuntimeError):
@@ -47,7 +49,7 @@ def list_recent_runs(repository: str, workflow: str, *, attempts: int = 3) -> li
                     "--workflow",
                     workflow,
                     "--limit",
-                    "100",
+                    str(RUN_LOOKUP_LIMIT),
                     "--json",
                     "databaseId,displayTitle,status,conclusion,createdAt",
                 ]
@@ -64,19 +66,28 @@ def list_recent_runs(repository: str, workflow: str, *, attempts: int = 3) -> li
     raise last
 
 
+def _exact_runs_or_fail_closed(
+    repository: str, workflow: str, expected_title: str
+) -> list[dict[str, object]]:
+    runs = list_recent_runs(repository, workflow)
+    matches = [run for run in runs if str(run.get("displayTitle", "")) == expected_title]
+    if not matches and len(runs) >= RUN_LOOKUP_LIMIT:
+        raise DispatchError(
+            f"Workflow run lookup saturated at {RUN_LOOKUP_LIMIT} entries for {workflow}; "
+            f"refusing to assume {expected_title!r} is absent"
+        )
+    return matches
+
+
 def exact_active_exists(repository: str, workflow: str, expected_title: str) -> bool:
     return any(
-        str(run.get("displayTitle", "")) == expected_title
-        and str(run.get("status", "")) in ACTIVE
-        for run in list_recent_runs(repository, workflow)
+        str(run.get("status", "")) in ACTIVE
+        for run in _exact_runs_or_fail_closed(repository, workflow, expected_title)
     )
 
 
 def exact_any_exists(repository: str, workflow: str, expected_title: str) -> bool:
-    return any(
-        str(run.get("displayTitle", "")) == expected_title
-        for run in list_recent_runs(repository, workflow)
-    )
+    return bool(_exact_runs_or_fail_closed(repository, workflow, expected_title))
 
 
 def exact_recent_exists(
@@ -86,9 +97,7 @@ def exact_recent_exists(
     not_before: datetime,
 ) -> bool:
     threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=30)
-    for run in list_recent_runs(repository, workflow):
-        if str(run.get("displayTitle", "")) != expected_title:
-            continue
+    for run in _exact_runs_or_fail_closed(repository, workflow, expected_title):
         raw = str(run.get("createdAt", ""))
         try:
             created = datetime.fromisoformat(raw.replace("Z", "+00:00"))

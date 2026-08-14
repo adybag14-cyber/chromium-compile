@@ -142,6 +142,14 @@ class StableWatcherTests(unittest.TestCase):
             with self.assertRaises(watcher.WatcherError):
                 watcher.list_rest_items("owner/repo", "releases", max_pages=2)
 
+    def test_draft_release_does_not_mark_version_released(self):
+        releases = [
+            {"tag_name": "chromium-151.0.0.1-linux-i686", "draft": True},
+            {"tag_name": "chromium-152.0.0.1-linux-i686", "draft": False},
+        ]
+        with mock.patch.object(watcher, "list_rest_items", return_value=releases):
+            self.assertEqual(watcher.list_release_versions("owner/repo"), {"152.0.0.1"})
+
 
     def test_force_version_does_not_bypass_active_port_ownership(self):
         with mock.patch.object(watcher, "list_port_run_state", return_value=({"154.0.0.1"}, set())),              mock.patch.object(watcher, "dispatch_preflight") as dispatch_call,              mock.patch.object(watcher, "append_summary"):

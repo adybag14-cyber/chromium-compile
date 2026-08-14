@@ -9,6 +9,9 @@ import time
 from typing import Sequence
 
 
+ISSUE_LIST_LIMIT = 1000
+
+
 class IssueError(RuntimeError):
     """Raised when maintenance issue state cannot be established safely."""
 
@@ -44,7 +47,7 @@ def find_issue(repository: str, title: str, *, attempts: int = 3) -> int | None:
                     "--state",
                     "open",
                     "--limit",
-                    "1000",
+                    str(ISSUE_LIST_LIMIT),
                     "--json",
                     "number,title",
                 ]
@@ -52,6 +55,11 @@ def find_issue(repository: str, title: str, *, attempts: int = 3) -> int | None:
             payload = json.loads(result.stdout or "[]")
             if not isinstance(payload, list):
                 raise IssueError("gh issue list returned non-list JSON")
+            if len(payload) >= ISSUE_LIST_LIMIT:
+                raise IssueError(
+                    f"Open issue lookup saturated at {ISSUE_LIST_LIMIT} entries; "
+                    "refusing to guess whether an exact maintenance issue exists beyond the horizon"
+                )
             matches = [
                 int(item["number"])
                 for item in payload

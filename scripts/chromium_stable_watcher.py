@@ -242,6 +242,8 @@ def list_release_versions(repository: str) -> set[str]:
     found: set[str] = set()
     pattern = re.compile(r"^chromium-(\d+\.\d+\.\d+\.\d+)-linux-i686$")
     for release in releases:
+        if bool(release.get("draft", False)):
+            continue
         match = pattern.fullmatch(str(release.get("tag_name", "")))
         if match:
             found.add(match.group(1))

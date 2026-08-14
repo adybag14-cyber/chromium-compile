@@ -27,6 +27,16 @@ class MaintenanceIssueTests(unittest.TestCase):
         ):
             self.assertEqual(issues.find_issue("owner/repo", "target"), 1)
 
+    def test_issue_lookup_horizon_saturation_fails_closed(self):
+        payload = json.dumps([{"number": i + 1, "title": f"issue-{i}"} for i in range(issues.ISSUE_LIST_LIMIT)])
+        with mock.patch.object(
+            issues,
+            "run_gh",
+            return_value=subprocess.CompletedProcess(["gh"], 0, payload, ""),
+        ), mock.patch.object(issues.time, "sleep"):
+            with self.assertRaises(issues.IssueError):
+                issues.find_issue("owner/repo", "target", attempts=1)
+
     def test_duplicate_exact_titles_fail_closed(self):
         payload = json.dumps([
             {"number": 1, "title": "target"},

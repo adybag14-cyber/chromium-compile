@@ -15,6 +15,27 @@ SPEC.loader.exec_module(dispatch)
 
 
 class WorkflowDispatchTests(unittest.TestCase):
+    def test_run_lookup_uses_long_horizon(self):
+        payload = "[]"
+        with mock.patch.object(
+            dispatch,
+            "run_gh",
+            return_value=subprocess.CompletedProcess(["gh"], 0, payload, ""),
+        ) as run_gh:
+            dispatch.list_recent_runs("owner/repo", "workflow.yml", attempts=1)
+        args = run_gh.call_args.args[0]
+        self.assertIn(str(dispatch.RUN_LOOKUP_LIMIT), args)
+        self.assertGreaterEqual(dispatch.RUN_LOOKUP_LIMIT, 1000)
+
+    def test_saturated_run_lookup_without_exact_title_fails_closed(self):
+        runs = [
+            {"displayTitle": f"other-{i}", "status": "completed", "createdAt": "2026-01-01T00:00:00Z"}
+            for i in range(dispatch.RUN_LOOKUP_LIMIT)
+        ]
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
+            with self.assertRaises(dispatch.DispatchError):
+                dispatch.exact_active_exists("owner/repo", "workflow.yml", "Expected title")
+
     def test_active_exact_run_prevents_duplicate_dispatch(self):
         with mock.patch.object(dispatch, "exact_active_exists", return_value=True),              mock.patch.object(dispatch, "run_gh") as run_gh:
             result = dispatch.dispatch_once(
