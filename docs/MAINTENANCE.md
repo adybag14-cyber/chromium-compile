@@ -40,7 +40,7 @@ CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION=<exact-version>
 6. A successful preflight dispatches the resumable staged build.
 7. The final artifact is checksum-verified and inspected with `file` and `readelf`.
 8. A separate trusted workflow creates the unofficial GitHub Release.
-9. Failures create or update a maintenance issue and stop automatic redispatch loops.
+9. Failed/cancelled preflight/build run history immediately quarantines that exact version from automatic redispatch. Preflight also creates or updates a maintenance issue in the same run; the issue is a human-visible mirror, not the sole safety record.
 
 ## Porting a broken major release
 
@@ -70,7 +70,7 @@ Baseline host requirements live in `I386_BASELINE_SONAMES`; package names are re
 
 ### LTS migration policy
 
-`CHROMIUM_I686_RUNNER` controls the runner used by compatibility preflight and staged compilation. Leave it on the currently proven LTS until the validation matrix is green on the replacement. `ubuntu-latest` is intentionally included as an early-warning sentinel: when GitHub moves it to a newer LTS, the scheduled matrix starts testing that image automatically. A scheduled matrix failure opens or updates `[i686-port] Ubuntu LTS compatibility drift`, so runner drift becomes an explicit maintenance item rather than a silently red workflow.
+`CHROMIUM_I686_RUNNER` controls the runner used by compatibility preflight and staged compilation. Leave it on the currently proven LTS until the validation matrix is green on the replacement. `ubuntu-latest` is intentionally included as an early-warning sentinel: when GitHub moves it to a newer LTS, the scheduled matrix starts testing that image automatically. A scheduled matrix failure opens or updates `[i686-port] Ubuntu LTS compatibility drift`, so runner drift becomes an explicit maintenance item rather than a silently red workflow. Platform metadata is parsed in an isolated subshell; never source `/etc/os-release` into workflow state because its generic variables (`VERSION`, `ID`, and others) can collide with build inputs.
 
 No dependency-discovery or large cleanup operation is allowed to consume a compiler stage. SDK-tree deletion, source/output replacement, and swap creation are time-bounded; cleanup timeouts are either best-effort with later disk guards or classified as runner failures. APT operations have a global timeout, `apt-file` metadata refresh has a shorter discovery timeout, individual content searches are separately bounded, and discovery exhaustion is treated as deterministic maintenance work rather than repeated on fresh runners.
 
