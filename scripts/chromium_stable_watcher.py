@@ -441,11 +441,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         versions = [args.force_version]
         active, _run_quarantine = list_port_run_state(args.repository, args.ref)
         released, broken_releases = list_release_health(args.repository)
-        if broken_releases:
-            formatted = ", ".join(sorted(broken_releases, key=version_key))
+        unattended_broken = broken_releases - active
+        if unattended_broken:
+            formatted = ", ".join(sorted(unattended_broken, key=version_key))
             raise WatcherError(
                 "Published/draft Chromium i686 release state is incomplete or unverifiable for: "
                 f"{formatted}. Refusing to force a build around a broken immutable publication record."
+            )
+        if broken_releases & active:
+            print(
+                "Ignoring transient incomplete release state for active port owner(s): "
+                + ", ".join(sorted(broken_releases & active, key=version_key))
             )
         state = PortState(known=known, released=released, blocked=set(), active=active)
         if active:
@@ -468,11 +474,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         issue_blocked = list_blocked_versions(args.repository)
         active, run_quarantined = list_port_run_state(args.repository, args.ref)
         released, broken_releases = list_release_health(args.repository)
-        if broken_releases:
-            formatted = ", ".join(sorted(broken_releases, key=version_key))
+        unattended_broken = broken_releases - active
+        if unattended_broken:
+            formatted = ", ".join(sorted(unattended_broken, key=version_key))
             raise WatcherError(
                 "Published/draft Chromium i686 release state is incomplete or unverifiable for: "
                 f"{formatted}. Refusing to rebuild around a broken immutable publication record."
+            )
+        if broken_releases & active:
+            print(
+                "Ignoring transient incomplete release state for active port owner(s): "
+                + ", ".join(sorted(broken_releases & active, key=version_key))
             )
         state = PortState(
             known=known,

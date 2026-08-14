@@ -277,6 +277,39 @@ class StableWatcherTests(unittest.TestCase):
         self.assertEqual(broken, {"155.0.0.1", "156.0.0.1"})
 
 
+    def test_active_publisher_draft_is_transient_not_broken(self):
+        version = "155.0.1.2"
+        baseline = str(pathlib.Path(__file__).parents[1] / "support" / "baseline.json")
+        with mock.patch.object(watcher, "fetch_stable_versions", return_value=[version]), \
+             mock.patch.object(watcher, "list_blocked_versions", return_value=set()), \
+             mock.patch.object(watcher, "list_port_run_state", return_value=({version}, set())), \
+             mock.patch.object(watcher, "list_release_health", return_value=(set(), {version})), \
+             mock.patch.object(watcher, "dispatch_preflight") as dispatch_call:
+            rc = watcher.main([
+                "--repository", "owner/repo",
+                "--ref", "main",
+                "--dry-run",
+                "--baseline", baseline,
+            ])
+        self.assertEqual(rc, 0)
+        dispatch_call.assert_not_called()
+
+    def test_broken_other_release_still_fails_while_another_version_is_active(self):
+        active_version = "155.0.1.2"
+        broken_version = "156.0.1.2"
+        baseline = str(pathlib.Path(__file__).parents[1] / "support" / "baseline.json")
+        with mock.patch.object(watcher, "fetch_stable_versions", return_value=[active_version, broken_version]), \
+             mock.patch.object(watcher, "list_blocked_versions", return_value=set()), \
+             mock.patch.object(watcher, "list_port_run_state", return_value=({active_version}, set())), \
+             mock.patch.object(watcher, "list_release_health", return_value=(set(), {broken_version})):
+            with self.assertRaises(watcher.WatcherError):
+                watcher.main([
+                    "--repository", "owner/repo",
+                    "--ref", "main",
+                    "--dry-run",
+                    "--baseline", baseline,
+                ])
+
     def test_force_version_does_not_bypass_active_port_ownership(self):
         with mock.patch.object(watcher, "list_port_run_state", return_value=({"154.0.0.1"}, set())), \
              mock.patch.object(watcher, "list_release_health", return_value=(set(), set())), \
