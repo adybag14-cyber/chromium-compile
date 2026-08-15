@@ -161,6 +161,8 @@ CHROMIUM_RUNNER_RETRIES=2
 CHROMIUM_I686_RUNNER=ubuntu-22.04
 ```
 
+`CHROMIUM_I686_RUNNER` is resolved by a fast `ubuntu-latest` guard before any heavyweight job is scheduled. Production accepts only explicit LTS labels continuously exercised by the compatibility matrix: `ubuntu-22.04` or `ubuntu-24.04`. `ubuntu-latest` is matrix-only so a GitHub image migration cannot move production without a reviewed change. Add a new runner label to the matrix and resolver in the same reviewed change; an unknown label fails immediately and opens maintenance state instead of leaving the global port queue waiting for a nonexistent runner.
+
 The watcher checks every six hours when enabled.
 
 ## Manual compatibility test

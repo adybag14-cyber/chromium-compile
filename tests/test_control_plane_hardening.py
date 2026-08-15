@@ -100,7 +100,7 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("ref: ${{ github.event.repository.default_branch }}", publish)
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", bootstrap)
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", watcher)
-        self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", preflight)
+        self.assertIn("github.ref_name == github.event.repository.default_branch && needs.resolve_runner.outputs.valid == 'true'", preflight)
         for workflow in (bootstrap, watcher, preflight):
             self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
         self.assertIn("needs.detect.result == 'failure' && github.ref_name == github.event.repository.default_branch", watcher)

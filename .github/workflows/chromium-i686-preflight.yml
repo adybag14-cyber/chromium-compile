@@ -24,9 +24,84 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve_runner:
+    name: Resolve tested i686 runner
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.resolve.outputs.label }}
+      valid: ${{ steps.resolve.outputs.valid }}
+    steps:
+      - name: Validate configured hosted runner label
+        id: resolve
+        env:
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${REQUESTED_RUNNER}" in
+            ubuntu-22.04|ubuntu-24.04)
+              echo "label=${REQUESTED_RUNNER}" >> "${GITHUB_OUTPUT}"
+              echo "valid=true" >> "${GITHUB_OUTPUT}"
+              echo "Validated Chromium i686 runner label: ${REQUESTED_RUNNER}"
+              ;;
+            *)
+              echo "label=" >> "${GITHUB_OUTPUT}"
+              echo "valid=false" >> "${GITHUB_OUTPUT}"
+              echo "::error::Unsupported CHROMIUM_I686_RUNNER '${REQUESTED_RUNNER}'. Allowed explicit production labels: ubuntu-22.04, ubuntu-24.04."
+              ;;
+          esac
+
+  report_runner_configuration:
+    name: Report invalid i686 runner configuration
+    needs: resolve_runner
+    if: ${{ always() && github.ref_name == github.event.repository.default_branch && (needs.resolve_runner.result != 'success' || needs.resolve_runner.outputs.valid != 'true') }}
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Record runner configuration failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ inputs.version }}
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${CHROMIUM_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
+          else
+            title="[i686-port] Chromium pipeline requires maintenance"
+          fi
+          body_file="${RUNNER_TEMP}/chromium-i686-runner-configuration.md"
+          cat > "${body_file}" <<EOF
+          Chromium i686 runner selection could not be validated before scheduling the heavyweight compatibility job.
+
+          - Requested runner: ${REQUESTED_RUNNER}
+          - Allowed explicit production labels: ubuntu-22.04, ubuntu-24.04
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Update CHROMIUM_I686_RUNNER only together with a green LTS compatibility-matrix change.
+          EOF
+          python3 scripts/github_maintenance_issue.py --repository "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body_file}" || true
+          exit 1
+
   preflight:
-    if: ${{ github.ref_name == github.event.repository.default_branch }}
-    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+    needs: resolve_runner
+    if: ${{ github.ref_name == github.event.repository.default_branch && needs.resolve_runner.outputs.valid == 'true' }}
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+    runs-on: ${{ needs.resolve_runner.outputs.label }}
     timeout-minutes: 120
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
