@@ -319,6 +319,10 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("install_i386_runtime_libraries", validation)
         self.assertIn("gh release download", validation)
         self.assertIn("remote_digest", validation)
+        self.assertIn("remote_checksum_digest", validation)
+        self.assertIn("listed_sha", validation)
+        release_drill = validation[validation.index("validate_real_release_runtime:"):validation.index("validate_full_source_preflight:")]
+        self.assertNotIn("sha256sum -c", release_drill)
         self.assertIn("smoke_test_i686_runtime_bundle", validation)
         self.assertIn("bash tests/test_release_runtime_smoke.sh", validation)
 

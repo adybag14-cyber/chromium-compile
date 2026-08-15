@@ -329,13 +329,19 @@ jobs:
           mkdir -p "${proof_dir}"
           bounded_gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" --pattern "${package_name}" --dir "${proof_dir}"
           bounded_gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" --pattern "${checksum_name}" --dir "${proof_dir}"
-          (
-            cd "${proof_dir}"
-            sha256sum -c "${checksum_name}"
-          )
+          test "$(awk 'NF {count++} END {print count + 0}' "${proof_dir}/${checksum_name}")" -eq 1
+          listed_sha="$(awk 'NR == 1 {print $1}' "${proof_dir}/${checksum_name}")"
+          [[ "${listed_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+            echo "::error::Published checksum asset does not begin with a SHA-256 digest."
+            exit 1
+          }
           package_sha="$(sha256sum "${proof_dir}/${package_name}" | awk '{print $1}')"
+          checksum_asset_sha="$(sha256sum "${proof_dir}/${checksum_name}" | awk '{print $1}')"
+          test "${package_sha}" = "${listed_sha,,}"
           remote_digest="$(jq -er --arg name "${package_name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}")"
+          remote_checksum_digest="$(jq -er --arg name "${checksum_name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}")"
           test "${remote_digest}" = "sha256:${package_sha}"
+          test "${remote_checksum_digest}" = "sha256:${checksum_asset_sha}"
           python3 scripts/validate_release_archive.py "${proof_dir}/${package_name}"
 
           runtime_dir="${proof_dir}/runtime"
