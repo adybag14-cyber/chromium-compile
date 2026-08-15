@@ -194,6 +194,32 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('VERSION="151.0.7922.108"', validation)
         self.assertIn('test "${VERSION}" = "${version_sentinel}"', validation)
 
+    def test_production_runner_label_is_resolved_before_heavyweight_scheduling(self):
+        build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        allowed = "ubuntu-22.04|ubuntu-24.04"
+        for name, text, heavy_marker in (
+            ("build", build, "  build:\n"),
+            ("preflight", preflight, "  preflight:\n"),
+        ):
+            self.assertIn("  resolve_runner:\n", text, name)
+            self.assertIn(allowed, text, name)
+            self.assertIn("  report_runner_configuration:\n", text, name)
+            self.assertIn("needs: resolve_runner", text, name)
+            self.assertIn("runs-on: ${{ needs.resolve_runner.outputs.label }}", text, name)
+            heavy = text[text.index(heavy_marker):]
+            self.assertNotIn("runs-on: ${{ vars.CHROMIUM_I686_RUNNER", heavy, name)
+            reporter_start = text.index("  report_runner_configuration:\n")
+            reporter_end = text.index(heavy_marker, reporter_start)
+            reporter = text[reporter_start:reporter_end]
+            self.assertIn("issues: write", reporter, name)
+            self.assertIn("exit 1", reporter, name)
+        for label in ("ubuntu-22.04", "ubuntu-24.04", "ubuntu-latest"):
+            self.assertIn(label, validation)
+        self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", build)
+        self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", preflight)
+
     def test_runtime_failure_uses_exact_failed_tool_before_scanning(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn("repair_i386_runtime_from_build_log()", common)
