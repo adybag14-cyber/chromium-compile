@@ -668,6 +668,20 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("--render-wrapper", common)
 
 
+    def test_workflow_run_path_suffix_is_normalized_before_provenance_checks(self):
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        self.assertIn('workflow_path="${workflow_path%%@*}"', resume)
+        self.assertIn('workflow_path="${workflow_path%%@*}"', publish)
+        self.assertLess(
+            resume.index('workflow_path="${workflow_path%%@*}"'),
+            resume.index('test "${workflow_path}" = ".github/workflows/chromium-i686.yml"'),
+        )
+        self.assertLess(
+            publish.index('workflow_path="${workflow_path%%@*}"'),
+            publish.index('test "${workflow_path}" = ".github/workflows/chromium-i686.yml"'),
+        )
+
     def test_publisher_is_transactional_and_runtime_smokes_target_i386(self):
         publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
         validate_job = publish[publish.index("  validate:"):publish.index("  smoke:")]

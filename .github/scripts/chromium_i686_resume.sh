@@ -273,6 +273,7 @@ validate_checkpoint_source_run() {
     echo "::error::Checkpoint run ${run_id} returned an invalid run_attempt: ${run_attempt}"
     return 1
   }
+  workflow_path="${workflow_path%%@*}"
   test "${event}" = "workflow_dispatch" || {
     echo "::error::Checkpoint run ${run_id} was triggered by ${event}, not workflow_dispatch."
     return 1

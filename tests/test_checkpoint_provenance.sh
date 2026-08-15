@@ -28,6 +28,12 @@ validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 
 [ "${CHECKPOINT_PRODUCER_STAGE}" = "2" ]
 [ "${CHECKPOINT_PRODUCER_RUN_ATTEMPT}" = "1" ]
 
+# GitHub may suffix workflow paths with @ref; normalize only the suffix and retain all other provenance checks.
+RUN_JSON='{"path":".github/workflows/chromium-i686.yml@refs/heads/main","head_repository":{"full_name":"owner/repo"},"head_branch":"main","head_sha":"1111111111111111111111111111111111111111","event":"workflow_dispatch","run_attempt":1,"display_title":"Chromium i686 151.0.7922.108 - stage 2 - attempt 0"}'
+validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null
+[ "${CHECKPOINT_PROVENANCE_STATUS}" = usable ]
+RUN_JSON='{"path":".github/workflows/chromium-i686.yml","head_repository":{"full_name":"owner/repo"},"head_branch":"main","head_sha":"1111111111111111111111111111111111111111","event":"workflow_dispatch","run_attempt":1,"display_title":"Chromium i686 151.0.7922.108 - stage 2 - attempt 0"}'
+
 # Oversized/malformed artifact metadata is rejected before download.
 ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":9663676416}]}'
 set +e
