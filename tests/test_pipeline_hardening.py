@@ -234,15 +234,19 @@ class PipelineHardeningTests(unittest.TestCase):
         resolver = validation[resolver_start:validate_start]
         self.assertIn("ubuntu-22.04|ubuntu-24.04", resolver)
         self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", resolver)
+        release_start = validation.index("  validate_real_release_runtime:\n")
         full_start = validation.index("  validate_full_source_preflight:\n")
         i386_start = validation.index("  validate_i386_runtime:\n")
         lts_start = validation.index("  validate_lts_compatibility:\n")
+        release_job = validation[release_start:full_start]
         full_job = validation[full_start:i386_start]
         i386_job = validation[i386_start:lts_start]
-        for job in (full_job, i386_job):
+        for job in (release_job, full_job, i386_job):
             self.assertIn("needs: resolve_production_runner", job)
             self.assertIn("runs-on: ${{ needs.resolve_production_runner.outputs.label }}", job)
             self.assertNotIn("runs-on: ${{ vars.CHROMIUM_I686_RUNNER", job)
+        self.assertIn("needs.resolve_production_runner.result == 'success'", release_job)
+        self.assertNotIn("runs-on: ubuntu-22.04", validation)
         self.assertNotIn("runs-on: ${{ vars.CHROMIUM_I686_RUNNER", validation)
         self.assertIn("  report_runner_configuration:\n", validation)
         reporter = validation[validation.index("  report_runner_configuration:\n"):validation.index("  report_lts_drift:\n")]
