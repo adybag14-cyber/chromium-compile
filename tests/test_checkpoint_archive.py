@@ -142,6 +142,16 @@ class CheckpointArchiveTests(unittest.TestCase):
                 validator.validate_checkpoint(pathlib.Path("checkpoint.tar.zst"))
 
 
+
+    def test_cli_entrypoint_validates_archive_path(self):
+        fake = FakeProcess(tar_bytes([
+            regular("Release_x86/build.ninja"),
+            regular("Release_x86/args.gn"),
+        ]))
+        with mock.patch.object(validator.subprocess, "Popen", return_value=fake), \
+             mock.patch.object(sys, "argv", ["validate_checkpoint_archive.py", "checkpoint.tar.zst"]):
+            self.assertEqual(validator.main(), 0)
+
     def test_validator_invokes_zstd_without_shell(self):
         fake = FakeProcess(tar_bytes([
             regular("Release_x86/build.ninja"),

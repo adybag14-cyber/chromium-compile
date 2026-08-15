@@ -8,7 +8,7 @@ import os
 import posixpath
 import subprocess
 import tarfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 ROOT = "Release_x86"
 REQUIRED_REGULAR = {f"{ROOT}/build.ninja", f"{ROOT}/args.gn"}
