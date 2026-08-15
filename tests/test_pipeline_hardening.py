@@ -127,6 +127,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('bounded_rm_rf "${CHROMIUM_SRC}"', common)
         self.assertIn('bounded_rm_rf "${restore_root}"', resume)
         self.assertIn('bounded_rm_rf "${backup_out}"', resume)
+        self.assertIn("cleanup_stale_checkpoint_residue()", common)
+        self.assertIn("preserving rollback state instead of deleting it", common)
+        self.assertIn("bash tests/test_checkpoint_residue_cleanup.sh", (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8"))
         self.assertNotIn('bounded_rm_rf "${OUT_DIR}"', resume)
         self.assertNotIn("sudo rm -rf /usr/local/lib/android", common)
 

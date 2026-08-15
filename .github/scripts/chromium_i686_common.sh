@@ -770,9 +770,39 @@ available_disk_gb() {
   df -PB1G "${path}" | awk 'NR == 2 {print $4}'
 }
 
+cleanup_stale_checkpoint_residue() {
+  local out_parent="${CHROMIUM_SRC}/out"
+  [ -d "${out_parent}" ] || return 0
+
+  local active_output=false
+  if [ -e "${OUT_DIR}" ] || [ -L "${OUT_DIR}" ]; then
+    active_output=true
+  fi
+
+  local -a residues=()
+  shopt -s nullglob
+  residues+=("${out_parent}"/.checkpoint-restore-*)
+  residues+=("${out_parent}"/.Release_x86-before-restore-*)
+  shopt -u nullglob
+  [ "${#residues[@]}" -gt 0 ] || return 0
+
+  if [ "${active_output}" != true ]; then
+    echo "::warning::Checkpoint restore residue exists while the active output tree is missing; preserving rollback state instead of deleting it."
+    return 0
+  fi
+
+  local residue
+  for residue in "${residues[@]}"; do
+    echo "Removing stale checkpoint restore residue: ${residue}"
+    bounded_rm_rf "${residue}" \
+      || echo "::warning::Could not remove stale checkpoint residue ${residue}; the disk guard will account for the remaining bytes."
+  done
+}
+
 ensure_build_disk_space() {
   local minimum_gb="${1:-20}"
   local available
+  cleanup_stale_checkpoint_residue || true
   available="$(available_disk_gb "${WORKSPACE}")"
   echo "Available disk space: ${available} GiB; target minimum: ${minimum_gb} GiB."
   if [ "${available}" -ge "${minimum_gb}" ]; then
