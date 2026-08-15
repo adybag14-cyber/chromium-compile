@@ -14,6 +14,8 @@ CCACHE_DIR="${tmp}/ccache"
 mkdir -p "${CHROMIUM_SRC}"
 
 [ "$(classify_prepare_command_status 124 deterministic_build)" = infrastructure ]
+[ "$(classify_prepare_command_status 126 deterministic_build)" = infrastructure ]
+[ "$(classify_prepare_command_status 127 deterministic_build)" = infrastructure ]
 [ "$(classify_prepare_command_status 137 deterministic_build)" = infrastructure ]
 [ "$(classify_prepare_command_status 143 deterministic_build)" = infrastructure ]
 [ "$(classify_prepare_command_status 2 deterministic_build)" = deterministic_build ]

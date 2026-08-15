@@ -812,7 +812,7 @@ classify_prepare_command_status() {
   local status="${1:-1}"
   local fallback="${2:-infrastructure}"
   case "${status}" in
-    124|137|143) printf '%s\n' infrastructure ;;
+    124|126|127|137|143) printf '%s\n' infrastructure ;;
     *) printf '%s\n' "${fallback}" ;;
   esac
 }
@@ -1778,7 +1778,7 @@ CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=""
 
 classify_runtime_smoke_status() {
   case "${1:-1}" in
-    124|137|143) printf '%s\n' infrastructure ;;
+    124|126|127|137|143) printf '%s\n' infrastructure ;;
     *) printf '%s\n' deterministic_build ;;
   esac
 }
