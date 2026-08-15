@@ -27,6 +27,9 @@ CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS="${CHROMIUM_I686_RUNTIME_SMOKE_TIMEO
 CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB="${CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB:-8}"
 CHROMIUM_I686_MAX_RELEASE_MEMBERS="${CHROMIUM_I686_MAX_RELEASE_MEMBERS:-250000}"
 CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB="${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB:-2}"
+CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB="${CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB:-80}"
+CHROMIUM_I686_MAX_SOURCE_MEMBERS="${CHROMIUM_I686_MAX_SOURCE_MEMBERS:-2000000}"
+CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB="${CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB:-10}"
 CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB="${CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB:-40}"
 CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS="${CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS:-2000000}"
 CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB="${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB:-5}"
@@ -34,6 +37,7 @@ CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
 export DEPOT_TOOLS_UPDATE=0
 export CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS
 export CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB CHROMIUM_I686_MAX_RELEASE_MEMBERS
+export CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB CHROMIUM_I686_MAX_SOURCE_MEMBERS
 
 
 bounded_external() {
@@ -934,16 +938,101 @@ validate_extracted_chromium_version() {
   echo "Verified extracted Chromium version: ${actual}"
 }
 
-validate_chromium_source_tarball() {
-  local tarball="${1:?source tarball is required}"
-  local version="${2:?version is required}"
-  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
-      python3 "${WORKSPACE}/scripts/validate_chromium_source_archive.py" \
-        "${tarball}" --version "${version}"; then
-    echo "::error::Chromium ${version} source archive failed safe-path/structure validation: ${tarball}"
+CHROMIUM_SOURCE_FAILURE_CLASS=""
+
+source_archive_stats_are_usable() {
+  local stats_file="${1:?source archive stats path is required}"
+  local version="${2:?source version is required}"
+  local source_sha="${3:?source SHA-256 is required}"
+  [[ "${CHROMIUM_I686_MAX_SOURCE_MEMBERS}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB}" =~ ^[1-9][0-9]*$ ]] || return 1
+  SOURCE_MAX_MEMBERS="${CHROMIUM_I686_MAX_SOURCE_MEMBERS}" \
+  SOURCE_MAX_UNPACKED_GIB="${CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB}" \
+  python3 - "${stats_file}" "${version}" "${source_sha}" <<'PY' >/dev/null 2>&1
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+version = sys.argv[2]
+source_sha = sys.argv[3].lower()
+if not re.fullmatch(r"[0-9a-f]{64}", source_sha):
+    raise SystemExit(1)
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+member_count = payload.get("member_count")
+unpacked_bytes = payload.get("unpacked_bytes")
+max_members = int(os.environ["SOURCE_MAX_MEMBERS"])
+max_unpacked_bytes = int(os.environ["SOURCE_MAX_UNPACKED_GIB"]) * 1024**3
+if (
+    payload.get("version") != version
+    or str(payload.get("source_sha256", "")).lower() != source_sha
+    or not isinstance(member_count, int)
+    or member_count <= 0
+    or not isinstance(unpacked_bytes, int)
+    or unpacked_bytes < 0
+    or member_count > max_members
+    or unpacked_bytes > max_unpacked_bytes
+):
+    raise SystemExit(1)
+PY
+}
+
+ensure_source_archive_extract_space() {
+  local stats_file="${1:?source archive stats path is required}"
+  local target_parent="${2:?source extraction parent is required}"
+  [[ "${CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
+    echo "::error::CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB must be a non-negative integer."
+    return 1
+  }
+  local unpacked_bytes available_bytes reserve_bytes required_bytes required_gib
+  if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${stats_file}" 2>/dev/null)"; then
+    echo "::error::Source archive stats are missing or malformed: ${stats_file}"
+    return 1
+  fi
+  reserve_bytes=$((CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB * 1024 * 1024 * 1024))
+  required_bytes=$((unpacked_bytes + reserve_bytes))
+  if ! mkdir -p "${target_parent}"; then
+    echo "::error::Could not create Chromium source extraction target: ${target_parent}"
+    return 1
+  fi
+  available_bytes="$(df -PB1 "${target_parent}" | awk 'NR == 2 {print $4}')"
+  [[ "${available_bytes}" =~ ^[0-9]+$ ]] || {
+    echo "::error::Could not determine free disk bytes for Chromium source extraction."
+    return 1
+  }
+  required_gib=$(( (required_bytes + 1024 * 1024 * 1024 - 1) / (1024 * 1024 * 1024) ))
+  echo "Source extraction requires ${required_bytes} bytes including reserve (~${required_gib} GiB); ${available_bytes} bytes are available."
+  if [ "${available_bytes}" -lt "${required_bytes}" ]; then
+    echo "::error::Insufficient disk space for bounded Chromium source extraction."
     return 1
   fi
 }
+
+validate_chromium_source_tarball() {
+  local tarball="${1:?source tarball is required}"
+  local version="${2:?version is required}"
+  local source_sha="${3:?source SHA-256 is required}"
+  local stats_file="${4:?source archive stats path is required}"
+  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+      python3 "${WORKSPACE}/scripts/validate_chromium_source_archive.py" \
+        "${tarball}" --version "${version}" --source-sha256 "${source_sha}" \
+        --stats-file "${stats_file}"; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
+    echo "::error::Chromium ${version} source archive failed safe-path/structure/resource validation: ${tarball}"
+    return 1
+  fi
+  if ! source_archive_stats_are_usable "${stats_file}" "${version}" "${source_sha}"; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
+    echo "::error::Chromium source archive validator did not produce SHA-bound usable stats."
+    return 1
+  fi
+}
+
 
 validate_effective_https_host() {
   local url="${1:?effective URL is required}"
@@ -967,7 +1056,6 @@ if (
     )
 PY
 }
-
 validate_chromium_critical_source_identity() {
   local version="${1:?version is required}"
   local rel encoded decoded local_sha remote_sha effective_url
@@ -986,22 +1074,34 @@ validate_chromium_critical_source_identity() {
         --write-out '%{url_effective}' \
         "https://chromium.googlesource.com/chromium/src/+/refs/tags/${version}/${rel}?format=TEXT" \
         -o "${encoded}")"; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
       echo "::error::Could not fetch authoritative Chromium ${version} ${rel} for critical-source identity validation."
       return 1
     fi
     if ! validate_effective_https_host "${effective_url}" chromium.googlesource.com; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
       echo "::error::Gitiles critical-source request escaped the trusted Chromium host."
       return 1
     fi
     if ! base64 --decode "${encoded}" > "${decoded}"; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
       echo "::error::Gitiles returned invalid base64 for Chromium ${version} ${rel}."
       return 1
     fi
-    local_sha="$(sha256sum "${CHROMIUM_SRC}/${rel}" | awk '{print $1}')"
-    remote_sha="$(sha256sum "${decoded}" | awk '{print $1}')"
+    if ! local_sha="$(sha256sum "${CHROMIUM_SRC}/${rel}" | awk '{print $1}')"; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
+      echo "::error::Extracted Chromium source lacks readable critical file ${rel}."
+      return 1
+    fi
+    if ! remote_sha="$(sha256sum "${decoded}" | awk '{print $1}')"; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+      echo "::error::Could not hash downloaded Gitiles proof for ${rel}."
+      return 1
+    fi
     echo "Critical source identity ${rel}: local=${local_sha} upstream=${remote_sha}"
     rm -f "${encoded}" "${decoded}"
     if [ "${local_sha}" != "${remote_sha}" ]; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
       echo "::error::Chromium source archive critical file ${rel} does not match authoritative tag ${version}."
       return 1
     fi
@@ -1016,40 +1116,61 @@ prepare_chromium_source() {
   local source_url="https://commondatastorage.googleapis.com/chromium-browser-official/chromium-${version}.tar.xz"
   local metadata="${cache_dir}/chromium-${version}.source-object.json"
   local marker="${cache_dir}/chromium-${version}.validated.json"
+  local source_stats="${cache_dir}/chromium-${version}.source-archive-stats.json"
   local trusted_marker=false
   local source_sha=""
   local effective_source_url=""
-  bounded_rm_rf "${CHROMIUM_SRC}"
-  mkdir -p "${CHROMIUM_SRC}" "${cache_dir}"
+  CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+  if ! bounded_rm_rf "${CHROMIUM_SRC}"; then
+    echo "::error::Could not clear prior Chromium source tree."
+    return 1
+  fi
+  if ! mkdir -p "${CHROMIUM_SRC}" "${cache_dir}"; then
+    echo "::error::Could not create Chromium source/cache directories."
+    return 1
+  fi
 
   if [ -s "${tarball}" ]; then
     echo "Verifying cached Chromium ${version} bytes against authoritative GCS object metadata."
     if bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
         python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
           --version "${version}" --file "${tarball}" --metadata-out "${metadata}"; then
-      source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"
+      if ! source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"; then
+        CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+        echo "::error::Could not read verified Chromium source SHA-256 metadata."
+        return 1
+      fi
       if python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
           --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
           --check-marker >/dev/null 2>&1; then
         trusted_marker=true
-        echo "Cached Chromium ${version} matches a prior safe-archive + Gitiles identity marker; skipping redundant decompression scan."
+        if source_archive_stats_are_usable "${source_stats}" "${version}" "${source_sha}"; then
+          echo "Cached Chromium ${version} matches prior safe/Gitiles proof plus SHA-bound archive stats; skipping redundant decompression scan."
+        else
+          echo "Cached Chromium trust marker is valid but archive stats are absent/stale; regenerating bounded stats once."
+          if ! validate_chromium_source_tarball "${tarball}" "${version}" "${source_sha}" "${source_stats}"; then
+            echo "::error::Authoritative GCS source bytes no longer satisfy the bounded archive contract."
+            rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}" "${source_stats}"
+            return 1
+          fi
+        fi
       else
         echo "Cached bytes are authoritative but have no matching safety marker; performing the full archive scan."
-        if ! validate_chromium_source_tarball "${tarball}" "${version}"; then
+        if ! validate_chromium_source_tarball "${tarball}" "${version}" "${source_sha}" "${source_stats}"; then
           echo "::error::Authoritative GCS source bytes are structurally unsafe; refusing a redundant redownload of the same object."
-          rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}"
+          rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}" "${source_stats}"
           return 1
         fi
       fi
     else
       echo "::warning::Discarding cached Chromium source bytes that do not match the authoritative GCS object."
-      rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}"
+      rm -f "${tarball}" "${tarball}.sha256" "${metadata}" "${marker}" "${source_stats}"
     fi
   fi
 
   if [ ! -s "${tarball}" ]; then
     echo "Downloading Chromium ${version} source tarball..."
-    rm -f "${tarball}.partial" "${metadata}"
+    rm -f "${tarball}.partial" "${metadata}" "${source_stats}"
     if ! effective_source_url="$(curl --fail --location --retry 5 --retry-all-errors --retry-delay 10 \
         --proto '=https' --proto-redir '=https' \
         --connect-timeout 30 --max-time "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" \
@@ -1059,6 +1180,7 @@ prepare_chromium_source() {
       return 1
     fi
     if ! validate_effective_https_host "${effective_source_url}" commondatastorage.googleapis.com; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
       echo "::error::Chromium source download escaped the trusted GCS download host."
       rm -f "${tarball}.partial"
       return 1
@@ -1069,39 +1191,101 @@ prepare_chromium_source() {
       rm -f "${tarball}.partial" "${metadata}"
       return 1
     fi
-    source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"
+    if ! source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+      echo "::error::Could not read verified downloaded Chromium source SHA-256 metadata."
+      rm -f "${tarball}.partial" "${metadata}" "${source_stats}"
+      return 1
+    fi
     if python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
         --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
         --check-marker >/dev/null 2>&1; then
       trusted_marker=true
-      echo "Redownloaded bytes exactly match an existing trusted validation marker."
+      if source_archive_stats_are_usable "${source_stats}" "${version}" "${source_sha}"; then
+        echo "Redownloaded bytes exactly match an existing trusted marker and SHA-bound archive stats."
+      else
+        echo "Redownloaded trusted bytes lack matching bounded archive stats; regenerating them once."
+        if ! validate_chromium_source_tarball "${tarball}.partial" "${version}" "${source_sha}" "${source_stats}"; then
+          rm -f "${tarball}.partial" "${source_stats}"
+          return 1
+        fi
+      fi
     else
-      validate_chromium_source_tarball "${tarball}.partial" "${version}"
+      if ! validate_chromium_source_tarball "${tarball}.partial" "${version}" "${source_sha}" "${source_stats}"; then
+        rm -f "${tarball}.partial" "${source_stats}"
+        return 1
+      fi
     fi
-    mv "${tarball}.partial" "${tarball}"
+    if ! mv "${tarball}.partial" "${tarball}"; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+      echo "::error::Could not promote verified Chromium source download into the cache."
+      return 1
+    fi
   fi
 
-  test -n "${source_sha}" || {
-    source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"
-  }
-  printf '%s  %s\n' "${source_sha}" "$(basename "${tarball}")" > "${tarball}.sha256"
+  if [ -z "${source_sha}" ]; then
+    if ! source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "${metadata}")"; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+      echo "::error::Could not recover Chromium source SHA-256 from verified metadata."
+      return 1
+    fi
+  fi
+  if ! [[ "${source_sha}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+    echo "::error::Prepared Chromium source SHA-256 is missing or malformed."
+    return 1
+  fi
+  if ! source_archive_stats_are_usable "${source_stats}" "${version}" "${source_sha}"; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
+    echo "::error::Prepared Chromium source lacks SHA-bound bounded archive stats."
+    return 1
+  fi
+  if ! printf '%s  %s\n' "${source_sha}" "$(basename "${tarball}")" > "${tarball}.sha256"; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not write Chromium source SHA-256 sidecar."
+    return 1
+  fi
 
+  if ! ensure_source_archive_extract_space "${source_stats}" "${CHROMIUM_SRC}"; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+    return 1
+  fi
   echo "Extracting Chromium ${version} source..."
+  local extract_status=0
   bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
-    tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1
-  validate_extracted_chromium_version "${version}"
+    tar -xJf "${tarball}" -C "${CHROMIUM_SRC}" --strip-components=1 || extract_status=$?
+  if [ "${extract_status}" -ne 0 ]; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+    echo "::error::Validated Chromium source extraction failed with status ${extract_status}."
+    return 1
+  fi
+  if ! validate_extracted_chromium_version "${version}"; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
+    return 1
+  fi
   if [ "${trusted_marker}" != "true" ]; then
-    validate_chromium_critical_source_identity "${version}"
-    python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
+    if ! validate_chromium_critical_source_identity "${version}"; then
+      return 1
+    fi
+    if ! python3 "${WORKSPACE}/scripts/chromium_source_object.py" \
       --metadata-in "${metadata}" --marker "${marker}" --version "${version}" \
-      --write-marker --safe-archive-verified --gitiles-identity-verified >/dev/null
+      --write-marker --safe-archive-verified --gitiles-identity-verified >/dev/null; then
+      CHROMIUM_SOURCE_FAILURE_CLASS=infrastructure
+      echo "::error::Could not persist Chromium source trust marker after successful validation."
+      return 1
+    fi
     echo "Recorded SHA-bound source safety/Gitiles identity marker for Chromium ${version}."
   else
     echo "Reused prior Gitiles identity proof for the exact same GCS generation, MD5, length and SHA-256."
   fi
-  python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${CHROMIUM_SRC}/DEPS"
+  if ! python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${CHROMIUM_SRC}/DEPS"; then
+    CHROMIUM_SOURCE_FAILURE_CLASS=deterministic_build
+    echo "::error::Prepared Chromium DEPS no longer satisfies the pinned-tool contract."
+    return 1
+  fi
+  CHROMIUM_SOURCE_FAILURE_CLASS=""
   echo "Extraction complete. Source size:"
-  du -sh "${CHROMIUM_SRC}"
+  du -sh "${CHROMIUM_SRC}" || true
 }
 
 install_chromium_clang() {

@@ -89,8 +89,9 @@ runs:
       continue-on-error: true
       with:
         path: ${{ github.workspace }}/.chromium-source-cache
-        key: chromium-src-v2-${{ inputs.version }}
+        key: chromium-src-v3-${{ inputs.version }}
         restore-keys: |
+          chromium-src-v2-${{ inputs.version }}
           chromium-src-${{ inputs.version }}
 
     - name: Prepare Chromium Source
@@ -103,7 +104,10 @@ runs:
         source .github/scripts/chromium_i686_resume.sh
         source .github/scripts/runner_diagnostics.sh
 
-        prepare_chromium_source "${{ inputs.version }}"
+        if ! prepare_chromium_source "${{ inputs.version }}"; then
+          echo "failure_class=${CHROMIUM_SOURCE_FAILURE_CLASS:-infrastructure}" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
         install_depot_tools
         install_chromium_clang
         install_i386_sysroot
@@ -239,7 +243,7 @@ runs:
       continue-on-error: true
       with:
         path: ${{ github.workspace }}/.chromium-source-cache
-        key: chromium-src-v2-${{ inputs.version }}
+        key: chromium-src-v3-${{ inputs.version }}
 
     - name: Log Storage Before Compile
       if: ${{ steps.prepare.outcome == 'success' }}
