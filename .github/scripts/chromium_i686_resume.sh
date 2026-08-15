@@ -303,7 +303,7 @@ validate_checkpoint_source_run() {
     return 1
   }
 
-  local artifacts_json total count expired
+  local artifacts_json total count expired artifact_size size_status
   if ! artifacts_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")"; then
     CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
     echo "::error::Could not verify checkpoint artifact ownership for Actions run ${run_id}."
@@ -340,6 +340,25 @@ validate_checkpoint_source_run() {
     CHECKPOINT_PROVENANCE_STATUS=unavailable
     echo "::warning::Checkpoint artifact ${artifact_name} on run ${run_id} has expired; falling back without treating retention as a build defect."
     return 2
+  fi
+  if ! artifact_size="$(jq -er --arg name "${artifact_name}" '[.artifacts[]? | select(.name == $name)] | .[0].size_in_bytes | numbers' <<<"${artifacts_json}")"; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Checkpoint artifact ${artifact_name} lacks valid size_in_bytes metadata."
+    return 1
+  fi
+  size_status=0
+  validate_artifact_size_bytes \
+    "${artifact_size}" "${CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB}" \
+    CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB "${CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARTIFACT_GIB}" \
+    || size_status=$?
+  if [ "${size_status}" -ne 0 ]; then
+    if [ "${size_status}" -eq 2 ]; then
+      CHECKPOINT_PROVENANCE_FAILURE_CLASS=deterministic_build
+    else
+      CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    fi
+    echo "::error::Checkpoint artifact ${artifact_name} from run ${run_id} violates compressed artifact size policy."
+    return 1
   fi
   CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
   CHECKPOINT_PROVENANCE_STATUS=usable
@@ -800,6 +819,21 @@ create_out_checkpoint() {
   if [ "${archive_status}" -ne 0 ]; then
     CHECKPOINT_CREATE_FAILURE_CLASS="$(classify_prepare_command_status "${archive_status}" infrastructure)"
     echo "::error::Checkpoint archive creation failed with status ${archive_status}."
+    return 1
+  fi
+  local checkpoint_bytes size_status=0
+  if ! checkpoint_bytes="$(stat -c %s "${CHECKPOINT_ARCHIVE}" 2>/dev/null)"; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not determine compressed checkpoint archive size."
+    return 1
+  fi
+  validate_artifact_size_bytes \
+    "${checkpoint_bytes}" "${CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB}" \
+    CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB "${CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARTIFACT_GIB}" \
+    || size_status=$?
+  if [ "${size_status}" -ne 0 ]; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=$([ "${size_status}" -eq 2 ] && printf deterministic_build || printf infrastructure)
+    echo "::error::Produced checkpoint archive violates compressed artifact size policy."
     return 1
   fi
 

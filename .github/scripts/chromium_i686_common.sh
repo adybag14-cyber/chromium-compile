@@ -24,6 +24,9 @@ CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_CHECKPOINT_ARC
 CHROMIUM_I686_GH_TIMEOUT_SECONDS="${CHROMIUM_I686_GH_TIMEOUT_SECONDS:-600}"
 CHROMIUM_I686_LDD_TIMEOUT_SECONDS="${CHROMIUM_I686_LDD_TIMEOUT_SECONDS:-15}"
 CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS="${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS:-60}"
+CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB="${CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB:-4}"
+CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB="${CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB:-8}"
+CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB="${CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB:-16}"
 CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB="${CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB:-8}"
 CHROMIUM_I686_MAX_RELEASE_MEMBERS="${CHROMIUM_I686_MAX_RELEASE_MEMBERS:-250000}"
 CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB="${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB:-2}"
@@ -37,7 +40,7 @@ CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
 export DEPOT_TOOLS_UPDATE=0
 export CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS
 export CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB CHROMIUM_I686_MAX_RELEASE_MEMBERS
-export CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB CHROMIUM_I686_MAX_SOURCE_MEMBERS
+export CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB CHROMIUM_I686_MAX_SOURCE_MEMBERS CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB
 
 
 bounded_external() {
@@ -51,6 +54,42 @@ bounded_external() {
 # cannot overflow Bash's signed integer calculations.
 CHROMIUM_I686_HARD_MAX_RESERVE_GIB=64
 CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES=340
+CHROMIUM_I686_HARD_MAX_SOURCE_UNPACKED_GIB=160
+CHROMIUM_I686_HARD_MAX_SOURCE_MEMBERS=4000000
+CHROMIUM_I686_HARD_MAX_SOURCE_ARCHIVE_GIB=32
+CHROMIUM_I686_HARD_MAX_CHECKPOINT_UNPACKED_GIB=80
+CHROMIUM_I686_HARD_MAX_CHECKPOINT_MEMBERS=4000000
+CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARTIFACT_GIB=16
+CHROMIUM_I686_HARD_MAX_RELEASE_UNPACKED_GIB=16
+CHROMIUM_I686_HARD_MAX_RELEASE_MEMBERS=1000000
+CHROMIUM_I686_HARD_MAX_RELEASE_ARTIFACT_GIB=8
+validate_bounded_positive_policy() {
+  local value="${1:?policy value is required}"
+  local name="${2:?policy variable name is required}"
+  local hard_max="${3:?policy hard maximum is required}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,9}$ ]] || [ "${value}" -gt "${hard_max}" ]; then
+    echo "::error::${name} must be a positive integer no greater than ${hard_max}."
+    return 1
+  fi
+}
+
+validate_artifact_size_bytes() {
+  local bytes="${1:?artifact byte size is required}"
+  local gib_limit="${2:?artifact GiB limit is required}"
+  local name="${3:?artifact policy name is required}"
+  local hard_max_gib="${4:?artifact hard maximum is required}"
+  [[ "${bytes}" =~ ^(0|[1-9][0-9]{0,14})$ ]] || {
+    echo "::error::${name} byte size is missing/malformed: ${bytes}"
+    return 1
+  }
+  validate_bounded_positive_policy "${gib_limit}" "${name}" "${hard_max_gib}" || return 2
+  local max_bytes=$((gib_limit * 1024 * 1024 * 1024))
+  if [ "${bytes}" -gt "${max_bytes}" ]; then
+    echo "::error::Artifact size ${bytes} bytes exceeds ${name}=${gib_limit} GiB."
+    return 2
+  fi
+}
+
 validate_bounded_reserve_gib() {
   local value="${1:?reserve value is required}"
   local name="${2:?reserve variable name is required}"
@@ -1083,8 +1122,12 @@ source_archive_stats_are_usable() {
   local stats_file="${1:?source archive stats path is required}"
   local version="${2:?source version is required}"
   local source_sha="${3:?source SHA-256 is required}"
-  [[ "${CHROMIUM_I686_MAX_SOURCE_MEMBERS}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "${CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB}" =~ ^[1-9][0-9]*$ ]] || return 1
+  validate_bounded_positive_policy \
+    "${CHROMIUM_I686_MAX_SOURCE_MEMBERS}" CHROMIUM_I686_MAX_SOURCE_MEMBERS \
+    "${CHROMIUM_I686_HARD_MAX_SOURCE_MEMBERS}" || return 1
+  validate_bounded_positive_policy \
+    "${CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB}" CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB \
+    "${CHROMIUM_I686_HARD_MAX_SOURCE_UNPACKED_GIB}" || return 1
   SOURCE_MAX_MEMBERS="${CHROMIUM_I686_MAX_SOURCE_MEMBERS}" \
   SOURCE_MAX_UNPACKED_GIB="${CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB}" \
   python3 - "${stats_file}" "${version}" "${source_sha}" <<'PY' >/dev/null 2>&1
@@ -2076,6 +2119,21 @@ package_chromium_i686() {
   if [ "${archive_status}" -ne 0 ]; then
     CHROMIUM_PACKAGE_FAILURE_CLASS="$(classify_prepare_command_status "${archive_status}" infrastructure)"
     echo "::error::Failed or timed out while packaging Chromium runtime files (status ${archive_status})."
+    return 1
+  fi
+  local package_bytes size_status=0
+  if ! package_bytes="$(stat -c %s "${package}" 2>/dev/null)"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not determine compressed Chromium package size."
+    return 1
+  fi
+  validate_artifact_size_bytes \
+    "${package_bytes}" "${CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB}" \
+    CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB "${CHROMIUM_I686_HARD_MAX_RELEASE_ARTIFACT_GIB}" \
+    || size_status=$?
+  if [ "${size_status}" -ne 0 ]; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=$([ "${size_status}" -eq 2 ] && printf deterministic_build || printf infrastructure)
+    echo "::error::Packaged Chromium archive violates compressed artifact size policy."
     return 1
   fi
 

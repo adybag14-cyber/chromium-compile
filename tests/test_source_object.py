@@ -102,6 +102,36 @@ class ChromiumSourceObjectTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), f"chromium-src-v4-{VERSION}-12345")
 
+    def test_source_metadata_compressed_size_policy_is_hard_bounded(self):
+        data = b"abc"
+        metadata = self._metadata(data)
+        with mock.patch.dict(source_object.os.environ, {"CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB": "1"}):
+            source_object.validate_source_metadata(VERSION, metadata)
+            oversized = dict(metadata)
+            oversized["content_length"] = 1024**3 + 1
+            with self.assertRaisesRegex(ValueError, "compressed limit"):
+                source_object.validate_source_metadata(VERSION, oversized)
+        for invalid_limit in ("0", "33", "999999999999999999999"):
+            with self.subTest(invalid_limit=invalid_limit), mock.patch.dict(
+                source_object.os.environ, {"CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB": invalid_limit}
+            ), self.assertRaises(ValueError):
+                source_object.validate_source_metadata(VERSION, metadata)
+
+    def test_cached_metadata_cannot_bypass_compressed_size_policy(self):
+        metadata = self._metadata(b"abc")
+        metadata["content_length"] = 2 * 1024**3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "metadata.json"
+            path.write_text(json.dumps(metadata), encoding="utf-8")
+            env = dict(source_object.os.environ)
+            env["CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB"] = "1"
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), "--version", VERSION, "--metadata-in", str(path), "--cache-key-only"],
+                check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("compressed limit", result.stderr)
+
     def test_verify_file_checks_gcs_length_md5_and_computes_sha256(self):
         data=b"chromium source bytes"; metadata=self._metadata(data)
         with tempfile.TemporaryDirectory() as tmp:

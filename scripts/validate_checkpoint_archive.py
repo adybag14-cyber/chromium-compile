@@ -14,6 +14,8 @@ ROOT = "Release_x86"
 REQUIRED_REGULAR = {f"{ROOT}/build.ninja", f"{ROOT}/args.gn"}
 DEFAULT_MAX_UNPACKED_GIB = 40
 DEFAULT_MAX_MEMBERS = 2_000_000
+HARD_MAX_UNPACKED_GIB = 80
+HARD_MAX_MEMBERS = 4_000_000
 
 
 def _normalise_member(name: str) -> str:
@@ -45,7 +47,7 @@ def _normalise_link(member_name: str, link_name: str, *, symlink: bool) -> str:
     return normal
 
 
-def _positive_int_env(name: str, default: int) -> int:
+def _positive_int_env(name: str, default: int, hard_max: int) -> int:
     raw = os.environ.get(name, str(default))
     try:
         value = int(raw)
@@ -53,6 +55,8 @@ def _positive_int_env(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
     if value < 1:
         raise ValueError(f"{name} must be positive, got {value}")
+    if value > hard_max:
+        raise ValueError(f"{name} must not exceed hard maximum {hard_max}")
     return value
 
 
@@ -61,10 +65,10 @@ def validate_checkpoint(path: Path) -> dict[str, int]:
     regular: set[str] = set()
     links: list[tuple[str, str]] = []
     if "CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_BYTES" in os.environ:
-        max_unpacked = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_BYTES", DEFAULT_MAX_UNPACKED_GIB * 1024**3)
+        max_unpacked = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_BYTES", DEFAULT_MAX_UNPACKED_GIB * 1024**3, HARD_MAX_UNPACKED_GIB * 1024**3)
     else:
-        max_unpacked = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB", DEFAULT_MAX_UNPACKED_GIB) * 1024**3
-    max_members = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS", DEFAULT_MAX_MEMBERS)
+        max_unpacked = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB", DEFAULT_MAX_UNPACKED_GIB, HARD_MAX_UNPACKED_GIB) * 1024**3
+    max_members = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS", DEFAULT_MAX_MEMBERS, HARD_MAX_MEMBERS)
     unpacked_bytes = 0
     member_count = 0
     proc = subprocess.Popen(

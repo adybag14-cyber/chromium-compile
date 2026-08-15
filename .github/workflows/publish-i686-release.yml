@@ -149,10 +149,22 @@ jobs:
             }
           fi
 
-          names="$(bounded_gh api --paginate             "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100"             --jq '.artifacts[] | select(.expired == false) | .name')"
-          mapfile -t matches < <(grep -E '^chromium-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-linux-i686$' <<<"${names}" || true)
+          artifacts_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100")"
+          total="$(jq -er '.total_count | numbers' <<<"${artifacts_json}")" || {
+            echo "::error::Build artifact listing returned malformed total_count metadata."
+            exit 1
+          }
+          [[ "${total}" =~ ^(0|[1-9][0-9]{0,2})$ ]] || {
+            echo "::error::Build run ${RUN_ID} artifact count is outside the bounded 0..100 lookup contract: ${total}"
+            exit 1
+          }
+          if [ "${total}" -gt 100 ]; then
+            echo "::error::Build run ${RUN_ID} has more than 100 artifacts; refusing truncated artifact discovery."
+            exit 1
+          fi
+          match_count="$(jq -er '[.artifacts[]? | select(.expired == false and (.name | test("^chromium-[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+-linux-i686$")))] | length' <<<"${artifacts_json}")"
 
-          if [ "${#matches[@]}" -eq 0 ]; then
+          if [ "${match_count}" -eq 0 ]; then
             if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
               echo "::error::Requested build run ${RUN_ID} has no retained final Chromium runtime artifact."
               exit 1
@@ -161,13 +173,27 @@ jobs:
             echo "This compiler stage did not produce the final runtime artifact."
             exit 0
           fi
-          if [ "${#matches[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one final Chromium artifact; found ${#matches[@]}."
-            printf '%s\n' "${matches[@]}"
+          if [ "${match_count}" -ne 1 ]; then
+            echo "::error::Expected exactly one final Chromium artifact; found ${match_count}."
+            jq -r '.artifacts[]? | select(.expired == false) | .name' <<<"${artifacts_json}"
             exit 1
           fi
 
-          artifact_name="${matches[0]}"
+          artifact_name="$(jq -er '[.artifacts[]? | select(.expired == false and (.name | test("^chromium-[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+-linux-i686$")))] | .[0].name | strings' <<<"${artifacts_json}")"
+          artifact_size="$(jq -er '[.artifacts[]? | select(.expired == false and (.name | test("^chromium-[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+-linux-i686$")))] | .[0].size_in_bytes | numbers' <<<"${artifacts_json}")" || {
+            echo "::error::Final Chromium build artifact lacks valid size_in_bytes metadata."
+            exit 1
+          }
+          size_status=0
+          validate_artifact_size_bytes \
+            "${artifact_size}" "${CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB}" \
+            CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB "${CHROMIUM_I686_HARD_MAX_RELEASE_ARTIFACT_GIB}" \
+            || size_status=$?
+          if [ "${size_status}" -ne 0 ]; then
+            echo "::error::Final Chromium build artifact violates compressed artifact size policy."
+            exit 1
+          fi
+
           version="${artifact_name#chromium-}"
           version="${version%-linux-i686}"
           test "${version}" = "${expected_version}" || {
@@ -175,6 +201,9 @@ jobs:
             exit 1
           }
           echo "found=true" >> "${GITHUB_OUTPUT}"
+          echo "name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "size_bytes=${artifact_size}" >> "${GITHUB_OUTPUT}"
           echo "name=${artifact_name}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 

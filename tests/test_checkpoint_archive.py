@@ -143,6 +143,19 @@ class CheckpointArchiveTests(unittest.TestCase):
 
 
 
+    def test_checkpoint_policy_overrides_have_hard_caps(self):
+        for env in (
+            {"CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS": str(validator.HARD_MAX_MEMBERS + 1)},
+            {"CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB": str(validator.HARD_MAX_UNPACKED_GIB + 1)},
+            {"CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_BYTES": str(validator.HARD_MAX_UNPACKED_GIB * 1024**3 + 1)},
+        ):
+            members = [regular("Release_x86/build.ninja"), regular("Release_x86/args.gn")]
+            fake = FakeProcess(tar_bytes(members))
+            with self.subTest(env=env), mock.patch.dict(validator.os.environ, env), \
+                 mock.patch.object(validator.subprocess, "Popen", return_value=fake), \
+                 self.assertRaisesRegex(ValueError, "hard maximum"):
+                validator.validate_checkpoint(pathlib.Path("checkpoint.tar.zst"))
+
     def test_cli_entrypoint_validates_archive_path(self):
         fake = FakeProcess(tar_bytes([
             regular("Release_x86/build.ninja"),

@@ -92,7 +92,10 @@ set -e
 call_index=0
 bounded_external() {
   call_index=$((call_index + 1))
-  if [ "${call_index}" -eq 1 ]; then return 0; fi
+  if [ "${call_index}" -eq 1 ]; then
+    printf 'synthetic checkpoint archive\n' > "${CHECKPOINT_ARCHIVE}"
+    return 0
+  fi
   if [ "${call_index}" -eq 2 ]; then return 2; fi
   return 0
 }

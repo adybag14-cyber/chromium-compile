@@ -464,6 +464,42 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("smoke_test_i686_runtime_bundle", validation)
         self.assertIn("bash tests/test_release_runtime_smoke.sh", validation)
 
+    def test_resource_policy_ceiling_is_hard_and_checked_before_download(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        source_object = (ROOT / "scripts" / "chromium_source_object.py").read_text(encoding="utf-8")
+        source_validator = (ROOT / "scripts" / "validate_chromium_source_archive.py").read_text(encoding="utf-8")
+        checkpoint_validator = (ROOT / "scripts" / "validate_checkpoint_archive.py").read_text(encoding="utf-8")
+        release_validator = (ROOT / "scripts" / "validate_release_archive.py").read_text(encoding="utf-8")
+
+        for literal in (
+            "CHROMIUM_I686_HARD_MAX_SOURCE_UNPACKED_GIB=160",
+            "CHROMIUM_I686_HARD_MAX_SOURCE_MEMBERS=4000000",
+            "CHROMIUM_I686_HARD_MAX_SOURCE_ARCHIVE_GIB=32",
+            "CHROMIUM_I686_HARD_MAX_CHECKPOINT_UNPACKED_GIB=80",
+            "CHROMIUM_I686_HARD_MAX_CHECKPOINT_MEMBERS=4000000",
+            "CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARTIFACT_GIB=16",
+            "CHROMIUM_I686_HARD_MAX_RELEASE_UNPACKED_GIB=16",
+            "CHROMIUM_I686_HARD_MAX_RELEASE_MEMBERS=1000000",
+            "CHROMIUM_I686_HARD_MAX_RELEASE_ARTIFACT_GIB=8",
+        ):
+            self.assertIn(literal, common)
+        self.assertIn("validate_artifact_size_bytes()", common)
+        self.assertIn("size_in_bytes", resume)
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        self.assertLess(action.index("validate_checkpoint_source_run"), action.index("bounded_gh run download"))
+        self.assertIn("size_in_bytes", publish)
+        self.assertNotIn("bounded_gh api --paginate", publish)
+        self.assertLess(publish.index("size_in_bytes"), publish.index("bounded_gh run download"))
+        self.assertIn("HARD_MAX_SOURCE_ARCHIVE_GIB = 32", source_object)
+        self.assertIn("compressed limit", source_object)
+        self.assertIn("HARD_MAX_UNPACKED_GIB = 160", source_validator)
+        self.assertIn("HARD_MAX_UNPACKED_GIB = 80", checkpoint_validator)
+        self.assertIn("HARD_MAX_UNPACKED_GIB = 16", release_validator)
+        self.assertIn("bash tests/test_resource_policy_ceiling.sh", validation)
+
     def test_release_archive_validation_is_streaming_and_resource_bounded(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         validator = (ROOT / "scripts" / "validate_release_archive.py").read_text(encoding="utf-8")

@@ -9,7 +9,7 @@ source "${ROOT}/.github/scripts/chromium_i686_common.sh"
 source "${ROOT}/.github/scripts/chromium_i686_resume.sh"
 
 RUN_JSON='{"path":".github/workflows/chromium-i686.yml","head_repository":{"full_name":"owner/repo"},"head_branch":"main","head_sha":"1111111111111111111111111111111111111111","event":"workflow_dispatch","run_attempt":1,"display_title":"Chromium i686 151.0.7922.108 - stage 2 - attempt 0"}'
-ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false}]}'
+ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":1024}]}'
 GH_MODE=ok
 bounded_gh() {
   if [ "${GH_MODE}" = fail ]; then return 1; fi
@@ -27,6 +27,23 @@ validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 
 [ "${CHECKPOINT_PRODUCER_SHA}" = "1111111111111111111111111111111111111111" ]
 [ "${CHECKPOINT_PRODUCER_STAGE}" = "2" ]
 [ "${CHECKPOINT_PRODUCER_RUN_ATTEMPT}" = "1" ]
+
+# Oversized/malformed artifact metadata is rejected before download.
+ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":9663676416}]}'
+set +e
+validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ]
+[ "${CHECKPOINT_PROVENANCE_FAILURE_CLASS}" = deterministic_build ]
+ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":"bad"}]}'
+set +e
+validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
+status=$?
+set -e
+[ "${status}" -eq 1 ]
+[ "${CHECKPOINT_PROVENANCE_FAILURE_CLASS}" = infrastructure ]
+ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":1024}]}'
 
 # Numeric inputs are bounded lexically before arithmetic or API access.
 for bad_run in 0 999999999999999999999 999999999999999999999999999999999999; do
@@ -74,14 +91,14 @@ set -e
 [ "${status}" -eq 1 ]
 
 RUN_JSON='{"path":".github/workflows/chromium-i686.yml","head_repository":{"full_name":"owner/repo"},"head_branch":"main","head_sha":"1111111111111111111111111111111111111111","event":"workflow_dispatch","run_attempt":1,"display_title":"Chromium i686 151.0.7922.108 - stage 2 - attempt 0"}'
-ARTIFACTS_JSON='{"total_count":2,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false},{"name":"chromium-i686-out-stage-2","expired":false}]}'
+ARTIFACTS_JSON='{"total_count":2,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":1024},{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":1024}]}'
 set +e
 validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
 status=$?
 set -e
 [ "${status}" -eq 1 ]
 
-ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false}]}'
+ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":1024}]}'
 set +e
 validate_checkpoint_source_run 12345 151.0.7922.108 4 chromium-i686-out-stage-2 >/dev/null 2>&1
 status=$?
@@ -97,7 +114,7 @@ set -e
 [ -z "${CHECKPOINT_PROVENANCE_FAILURE_CLASS}" ]
 [ "${CHECKPOINT_PROVENANCE_STATUS}" = unavailable ]
 
-ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":true}]}'
+ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":true,"size_in_bytes":1024}]}'
 set +e
 validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
 status=$?
@@ -106,7 +123,7 @@ set -e
 [ -z "${CHECKPOINT_PROVENANCE_FAILURE_CLASS}" ]
 [ "${CHECKPOINT_PROVENANCE_STATUS}" = unavailable ]
 
-ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false}]}'
+ARTIFACTS_JSON='{"total_count":1,"artifacts":[{"name":"chromium-i686-out-stage-2","expired":false,"size_in_bytes":1024}]}'
 GH_MODE=fail
 set +e
 validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
