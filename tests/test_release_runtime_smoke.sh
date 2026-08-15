@@ -64,6 +64,17 @@ set -e
 [ "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" = deterministic_build ]
 unset FAKE_CHROMIUM_VERSION
 
+# A prefix collision must not satisfy exact version-line validation.
+FAKE_CHROMIUM_VERSION=151.0.7922.750
+export FAKE_CHROMIUM_VERSION
+set +e
+smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null 2>&1
+prefix_status=$?
+set -e
+[ "${prefix_status}" -ne 0 ]
+[ "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" = deterministic_build ]
+unset FAKE_CHROMIUM_VERSION
+
 FAKE_HEADLESS_STATUS=3
 export FAKE_HEADLESS_STATUS
 set +e

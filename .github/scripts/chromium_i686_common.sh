@@ -1433,7 +1433,7 @@ smoke_test_i686_runtime_bundle() {
     echo "::error::Packaged chrome-wrapper --version failed with status ${version_status}."
     return 1
   fi
-  if ! grep -Fq "${version}" <<<"${version_output}"; then
+  if ! grep -Fxq "Chromium ${version}" <<<"${version_output}"; then
     bounded_rm_rf "${smoke_root}" || true
     echo "::error::Packaged chrome-wrapper reported an unexpected Chromium version: ${version_output}"
     return 1
