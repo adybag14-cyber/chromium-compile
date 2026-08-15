@@ -281,6 +281,22 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("resolve_i386_package_for_soname libQt5Network.so.5", workflow)
         self.assertIn("libqt5network5:i386", workflow)
 
+    def test_checkpoint_cutoff_preserves_hard_job_reserve_and_validates_arithmetic(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES=340", common)
+        self.assertIn("validate_checkpoint_minutes()", common)
+        self.assertIn("validate_job_started_at()", common)
+        self.assertIn('local started_at="${JOB_STARTED_AT:-}"', common)
+        self.assertIn('failure_class=deterministic_build', common)
+        self.assertIn("JOB_CHECKPOINT_MINUTES: ${{ vars.CHROMIUM_I686_CHECKPOINT_MINUTES || '340' }}", workflow)
+        self.assertIn("timeout-minutes: 360", workflow)
+        self.assertIn("20-minute checkpoint/artifact reserve", workflow)
+        self.assertIn("steps.control.outputs.failure_class", workflow)
+        self.assertIn("control_fail()", workflow)
+        self.assertIn("bash tests/test_checkpoint_cutoff.sh", validation)
+
     def test_early_termination_is_not_mistaken_for_checkpoint_timeout(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn('status}" -eq 137', common)

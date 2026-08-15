@@ -57,7 +57,7 @@ jobs:
       retry_count: ${{ steps.control.outputs.retry_count }}
       max_retries: ${{ steps.control.outputs.max_retries }}
       complete: ${{ steps.compiler.outputs.complete }}
-      failure_class: ${{ steps.compiler.outputs.failure_class }}
+      failure_class: ${{ steps.compiler.outputs.failure_class || steps.control.outputs.failure_class }}
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
@@ -79,42 +79,40 @@ jobs:
           retry_count="${REQUESTED_RETRY_COUNT:-0}"
           version="${REQUESTED_VERSION:-}"
           max_stage="${MAX_COMPILER_STAGES}"
+          checkpoint_minutes="${JOB_CHECKPOINT_MINUTES}"
 
-          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "::error::version must use the form 150.0.7871.186"
+          control_fail() {
+            echo "failure_class=deterministic_build" >> "${GITHUB_OUTPUT}"
+            echo "::error::$1"
             exit 1
           }
-          [[ "${stage}" =~ ^[0-9]+$ ]] || {
-            echo "::error::stage must be an integer"
-            exit 1
-          }
-          [[ "${max_stage}" =~ ^[0-9]{1,2}$ ]] || {
-            echo "::error::CHROMIUM_I686_MAX_STAGES must be an integer from 1 through 50"
-            exit 1
-          }
+
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || control_fail "version must use the form 150.0.7871.186"
+          [[ "${stage}" =~ ^[0-9]+$ ]] \
+            || control_fail "stage must be an integer"
+          [[ "${max_stage}" =~ ^[0-9]{1,2}$ ]] \
+            || control_fail "CHROMIUM_I686_MAX_STAGES must be an integer from 1 through 50"
           if [ "${max_stage}" -lt 1 ] || [ "${max_stage}" -gt 50 ]; then
-            echo "::error::CHROMIUM_I686_MAX_STAGES must be between 1 and 50"
-            exit 1
+            control_fail "CHROMIUM_I686_MAX_STAGES must be between 1 and 50"
           fi
           if [ "${stage}" -lt 1 ] || [ "${stage}" -gt "${max_stage}" ]; then
-            echo "::error::stage must be between 1 and ${max_stage}"
-            exit 1
+            control_fail "stage must be between 1 and ${max_stage}"
           fi
-          [[ "${MAX_RUNNER_RETRIES}" =~ ^[0-9]{1,2}$ ]] || {
-            echo "::error::CHROMIUM_RUNNER_RETRIES must be an integer from 0 through 10"
-            exit 1
-          }
+          [[ "${MAX_RUNNER_RETRIES}" =~ ^[0-9]{1,2}$ ]] \
+            || control_fail "CHROMIUM_RUNNER_RETRIES must be an integer from 0 through 10"
           if [ "${MAX_RUNNER_RETRIES}" -gt 10 ]; then
-            echo "::error::CHROMIUM_RUNNER_RETRIES must not exceed 10 automatic fresh-runner attempts"
-            exit 1
+            control_fail "CHROMIUM_RUNNER_RETRIES must not exceed 10 automatic fresh-runner attempts"
           fi
-          [[ "${retry_count}" =~ ^[0-9]+$ ]] || {
-            echo "::error::retry_count must be an integer"
-            exit 1
-          }
+          [[ "${retry_count}" =~ ^[0-9]+$ ]] \
+            || control_fail "retry_count must be an integer"
           if [ "${retry_count}" -lt 0 ] || [ "${retry_count}" -gt "${MAX_RUNNER_RETRIES}" ]; then
-            echo "::error::retry_count must be between 0 and ${MAX_RUNNER_RETRIES}"
-            exit 1
+            control_fail "retry_count must be between 0 and ${MAX_RUNNER_RETRIES}"
+          fi
+          [[ "${checkpoint_minutes}" =~ ^[1-9][0-9]{0,2}$ ]] \
+            || control_fail "CHROMIUM_I686_CHECKPOINT_MINUTES must be an integer from 1 through 340"
+          if [ "${checkpoint_minutes}" -gt 340 ]; then
+            control_fail "CHROMIUM_I686_CHECKPOINT_MINUTES must not exceed 340 so a 20-minute checkpoint/artifact reserve remains inside the 360-minute job timeout"
           fi
 
           echo "stage=${stage}" >> "${GITHUB_OUTPUT}"
@@ -122,7 +120,8 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "retry_count=${retry_count}" >> "${GITHUB_OUTPUT}"
           echo "max_retries=${MAX_RUNNER_RETRIES}" >> "${GITHUB_OUTPUT}"
-          echo "Stage: ${stage}/${max_stage}; Chromium: ${version}; runner attempt: ${retry_count}"
+          echo "failure_class=" >> "${GITHUB_OUTPUT}"
+          echo "Stage: ${stage}/${max_stage}; Chromium: ${version}; runner attempt: ${retry_count}; checkpoint cutoff: ${checkpoint_minutes} minutes"
 
       - name: Resolve checkpoint sources
         id: checkpoint
