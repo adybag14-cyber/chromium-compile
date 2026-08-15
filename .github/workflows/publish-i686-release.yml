@@ -19,9 +19,7 @@ on:
         type: string
 
 permissions:
-  actions: read
-  contents: write
-  issues: write
+  contents: read
 
 concurrency:
   # Release mutation is rare and correctness-sensitive. Serialize all publishers so
@@ -30,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  validate:
     if: >-
       ${{
         (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch) ||
@@ -40,6 +38,16 @@ jobs:
           github.event.workflow_run.head_repository.full_name == github.repository
         )
       }}
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      found: ${{ steps.artifact.outputs.found }}
+      artifact_name: ${{ steps.artifact.outputs.name }}
+      version: ${{ steps.artifact.outputs.version }}
+      run_id: ${{ steps.source.outputs.run_id }}
+      head_sha: ${{ steps.source.outputs.head_sha }}
+      package_sha: ${{ steps.verified.outputs.package_sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -182,7 +190,8 @@ jobs:
           source .github/scripts/chromium_i686_common.sh
           bounded_gh run download "${RUN_ID}"             --repo "${GITHUB_REPOSITORY}"             --name "${ARTIFACT_NAME}"             --dir release-assets
 
-      - name: Verify provenance, checksum and i686 runtime
+      - name: Validate provenance, checksum and i686 structure
+        id: verified
         if: ${{ steps.artifact.outputs.found == 'true' }}
         env:
           CHROMIUM_VERSION: ${{ steps.artifact.outputs.version }}
@@ -221,14 +230,204 @@ jobs:
           bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
             tar -xJf "${package}" -C release-runtime
           validate_i686_runtime_bundle release-runtime
+          echo "package_sha=${actual}" >> "${GITHUB_OUTPUT}"
 
-      - name: Create or resume transactional immutable release
-        if: ${{ steps.artifact.outputs.found == 'true' }}
+  smoke:
+    needs: validate
+    if: ${{ needs.validate.result == 'success' && needs.validate.outputs.found == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted release helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Install target runtime smoke dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          bounded_sudo_apt_get update
+          bounded_sudo_apt_get install -y --no-install-recommends jq python3 file binutils xz-utils
+          install_i386_runtime_libraries
+
+      - name: Download validated build artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          CHROMIUM_VERSION: ${{ steps.artifact.outputs.version }}
-          BUILD_SHA: ${{ steps.source.outputs.head_sha }}
-          BUILD_RUN_ID: ${{ steps.source.outputs.run_id }}
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+          ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          bounded_gh run download "${RUN_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${ARTIFACT_NAME}" \
+            --dir release-assets
+
+      - name: Execute validated i686 runtime
+        env:
+          CHROMIUM_VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_SHA: ${{ needs.validate.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ needs.validate.outputs.run_id }}
+          VALIDATED_PACKAGE_SHA: ${{ needs.validate.outputs.package_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          package="release-assets/chromium-${CHROMIUM_VERSION}-linux-i686.tar.xz"
+          checksum="${package}.sha256"
+          manifest="release-assets/chromium-${CHROMIUM_VERSION}-linux-i686-manifest.txt"
+          test -s "${package}"
+          test -s "${checksum}"
+          test -s "${manifest}"
+          actual="$(sha256sum "${package}" | awk '{print $1}')"
+          test "${actual}" = "${VALIDATED_PACKAGE_SHA}"
+          grep -qx "version=${CHROMIUM_VERSION}" "${manifest}"
+          grep -qx "github_sha=${BUILD_SHA}" "${manifest}"
+          grep -qx "github_run_id=${BUILD_RUN_ID}" "${manifest}"
+          expected="$(awk 'NR == 1 {print $1}' "${checksum}")"
+          manifest_sha="$(awk -F= '$1 == "package_sha256" {print $2}' "${manifest}")"
+          test "${actual}" = "${expected}"
+          test "${actual}" = "${manifest_sha}"
+          release_stats="${RUNNER_TEMP}/release-archive-stats.json"
+          validate_release_archive_with_stats "${package}" "${release_stats}"
+          mkdir release-runtime
+          ensure_release_archive_extract_space "${release_stats}" release-runtime
+          bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+            tar -xJf "${package}" -C release-runtime
+          validate_i686_runtime_bundle release-runtime
+          smoke_test_i686_runtime_bundle release-runtime "${CHROMIUM_VERSION}"
+          echo "Read-only runtime smoke passed for Chromium ${CHROMIUM_VERSION}."
+
+  report_validation_failure:
+    needs: [validate, smoke]
+    if: ${{ always() && (needs.validate.result == 'failure' || needs.smoke.result == 'failure') }}
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Report read-only release validation failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RESULT: ${{ needs.validate.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          VALIDATED_VERSION: ${{ needs.validate.outputs.version }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${VALIDATED_VERSION:-${REQUESTED_VERSION:-}}"
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            title="[i686-port] Chromium ${version} requires maintenance"
+          else
+            version=unknown
+            title="[i686-port] Chromium pipeline requires maintenance"
+          fi
+          body_file="${RUNNER_TEMP}/release-readonly-validation-failure.md"
+          cat > "${body_file}" <<EOF
+          Trusted release validation failed before the write-capable publication job was allowed to start.
+
+          - Release workflow: ${RUN_URL}
+          - Chromium version: ${version}
+          - Metadata/structure validation: ${VALIDATION_RESULT}
+          - Runtime smoke: ${SMOKE_RESULT}
+
+          No release/tag mutation was attempted by the failing validation path.
+          EOF
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "${title}" \
+            --body-file "${body_file}"
+
+  publish:
+    needs: [validate, smoke]
+    if: ${{ needs.validate.result == 'success' && needs.smoke.result == 'success' && needs.validate.outputs.found == 'true' }}
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout trusted release helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Install publication validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          bounded_sudo_apt_get update
+          bounded_sudo_apt_get install -y --no-install-recommends jq python3
+
+      - name: Download completed artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+          ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          bounded_gh run download "${RUN_ID}"             --repo "${GITHUB_REPOSITORY}"             --name "${ARTIFACT_NAME}"             --dir release-assets
+
+      - name: Reverify provenance, checksum and i686 structure before mutation
+        env:
+          CHROMIUM_VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_SHA: ${{ needs.validate.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ needs.validate.outputs.run_id }}
+          VALIDATED_PACKAGE_SHA: ${{ needs.validate.outputs.package_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .github/scripts/chromium_i686_common.sh
+          package="release-assets/chromium-${CHROMIUM_VERSION}-linux-i686.tar.xz"
+          checksum="${package}.sha256"
+          manifest="release-assets/chromium-${CHROMIUM_VERSION}-linux-i686-manifest.txt"
+          test -s "${package}"
+          test -s "${checksum}"
+          test -s "${manifest}"
+          grep -qx "version=${CHROMIUM_VERSION}" "${manifest}"
+          grep -qx "target_cpu=x86" "${manifest}"
+          grep -qx "target_os=linux" "${manifest}"
+          grep -qx "github_sha=${BUILD_SHA}" "${manifest}"
+          grep -qx "github_run_id=${BUILD_RUN_ID}" "${manifest}"
+
+          expected="$(awk 'NR == 1 {print $1}' "${checksum}")"
+          checksum_name="$(awk 'NR == 1 {print $2}' "${checksum}")"
+          actual="$(sha256sum "${package}" | awk '{print $1}')"
+          manifest_sha="$(awk -F= '$1 == "package_sha256" {print $2}' "${manifest}")"
+          echo "Expected package SHA-256: ${expected}"
+          echo "Actual package SHA-256:   ${actual}"
+          test "${checksum_name}" = "$(basename "${package}")"
+          test "${actual}" = "${expected}"
+          test "${actual}" = "${manifest_sha}"
+          test "${actual}" = "${VALIDATED_PACKAGE_SHA}"
+
+      - name: Create or resume transactional immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_SHA: ${{ needs.validate.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ needs.validate.outputs.run_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -384,7 +583,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          CHROMIUM_VERSION: ${{ steps.artifact.outputs.version || 'unknown' }}
+          CHROMIUM_VERSION: ${{ needs.validate.outputs.version || 'unknown' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |

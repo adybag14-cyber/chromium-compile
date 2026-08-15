@@ -628,21 +628,73 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("--render-wrapper", common)
 
 
-    def test_publisher_is_transactional_and_does_not_depend_on_target_i386_runtime(self):
+    def test_publisher_is_transactional_and_runtime_smokes_target_i386(self):
         publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
-        self.assertIn("Create or resume transactional immutable release", publish)
+        validate_job = publish[publish.index("  validate:"):publish.index("  smoke:")]
+        smoke_job = publish[publish.index("  smoke:"):publish.index("  publish:")]
+        report_job = publish[publish.index("  report_validation_failure:"):publish.index("  publish:")]
+        mutation_job = publish[publish.index("  publish:"):]
+
+        # Metadata/provenance validation is read-only and produces immutable identity
+        # outputs before any target code is executed.
+        self.assertIn("contents: read", validate_job)
+        self.assertNotIn("contents: write", validate_job)
+        self.assertNotIn("install_i386_runtime_libraries", validate_job)
+        self.assertNotIn("smoke_test_i686_runtime_bundle", validate_job)
+        self.assertIn("package_sha: ${{ steps.verified.outputs.package_sha }}", validate_job)
+        self.assertIn("id: verified", validate_job)
+
+        # Target code execution is isolated in a read-only job and exports no
+        # metadata consumed by the mutation job.
+        self.assertIn("permissions:", smoke_job)
+        self.assertIn("contents: read", smoke_job)
+        self.assertNotIn("contents: write", smoke_job)
+        self.assertIn("install_i386_runtime_libraries", smoke_job)
+        self.assertIn('smoke_test_i686_runtime_bundle release-runtime "${CHROMIUM_VERSION}"', smoke_job)
+        self.assertNotIn("outputs:", smoke_job)
+
+        # Validation/runtime failures are mirrored by a non-release reporting job.
+        self.assertIn("needs: [validate, smoke]", report_job)
+        self.assertIn("always()", report_job)
+        self.assertIn("needs.validate.result == 'failure'", report_job)
+        self.assertIn("needs.smoke.result == 'failure'", report_job)
+        self.assertIn("contents: read", report_job)
+        self.assertIn("issues: write", report_job)
+        self.assertNotIn("contents: write", report_job)
+        self.assertNotIn("release create", report_job)
+        self.assertNotIn("release upload", report_job)
+        self.assertNotIn("release edit", report_job)
+        self.assertIn("scripts/github_maintenance_issue.py", report_job)
+        self.assertIn("No release/tag mutation was attempted", report_job)
+
+        # The write-capable job waits for both read-only gates, re-hashes the exact
+        # bytes, but never parses/extracts/executes the archive.
+        self.assertIn("needs: [validate, smoke]", mutation_job)
+        self.assertIn("needs.smoke.result == 'success'", mutation_job)
+        self.assertIn("contents: write", mutation_job)
+        self.assertIn("issues: write", mutation_job)
+        self.assertNotIn("install_i386_runtime_libraries", mutation_job)
+        self.assertNotIn("smoke_test_i686_runtime_bundle", mutation_job)
+        self.assertNotIn("validate_release_archive_with_stats", mutation_job)
+        self.assertNotIn("tar -xJf", mutation_job)
+        self.assertIn("VALIDATED_PACKAGE_SHA: ${{ needs.validate.outputs.package_sha }}", mutation_job)
+        self.assertIn('test "${actual}" = "${VALIDATED_PACKAGE_SHA}"', mutation_job)
+        self.assertIn("needs.validate.outputs", mutation_job)
+        self.assertNotIn("steps.artifact.outputs", mutation_job)
+
+        self.assertIn("release_state", publish)
         self.assertIn("--draft", publish)
         self.assertIn("Uploading missing draft asset", publish)
-        self.assertIn("verifying whether GitHub stored", publish)
+        self.assertNotIn("--clobber", "\n".join(
+            line for line in publish.splitlines() if "bounded_gh release" in line
+        ))
         self.assertIn("All draft assets are byte-identical", publish)
         self.assertIn("exact provenance is enforced by verified Git ref", publish)
         self.assertIn("--draft=false", publish)
-        concurrency = publish[publish.index("concurrency:"):publish.index("jobs:")]
-        self.assertIn("'chromium-i686-release'", concurrency)
-        self.assertIn("chromium-i686-release-nonprod-{0}", concurrency)
-        self.assertNotIn("github.event.workflow_run.id || inputs.build_run_id", publish[publish.index("concurrency:"):publish.index("jobs:")])
+        self.assertIn("group: ${{", publish)
+        self.assertIn("'chromium-i686-release'", publish)
         self.assertIn("required release-digest capability is unavailable", publish)
-        self.assertNotIn("install_i386_runtime_libraries", publish)
+
 
     def test_build_hosts_always_install_release_validation_tools(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
@@ -677,7 +729,7 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("jq python3 file binutils xz-utils", install)
         self.assertIn("display_title<<%s", publish)
         self.assertIn("if: ${{ failure() }}", publish)
-        self.assertIn("steps.artifact.outputs.version || 'unknown'", publish)
+        self.assertIn("needs.validate.outputs.version || 'unknown'", publish)
         self.assertIn("scripts/github_maintenance_issue.py", publish)
         self.assertIn("Release succeeded but maintenance issue cleanup failed", publish)
         self.assertIn("if ! python3 scripts/github_maintenance_issue.py", publish)
