@@ -150,6 +150,13 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('bounded_rm_rf "${restore_root}"', resume)
         self.assertIn('bounded_rm_rf "${backup_out}"', resume)
         self.assertIn("cleanup_stale_checkpoint_residue()", common)
+        cleanup_start = common.index("maximize_runner_disk_space() {")
+        cleanup_end = common.index("ensure_swap() {", cleanup_start)
+        runner_cleanup = common[cleanup_start:cleanup_end]
+        self.assertNotIn("bounded_sudo_apt_get purge", runner_cleanup)
+        self.assertNotIn("bounded_sudo_apt_get autoremove", runner_cleanup)
+        self.assertIn("sudo apt-get clean", runner_cleanup)
+        self.assertIn("bash tests/test_runner_cleanup_contract.sh", (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8"))
         self.assertIn("preserving rollback state instead of deleting it", common)
         self.assertIn("bash tests/test_checkpoint_residue_cleanup.sh", (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8"))
         self.assertNotIn('bounded_rm_rf "${OUT_DIR}"', resume)
