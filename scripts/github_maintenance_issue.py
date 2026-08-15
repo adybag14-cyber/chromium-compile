@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import time
 from typing import Sequence
 
@@ -176,12 +177,16 @@ def main() -> int:
     parser.add_argument("--body-file")
     parser.add_argument("--close-if-open", action="store_true")
     args = parser.parse_args()
-    if args.close_if_open:
-        action, number = close_issue_if_open(args.repository, args.title)
-    else:
-        if not args.body_file:
-            parser.error("--body-file is required unless --close-if-open is used")
-        action, number = upsert_issue(args.repository, args.title, args.body_file)
+    try:
+        if args.close_if_open:
+            action, number = close_issue_if_open(args.repository, args.title)
+        else:
+            if not args.body_file:
+                parser.error("--body-file is required unless --close-if-open is used")
+            action, number = upsert_issue(args.repository, args.title, args.body_file)
+    except IssueError as exc:
+        print(f"::error::maintenance issue operation failed: {exc}", file=sys.stderr)
+        return 1
     print(f"{action}:{'' if number is None else number}")
     return 0
 

@@ -368,16 +368,11 @@ jobs:
           fi
 
           maintenance_title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
-          issue_number=""
-          if issue_number="$(bounded_gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${maintenance_title}" '.[] | select(.title == $title) | .number' | head -n1)"; then
-            if [ -n "${issue_number}" ]; then
-              bounded_gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "Resolved by successful immutable unofficial i686 release \`${tag}\`." \
-                || echo "::warning::Release succeeded but maintenance issue comment failed."
-              bounded_gh issue close "${issue_number}" --repo "${GITHUB_REPOSITORY}" --reason completed \
-                || echo "::warning::Release succeeded but maintenance issue close failed."
-            fi
-          else
-            echo "::warning::Release succeeded but maintenance issue lookup failed; not converting publication success into a release failure."
+          if ! python3 scripts/github_maintenance_issue.py \
+              --repository "${GITHUB_REPOSITORY}" \
+              --title "${maintenance_title}" \
+              --close-if-open; then
+            echo "::warning::Release succeeded but maintenance issue cleanup failed; a later watcher/release run can retry cleanup."
           fi
 
       - name: Report release publication failure
@@ -391,10 +386,14 @@ jobs:
         run: |
           set -euo pipefail
           title="[i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
-          body="The build artifact reached the trusted release workflow, but provenance, runtime validation, or immutable publication failed. Release workflow: ${RUN_URL}"
-          issue_number="$(timeout -k 15s 300s gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${title}" '.[] | select(.title == $title) | .number' | head -n1)"
-          if [ -n "${issue_number}" ]; then
-            timeout -k 15s 300s gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
-          else
-            timeout -k 15s 300s gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
-          fi
+          body_file="${RUNNER_TEMP}/release-publication-failure.md"
+          cat > "${body_file}" <<EOF
+          The build artifact reached the trusted release workflow, but provenance, runtime validation, or immutable publication failed.
+
+          - Release workflow: ${RUN_URL}
+          - Chromium version: ${CHROMIUM_VERSION}
+          EOF
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "${title}" \
+            --body-file "${body_file}"

@@ -440,6 +440,11 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Checkout maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Open or update source-contract issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -448,13 +453,16 @@ jobs:
           set -euo pipefail
           title='[i686-port] Chromium source/tool contract drift'
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          body="The scheduled latest-Chromium source contract probe failed. Chromium may have changed DEPS tool pins, Linux installer definitions, or upstream hosting. Review ${run_url} before the next production version."
-          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title | jq -r --arg title "${title}" '.[] | select(.title == $title) | .number' | head -n1)"
-          if [ -n "${issue_number}" ]; then
-            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
-          else
-            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
-          fi
+          body_file="${RUNNER_TEMP}/chromium-source-contract-drift.md"
+          cat > "${body_file}" <<EOF
+          The scheduled latest-Chromium source contract probe failed. Chromium may have changed DEPS tool pins, Linux installer definitions, or upstream hosting.
+
+          Review ${run_url} before the next production version.
+          EOF
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "${title}" \
+            --body-file "${body_file}"
 
   report_lts_drift:
     name: Report Ubuntu LTS compatibility drift
@@ -466,6 +474,11 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Checkout maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Open or update LTS compatibility issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -474,10 +487,13 @@ jobs:
           set -euo pipefail
           title='[i686-port] Ubuntu LTS compatibility drift'
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          body="The scheduled Ubuntu LTS compatibility matrix failed. Review ${run_url} before changing CHROMIUM_I686_RUNNER or relying on a newer GitHub-hosted image."
-          issue_number="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 --json number,title --jq '.[] | select(.title == "[i686-port] Ubuntu LTS compatibility drift") | .number' | head -n1)"
-          if [ -n "${issue_number}" ]; then
-            gh issue comment "${issue_number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
-          else
-            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
-          fi
+          body_file="${RUNNER_TEMP}/ubuntu-lts-compatibility-drift.md"
+          cat > "${body_file}" <<EOF
+          The scheduled Ubuntu LTS compatibility matrix failed.
+
+          Review ${run_url} before changing CHROMIUM_I686_RUNNER or relying on a newer GitHub-hosted image.
+          EOF
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "${title}" \
+            --body-file "${body_file}"
