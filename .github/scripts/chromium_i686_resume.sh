@@ -106,6 +106,67 @@ CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
 CHECKPOINT_PROVENANCE_STATUS=""
 CHECKPOINT_PRODUCER_SHA=""
 CHECKPOINT_PRODUCER_STAGE=""
+CHECKPOINT_PRODUCER_RUN_ATTEMPT=""
+CHECKPOINT_VALIDATED_ARCHIVE=""
+CHECKPOINT_VALIDATED_VERSION=""
+CHECKPOINT_VALIDATED_STAGE=""
+CHECKPOINT_VALIDATED_PRODUCER_SHA=""
+CHECKPOINT_VALIDATED_PRODUCER_STAGE=""
+CHECKPOINT_VALIDATED_PRODUCER_RUN_ID=""
+CHECKPOINT_VALIDATED_PRODUCER_RUN_ATTEMPT=""
+
+clear_checkpoint_validation_state() {
+  CHECKPOINT_VALIDATED_ARCHIVE=""
+  CHECKPOINT_VALIDATED_VERSION=""
+  CHECKPOINT_VALIDATED_STAGE=""
+  CHECKPOINT_VALIDATED_PRODUCER_SHA=""
+  CHECKPOINT_VALIDATED_PRODUCER_STAGE=""
+  CHECKPOINT_VALIDATED_PRODUCER_RUN_ID=""
+  CHECKPOINT_VALIDATED_PRODUCER_RUN_ATTEMPT=""
+}
+
+mark_checkpoint_bundle_validated() {
+  local archive="${1:?checkpoint archive is required}"
+  local version="${2:?checkpoint version is required}"
+  local stage="${3:?checkpoint stage is required}"
+  local producer_sha="${4:-}"
+  local producer_stage="${5:-}"
+  local producer_run_id="${6:-}"
+  local producer_run_attempt="${7:-}"
+  local resolved
+  resolved="$(realpath "${archive}" 2>/dev/null || true)"
+  if [ -z "${resolved}" ] || [ ! -s "${resolved}" ]; then
+    echo "::error::Cannot record validation state for checkpoint archive: ${archive}"
+    return 1
+  fi
+  CHECKPOINT_VALIDATED_ARCHIVE="${resolved}"
+  CHECKPOINT_VALIDATED_VERSION="${version}"
+  CHECKPOINT_VALIDATED_STAGE="${stage}"
+  CHECKPOINT_VALIDATED_PRODUCER_SHA="${producer_sha}"
+  CHECKPOINT_VALIDATED_PRODUCER_STAGE="${producer_stage}"
+  CHECKPOINT_VALIDATED_PRODUCER_RUN_ID="${producer_run_id}"
+  CHECKPOINT_VALIDATED_PRODUCER_RUN_ATTEMPT="${producer_run_attempt}"
+}
+
+checkpoint_validation_state_matches() {
+  local archive="${1:?checkpoint archive is required}"
+  local version="${2:?checkpoint version is required}"
+  local stage="${3:?checkpoint stage is required}"
+  local producer_sha="${4:-}"
+  local producer_stage="${5:-}"
+  local producer_run_id="${6:-}"
+  local producer_run_attempt="${7:-}"
+  local resolved
+  resolved="$(realpath "${archive}" 2>/dev/null || true)"
+  [ -n "${resolved}" ] \
+    && [ "${CHECKPOINT_VALIDATED_ARCHIVE}" = "${resolved}" ] \
+    && [ "${CHECKPOINT_VALIDATED_VERSION}" = "${version}" ] \
+    && [ "${CHECKPOINT_VALIDATED_STAGE}" = "${stage}" ] \
+    && [ "${CHECKPOINT_VALIDATED_PRODUCER_SHA}" = "${producer_sha}" ] \
+    && [ "${CHECKPOINT_VALIDATED_PRODUCER_STAGE}" = "${producer_stage}" ] \
+    && [ "${CHECKPOINT_VALIDATED_PRODUCER_RUN_ID}" = "${producer_run_id}" ] \
+    && [ "${CHECKPOINT_VALIDATED_PRODUCER_RUN_ATTEMPT}" = "${producer_run_attempt}" ]
+}
 
 validate_checkpoint_source_run() {
   local run_id="${1:?checkpoint run id is required}"
@@ -118,6 +179,7 @@ validate_checkpoint_source_run() {
   CHECKPOINT_PROVENANCE_STATUS=invalid
   CHECKPOINT_PRODUCER_SHA=""
   CHECKPOINT_PRODUCER_STAGE=""
+  CHECKPOINT_PRODUCER_RUN_ATTEMPT=""
   if [ -z "${expected_repo}" ] || [ -z "${expected_ref}" ]; then
     CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
     echo "::error::GitHub repository/ref metadata is unavailable for checkpoint provenance validation."
@@ -153,12 +215,14 @@ validate_checkpoint_source_run() {
     echo "::error::Could not establish checkpoint run provenance for Actions run ${run_id}."
     return 1
   fi
-  local workflow_path head_repo head_branch head_sha title
+  local workflow_path head_repo head_branch head_sha title event run_attempt
   if ! workflow_path="$(jq -er '.path | strings' <<<"${run_json}")" \
       || ! head_repo="$(jq -er '.head_repository.full_name | strings' <<<"${run_json}")" \
       || ! head_branch="$(jq -er '.head_branch | strings' <<<"${run_json}")" \
       || ! head_sha="$(jq -er '.head_sha | strings' <<<"${run_json}")" \
-      || ! title="$(jq -er '.display_title | strings' <<<"${run_json}")"; then
+      || ! title="$(jq -er '.display_title | strings' <<<"${run_json}")" \
+      || ! event="$(jq -er '.event | strings' <<<"${run_json}")" \
+      || ! run_attempt="$(jq -er '.run_attempt | numbers' <<<"${run_json}")"; then
     CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
     echo "::error::Checkpoint run ${run_id} returned incomplete or malformed provenance metadata."
     return 1
@@ -166,6 +230,15 @@ validate_checkpoint_source_run() {
   [[ "${head_sha}" =~ ^[0-9a-fA-F]{40}$ ]] || {
     CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
     echo "::error::Checkpoint run ${run_id} returned an invalid head SHA: ${head_sha}"
+    return 1
+  }
+  [[ "${run_attempt}" =~ ^[1-9][0-9]*$ ]] || {
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Checkpoint run ${run_id} returned an invalid run_attempt: ${run_attempt}"
+    return 1
+  }
+  test "${event}" = "workflow_dispatch" || {
+    echo "::error::Checkpoint run ${run_id} was triggered by ${event}, not workflow_dispatch."
     return 1
   }
 
@@ -236,7 +309,8 @@ validate_checkpoint_source_run() {
   CHECKPOINT_PROVENANCE_STATUS=usable
   CHECKPOINT_PRODUCER_SHA="${head_sha,,}"
   CHECKPOINT_PRODUCER_STAGE="${producer_stage}"
-  echo "Verified checkpoint provenance: run ${run_id}, branch ${head_branch}, head ${CHECKPOINT_PRODUCER_SHA}, stage ${producer_stage}, artifact ${artifact_name}."
+  CHECKPOINT_PRODUCER_RUN_ATTEMPT="${run_attempt}"
+  echo "Verified checkpoint provenance: run ${run_id}, run attempt ${run_attempt}, branch ${head_branch}, head ${CHECKPOINT_PRODUCER_SHA}, stage ${producer_stage}, artifact ${artifact_name}."
 }
 
 checkpoint_bundle_is_usable() {
@@ -246,6 +320,8 @@ checkpoint_bundle_is_usable() {
   local expected_producer_sha="${4:-}"
   local expected_producer_stage="${5:-}"
   local expected_producer_run_id="${6:-}"
+  local expected_producer_run_attempt="${7:-}"
+  clear_checkpoint_validation_state
   local bundle_dir
   bundle_dir="$(dirname "${archive}")"
   local checksum="${bundle_dir}/$(basename "${CHECKPOINT_SHA256}")"
@@ -276,9 +352,16 @@ checkpoint_bundle_is_usable() {
   if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
     if [ "${ALLOW_LEGACY_CHECKPOINT_VERSION:-}" = "${expected_version}" ]; then
       echo "::warning::Legacy checkpoint accepted only because ALLOW_LEGACY_CHECKPOINT_VERSION explicitly permits Chromium ${expected_version}; structural safety passed and the next checkpoint will regenerate integrity metadata."
+      mark_checkpoint_bundle_validated "${archive}" "${expected_version}" "${current_stage}"
       return 0
     fi
     echo "::error::Legacy checkpoint lacks integrity metadata and no version-scoped migration opt-in is active."
+    return 1
+  fi
+
+  if [ -z "${expected_producer_sha}" ] || [ -z "${expected_producer_stage}" ] \
+      || [ -z "${expected_producer_run_id}" ] || [ -z "${expected_producer_run_attempt}" ]; then
+    echo "::error::Metadata-bearing checkpoints require trusted producer SHA/stage/run/attempt context."
     return 1
   fi
 
@@ -295,6 +378,7 @@ checkpoint_bundle_is_usable() {
   EXPECTED_PRODUCER_SHA="${expected_producer_sha}" \
   EXPECTED_PRODUCER_STAGE="${expected_producer_stage}" \
   EXPECTED_PRODUCER_RUN_ID="${expected_producer_run_id}" \
+  EXPECTED_PRODUCER_RUN_ATTEMPT="${expected_producer_run_attempt}" \
   CHECKPOINT_MANIFEST_PATH="${manifest}" python3 - <<'PY'
 import json
 import os
@@ -335,6 +419,12 @@ if expected_run_id and manifest_run_id and manifest_run_id != expected_run_id:
     raise SystemExit(
         f"Checkpoint producer run {manifest_run_id} does not match trusted run {expected_run_id}"
     )
+expected_run_attempt = os.environ.get("EXPECTED_PRODUCER_RUN_ATTEMPT", "")
+manifest_run_attempt = str(manifest.get("producer_run_attempt", ""))
+if expected_run_attempt and manifest_run_attempt and manifest_run_attempt != expected_run_attempt:
+    raise SystemExit(
+        f"Checkpoint producer run attempt {manifest_run_attempt} does not match trusted attempt {expected_run_attempt}"
+    )
 PY
   then
     echo "::error::Checkpoint manifest compatibility/provenance validation failed."
@@ -342,14 +432,23 @@ PY
   fi
 
   local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${expected_version}.tar.xz.sha256"
-  if [ -s "${source_checksum_file}" ]; then
-    local current_source_sha manifest_source_sha
-    current_source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"
-    manifest_source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_tar_sha256"])' "${manifest}")"
-    if [ "${current_source_sha}" != "${manifest_source_sha}" ]; then
-      echo "::error::Checkpoint source tarball checksum does not match the prepared Chromium source."
-      return 1
-    fi
+  if [ ! -s "${source_checksum_file}" ]; then
+    echo "::error::Prepared Chromium source checksum is unavailable; refusing a metadata-bearing checkpoint without source identity."
+    return 1
+  fi
+  local current_source_sha manifest_source_sha
+  current_source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"
+  if ! [[ "${current_source_sha}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "::error::Prepared Chromium source checksum is malformed."
+    return 1
+  fi
+  if ! manifest_source_sha="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("source_tar_sha256", ""); assert isinstance(v,str) and len(v)==64; print(v)' "${manifest}" 2>/dev/null)"; then
+    echo "::error::Checkpoint manifest source_tar_sha256 is missing or malformed."
+    return 1
+  fi
+  if [ "${current_source_sha,,}" != "${manifest_source_sha,,}" ]; then
+    echo "::error::Checkpoint source tarball checksum does not match the prepared Chromium source."
+    return 1
   fi
 
   local current_clang manifest_clang
@@ -381,6 +480,10 @@ PY
     echo "::error::Checkpoint depot_tools pin differs from the Chromium source DEPS pin."
     return 1
   fi
+  mark_checkpoint_bundle_validated \
+    "${archive}" "${expected_version}" "${current_stage}" \
+    "${expected_producer_sha}" "${expected_producer_stage}" \
+    "${expected_producer_run_id}" "${expected_producer_run_attempt}"
 }
 
 restore_out_checkpoint() {
@@ -389,6 +492,10 @@ restore_out_checkpoint() {
   local expected_version="${2:-}"
   local current_stage="${3:-1}"
   local already_validated="${4:-false}"
+  local expected_producer_sha="${5:-}"
+  local expected_producer_stage="${6:-}"
+  local expected_producer_run_id="${7:-}"
+  local expected_producer_run_attempt="${8:-}"
   local out_parent="${CHROMIUM_SRC}/out"
   mkdir -p "${out_parent}"
 
@@ -398,8 +505,19 @@ restore_out_checkpoint() {
     return 0
   fi
 
-  if [ "${already_validated}" != "true" ]; then
-    checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
+  if [ "${already_validated}" = "true" ]; then
+    if ! checkpoint_validation_state_matches \
+        "${archive}" "${expected_version}" "${current_stage}" \
+        "${expected_producer_sha}" "${expected_producer_stage}" \
+        "${expected_producer_run_id}" "${expected_producer_run_attempt}"; then
+      echo "::error::restore_out_checkpoint was told to skip validation without matching in-process validation state."
+      return 1
+    fi
+  else
+    checkpoint_bundle_is_usable \
+      "${archive}" "${expected_version}" "${current_stage}" \
+      "${expected_producer_sha}" "${expected_producer_stage}" \
+      "${expected_producer_run_id}" "${expected_producer_run_attempt}"
   fi
 
   # Refuse extraction if the validated archive would consume nearly all remaining

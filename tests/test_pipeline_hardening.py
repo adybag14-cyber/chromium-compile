@@ -241,7 +241,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertLess(action.index("validate_checkpoint_source_run"), action.index("bounded_gh run download"))
         self.assertIn("fallback_rc", action)
         self.assertIn("preferred_rc", action)
-        self.assertIn('restore_out_checkpoint "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true', action)
+        self.assertIn("resume_producer_sha", action)
+        self.assertIn("resume_producer_run_attempt", action)
+        self.assertIn('"${resume_producer_run_id}" "${resume_producer_run_attempt}"', action)
         self.assertIn("Fallback checkpoint download failed; continuing with fresh output/ccache", action)
 
     def test_checkpoint_integrity_failures_return_immediately(self):
@@ -552,7 +554,14 @@ class PipelineHardeningTests(unittest.TestCase):
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
         self.assertIn("validate_checkpoint_source_run()", resume)
         self.assertIn("CHECKPOINT_PRODUCER_SHA", resume)
+        self.assertIn("CHECKPOINT_PRODUCER_RUN_ATTEMPT", resume)
         self.assertIn("producer_run_id", resume)
+        self.assertIn("producer_run_attempt", resume)
+        self.assertIn("workflow_dispatch", resume)
+        self.assertIn("checkpoint_validation_state_matches", resume)
+        self.assertIn("Metadata-bearing checkpoints require trusted producer SHA/stage/run/attempt context", resume)
+        self.assertIn("skip validation without matching in-process validation state", resume)
+        self.assertIn("refusing a metadata-bearing checkpoint without source identity", resume)
         self.assertIn("scripts/validate_checkpoint_archive.py", resume)
         self.assertLess(
             resume.index("scripts/validate_checkpoint_archive.py"),
@@ -562,6 +571,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn(".checkpoint-restore-", resume)
         self.assertIn("active output remains untouched", resume)
         self.assertGreaterEqual(action.count("validate_checkpoint_source_run"), 2)
+        self.assertIn("preferred_run_attempt", action)
+        self.assertIn("fallback_run_attempt", action)
         self.assertIn("preferred-checkpoint-run-id", action)
         self.assertIn("fallback-checkpoint-run-id", action)
         self.assertIn("CHECKPOINT_PROVENANCE_FAILURE_CLASS", action)
