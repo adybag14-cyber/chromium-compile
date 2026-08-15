@@ -24,12 +24,16 @@ CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_CHECKPOINT_ARC
 CHROMIUM_I686_GH_TIMEOUT_SECONDS="${CHROMIUM_I686_GH_TIMEOUT_SECONDS:-600}"
 CHROMIUM_I686_LDD_TIMEOUT_SECONDS="${CHROMIUM_I686_LDD_TIMEOUT_SECONDS:-15}"
 CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS="${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS:-60}"
+CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB="${CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB:-8}"
+CHROMIUM_I686_MAX_RELEASE_MEMBERS="${CHROMIUM_I686_MAX_RELEASE_MEMBERS:-250000}"
+CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB="${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB:-2}"
 CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB="${CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB:-40}"
 CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS="${CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS:-2000000}"
 CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB="${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB:-5}"
 CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
 export DEPOT_TOOLS_UPDATE=0
 export CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS
+export CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB CHROMIUM_I686_MAX_RELEASE_MEMBERS
 
 
 bounded_external() {
@@ -1372,6 +1376,44 @@ EOF
   "${canary_bin}"
 }
 
+validate_release_archive_with_stats() {
+  local package="${1:?release package is required}"
+  local stats_file="${2:?release archive stats path is required}"
+  rm -f "${stats_file}"
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+    python3 "${WORKSPACE}/scripts/validate_release_archive.py" \
+      "${package}" --stats-file "${stats_file}"
+  test -s "${stats_file}"
+}
+
+ensure_release_archive_extract_space() {
+  local stats_file="${1:?release archive stats path is required}"
+  local target_parent="${2:?release extraction parent is required}"
+  [[ "${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
+    echo "::error::CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB must be a non-negative integer."
+    return 1
+  }
+  local unpacked_bytes available_bytes reserve_bytes required_bytes required_gib
+  if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${stats_file}" 2>/dev/null)"; then
+    echo "::error::Release archive stats are missing or malformed: ${stats_file}"
+    return 1
+  fi
+  reserve_bytes=$((CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB * 1024 * 1024 * 1024))
+  required_bytes=$((unpacked_bytes + reserve_bytes))
+  mkdir -p "${target_parent}"
+  available_bytes="$(df -PB1 "${target_parent}" | awk 'NR == 2 {print $4}')"
+  [[ "${available_bytes}" =~ ^[0-9]+$ ]] || {
+    echo "::error::Could not determine free disk bytes for release extraction."
+    return 1
+  }
+  required_gib=$(( (required_bytes + 1024 * 1024 * 1024 - 1) / (1024 * 1024 * 1024) ))
+  echo "Release extraction requires ${required_bytes} bytes including reserve (~${required_gib} GiB); ${available_bytes} bytes are available."
+  if [ "${available_bytes}" -lt "${required_bytes}" ]; then
+    echo "::error::Insufficient disk space for bounded release extraction."
+    return 1
+  fi
+}
+
 CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=""
 
 classify_runtime_smoke_status() {
@@ -1533,21 +1575,38 @@ package_chromium_i686() {
 ' "${files[@]}"
   } > "${manifest}"
 
-  if ! python3 "${WORKSPACE}/scripts/validate_release_archive.py" "${package}"; then
-    echo "::error::Packaged runtime archive failed deterministic safety/completeness validation."
+  local release_stats="${WORKSPACE}/release-archive-stats-${version}.json"
+  if ! validate_release_archive_with_stats "${package}" "${release_stats}"; then
+    echo "::error::Packaged runtime archive failed deterministic safety/completeness/resource validation."
     return 1
   fi
 
   local smoke_dir="${WORKSPACE}/release-smoke-${version}"
   bounded_rm_rf "${smoke_dir}"
   mkdir -p "${smoke_dir}"
-  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${package}" -C "${smoke_dir}"
+  if ! ensure_release_archive_extract_space "${release_stats}" "${smoke_dir}"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    bounded_rm_rf "${smoke_dir}" || true
+    rm -f "${release_stats}"
+    return 1
+  fi
+  local extract_status=0
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+    tar -xJf "${package}" -C "${smoke_dir}" || extract_status=$?
+  if [ "${extract_status}" -ne 0 ]; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Validated release archive extraction failed with status ${extract_status}."
+    bounded_rm_rf "${smoke_dir}" || true
+    rm -f "${release_stats}"
+    return 1
+  fi
   local smoke_status=0
   validate_i686_runtime_bundle "${smoke_dir}" || smoke_status=$?
   if [ "${smoke_status}" -eq 0 ]; then
     smoke_test_i686_runtime_bundle "${smoke_dir}" "${version}" || smoke_status=$?
   fi
   bounded_rm_rf "${smoke_dir}" || true
+  rm -f "${release_stats}"
   if [ "${smoke_status}" -ne 0 ]; then
     CHROMIUM_PACKAGE_FAILURE_CLASS="${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS:-deterministic_build}"
     echo "::error::Packaged runtime bundle failed deterministic i686/runtime smoke validation."

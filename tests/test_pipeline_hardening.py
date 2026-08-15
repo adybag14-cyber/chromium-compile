@@ -326,6 +326,30 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("smoke_test_i686_runtime_bundle", validation)
         self.assertIn("bash tests/test_release_runtime_smoke.sh", validation)
 
+    def test_release_archive_validation_is_streaming_and_resource_bounded(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        validator = (ROOT / "scripts" / "validate_release_archive.py").read_text(encoding="utf-8")
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn('mode="r|xz"', validator)
+        self.assertNotIn("getmembers()", validator)
+        self.assertIn("DEFAULT_MAX_MEMBERS", validator)
+        self.assertIn("DEFAULT_MAX_UNPACKED_GIB", validator)
+        self.assertIn("--stats-file", validator)
+        self.assertIn("CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB", common)
+        self.assertIn("CHROMIUM_I686_MAX_RELEASE_MEMBERS", common)
+        self.assertIn("CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB", common)
+        self.assertIn("validate_release_archive_with_stats()", common)
+        self.assertIn("ensure_release_archive_extract_space()", common)
+        self.assertIn('CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure', common)
+        self.assertIn("validate_release_archive_with_stats", publish)
+        self.assertLess(publish.index("validate_release_archive_with_stats"), publish.index("tar -xJf"))
+        self.assertIn("ensure_release_archive_extract_space", publish)
+        release_drill = validation[validation.index("validate_real_release_runtime:"):validation.index("validate_full_source_preflight:")]
+        self.assertIn("validate_release_archive_with_stats", release_drill)
+        self.assertIn("ensure_release_archive_extract_space", release_drill)
+        self.assertIn("bash tests/test_release_archive_space.sh", validation)
+
     def test_build_tracks_upstream_linux_installer_runtime(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         port = (ROOT / ".github" / "scripts" / "chromium_i686_port.sh").read_text(encoding="utf-8")

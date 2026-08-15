@@ -213,9 +213,12 @@ jobs:
           test "${actual}" = "${expected}"
           test "${actual}" = "${manifest_sha}"
 
-          python3 scripts/validate_release_archive.py "${package}"
+          release_stats="${RUNNER_TEMP}/release-archive-stats.json"
+          validate_release_archive_with_stats "${package}" "${release_stats}"
           mkdir release-runtime
-          bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"             tar -xJf "${package}" -C release-runtime
+          ensure_release_archive_extract_space "${release_stats}" release-runtime
+          bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+            tar -xJf "${package}" -C release-runtime
           validate_i686_runtime_bundle release-runtime
 
       - name: Create or resume transactional immutable release

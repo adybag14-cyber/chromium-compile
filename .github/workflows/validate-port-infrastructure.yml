@@ -93,6 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/test_release_runtime_smoke.sh
+          bash tests/test_release_archive_space.sh
 
       - name: Reject floating first-party action tags
         shell: bash
@@ -342,11 +343,14 @@ jobs:
           remote_checksum_digest="$(jq -er --arg name "${checksum_name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}")"
           test "${remote_digest}" = "sha256:${package_sha}"
           test "${remote_checksum_digest}" = "sha256:${checksum_asset_sha}"
-          python3 scripts/validate_release_archive.py "${proof_dir}/${package_name}"
+          release_stats="${proof_dir}/release-archive-stats.json"
+          validate_release_archive_with_stats "${proof_dir}/${package_name}" "${release_stats}"
 
           runtime_dir="${proof_dir}/runtime"
           mkdir -p "${runtime_dir}"
-          bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" tar -xJf "${proof_dir}/${package_name}" -C "${runtime_dir}"
+          ensure_release_archive_extract_space "${release_stats}" "${runtime_dir}"
+          bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+            tar -xJf "${proof_dir}/${package_name}" -C "${runtime_dir}"
           validate_i686_runtime_bundle "${runtime_dir}"
           smoke_test_i686_runtime_bundle "${runtime_dir}" "${RELEASE_SMOKE_VERSION}"
           echo "Real published Chromium ${RELEASE_SMOKE_VERSION} i686 runtime smoke passed."
