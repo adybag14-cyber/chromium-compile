@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: chromium-i686-stable-watcher
+  group: ${{ github.ref_name == github.event.repository.default_branch && 'chromium-i686-stable-watcher' || format('chromium-i686-stable-watcher-nonprod-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:

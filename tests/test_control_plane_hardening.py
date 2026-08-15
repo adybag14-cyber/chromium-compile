@@ -76,6 +76,12 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         for workflow in (bootstrap, watcher, preflight):
             self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
         self.assertIn("needs.detect.result == 'failure' && github.ref_name == github.event.repository.default_branch", watcher)
+        build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        self.assertIn("chromium-i686-build-nonprod-{0}", build)
+        self.assertIn("chromium-i686-preflight-nonprod-{0}", preflight)
+        self.assertIn("chromium-i686-release-nonprod-{0}", publish)
+        self.assertIn("chromium-i686-stable-watcher-nonprod-{0}", watcher)
+        self.assertIn("chromium-i686-bootstrap-nonprod-{0}", bootstrap)
 
     def test_secondary_reporter_covers_publisher_and_uses_central_issue_helper(self):
         reporter = (ROOT / ".github" / "workflows" / "report-i686-build-failure.yml").read_text(encoding="utf-8")

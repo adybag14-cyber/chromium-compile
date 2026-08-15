@@ -26,7 +26,7 @@ permissions:
 concurrency:
   # Release mutation is rare and correctness-sensitive. Serialize all publishers so
   # two successful build runs can never race on the same version tag/draft.
-  group: chromium-i686-release
+  group: ${{ (github.event_name == 'workflow_run' || github.ref_name == github.event.repository.default_branch) && 'chromium-i686-release' || format('chromium-i686-release-nonprod-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:

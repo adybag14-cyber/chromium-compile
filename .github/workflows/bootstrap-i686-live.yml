@@ -8,7 +8,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: chromium-i686-bootstrap
+  group: ${{ github.ref_name == github.event.repository.default_branch && 'chromium-i686-bootstrap' || format('chromium-i686-bootstrap-nonprod-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
