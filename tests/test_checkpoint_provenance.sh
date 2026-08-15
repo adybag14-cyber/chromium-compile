@@ -28,6 +28,29 @@ validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 
 [ "${CHECKPOINT_PRODUCER_STAGE}" = "2" ]
 [ "${CHECKPOINT_PRODUCER_RUN_ATTEMPT}" = "1" ]
 
+# Numeric inputs are bounded lexically before arithmetic or API access.
+for bad_run in 0 999999999999999999999 999999999999999999999999999999999999; do
+  set +e
+  validate_checkpoint_source_run "${bad_run}" 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "${status}" -eq 1 ]
+done
+for bad_stage in 0 51 99 999999999999999999999; do
+  set +e
+  validate_checkpoint_source_run 12345 151.0.7922.108 "${bad_stage}" chromium-i686-out-stage-2 >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "${status}" -eq 1 ]
+done
+for bad_artifact in chromium-i686-out-stage-0 chromium-i686-out-stage-51 chromium-i686-out-stage-999999999999999999; do
+  set +e
+  validate_checkpoint_source_run 12345 151.0.7922.108 3 "${bad_artifact}" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "${status}" -eq 1 ]
+done
+
 RUN_JSON='{"path":".github/workflows/other.yml","head_repository":{"full_name":"owner/repo"},"head_branch":"main","head_sha":"1111111111111111111111111111111111111111","event":"workflow_dispatch","run_attempt":1,"display_title":"Chromium i686 151.0.7922.108 - stage 2 - attempt 0"}'
 set +e
 validate_checkpoint_source_run 12345 151.0.7922.108 3 chromium-i686-out-stage-2 >/dev/null 2>&1

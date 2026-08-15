@@ -89,8 +89,8 @@ jobs:
 
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || control_fail "version must use the form 150.0.7871.186"
-          [[ "${stage}" =~ ^[0-9]+$ ]] \
-            || control_fail "stage must be an integer"
+          [[ "${stage}" =~ ^[1-9][0-9]?$ ]] \
+            || control_fail "stage must be an integer from 1 through 50"
           [[ "${max_stage}" =~ ^[0-9]{1,2}$ ]] \
             || control_fail "CHROMIUM_I686_MAX_STAGES must be an integer from 1 through 50"
           if [ "${max_stage}" -lt 1 ] || [ "${max_stage}" -gt 50 ]; then
@@ -104,9 +104,9 @@ jobs:
           if [ "${MAX_RUNNER_RETRIES}" -gt 10 ]; then
             control_fail "CHROMIUM_RUNNER_RETRIES must not exceed 10 automatic fresh-runner attempts"
           fi
-          [[ "${retry_count}" =~ ^[0-9]+$ ]] \
-            || control_fail "retry_count must be an integer"
-          if [ "${retry_count}" -lt 0 ] || [ "${retry_count}" -gt "${MAX_RUNNER_RETRIES}" ]; then
+          [[ "${retry_count}" =~ ^(0|[1-9][0-9]?)$ ]] \
+            || control_fail "retry_count must be an integer from 0 through 10"
+          if [ "${retry_count}" -gt "${MAX_RUNNER_RETRIES}" ]; then
             control_fail "retry_count must be between 0 and ${MAX_RUNNER_RETRIES}"
           fi
           [[ "${checkpoint_minutes}" =~ ^[1-9][0-9]{0,2}$ ]] \
