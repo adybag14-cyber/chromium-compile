@@ -5,10 +5,14 @@ apply_i686_port_patches() {
   local version="${1:?Chromium version is required}"
   local source_root="${CHROMIUM_SRC:?CHROMIUM_SRC is required}"
   local major="${version%%.*}"
+  CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
 
-  python3 "${GITHUB_WORKSPACE}/patches/common/enable_linux_i686.py" \
-    --source-root "${source_root}" \
-    --version "${version}"
+  if ! python3 "${GITHUB_WORKSPACE}/patches/common/enable_linux_i686.py" \
+      --source-root "${source_root}" \
+      --version "${version}"; then
+    echo "::error::Common semantic Linux i686 patch no longer applies to Chromium ${version}."
+    return 1
+  fi
 
   local version_dir="${GITHUB_WORKSPACE}/patches/versions/${major}"
   if [ ! -d "${version_dir}" ]; then
@@ -21,14 +25,16 @@ apply_i686_port_patches() {
   local patch_file
   for patch_file in "${patches[@]}"; do
     echo "Checking downstream patch ${patch_file}"
-    (
-      cd "${source_root}"
-      git apply --check "${patch_file}"
-      git apply "${patch_file}"
-    )
+    if ! (
+      cd "${source_root}" \
+        && git apply --check "${patch_file}" \
+        && git apply "${patch_file}"
+    ); then
+      echo "::error::Downstream i686 patch no longer applies cleanly: ${patch_file}"
+      return 1
+    fi
   done
 }
-
 run_i686_compatibility_preflight() {
   local out_dir="${OUT_DIR:?OUT_DIR is required}"
   local source_root="${CHROMIUM_SRC:?CHROMIUM_SRC is required}"

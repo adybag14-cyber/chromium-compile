@@ -46,6 +46,20 @@ bounded_external() {
   timeout -k 30s "${seconds}s" "$@"
 }
 
+# Hard ceiling for extraction/restore reserve knobs. Values are validated as
+# short decimal text before arithmetic so malicious/accidental huge integers
+# cannot overflow Bash's signed integer calculations.
+CHROMIUM_I686_HARD_MAX_RESERVE_GIB=64
+validate_bounded_reserve_gib() {
+  local value="${1:?reserve value is required}"
+  local name="${2:?reserve variable name is required}"
+  if [[ ! "${value}" =~ ^(0|[1-9][0-9]{0,2})$ ]] \
+      || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_RESERVE_GIB}" ]; then
+    echo "::error::${name} must be a non-negative integer no greater than ${CHROMIUM_I686_HARD_MAX_RESERVE_GIB} GiB."
+    return 1
+  fi
+}
+
 bounded_gh() {
   bounded_external "${CHROMIUM_I686_GH_TIMEOUT_SECONDS}" gh "$@"
 }
@@ -538,8 +552,8 @@ capture_ldd_output() {
     status=$?
   fi
   printf -v "${output_name}" '%s' "${output}"
-  I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
-  echo "::error::ldd failed or timed out for generated ELF32 tool ${binary} (status ${status}); refusing an unbounded runtime probe."
+  I386_RUNTIME_REPAIR_FAILURE_CLASS="$(classify_prepare_command_status "${status}" deterministic_build)"
+  echo "::error::ldd failed or timed out for ELF32 executable ${binary} (status ${status}); refusing an unbounded runtime probe."
   return 1
 }
 
@@ -806,7 +820,19 @@ write_stage_summary() {
   } >> "${summary}"
 }
 
+CHROMIUM_PREPARE_FAILURE_CLASS=""
+
+classify_prepare_command_status() {
+  local status="${1:-1}"
+  local fallback="${2:-infrastructure}"
+  case "${status}" in
+    124|126|127|137|143) printf '%s\n' infrastructure ;;
+    *) printf '%s\n' "${fallback}" ;;
+  esac
+}
+
 verify_depot_tools_bootstrap() {
+  CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
   local marker="${DEPOT_TOOLS}/python3_bin_reldir.txt"
   if [ ! -s "${marker}" ]; then
     echo "::error::Pinned depot_tools bootstrap did not create ${marker}."
@@ -814,7 +840,10 @@ verify_depot_tools_bootstrap() {
   fi
 
   local python_rel python_dir python_bin
-  python_rel="$(tr -d '\r\n' < "${marker}")"
+  if ! python_rel="$(tr -d '\r\n' < "${marker}")"; then
+    echo "::error::Could not read pinned depot_tools Python bootstrap marker."
+    return 1
+  fi
   if [ -z "${python_rel}" ] || [[ "${python_rel}" = /* ]] || [[ "${python_rel}" == *".."* ]] || [[ "${python_rel}" == *\\* ]]; then
     echo "::error::Pinned depot_tools wrote an unsafe Python bootstrap path: ${python_rel:-<empty>}"
     return 1
@@ -826,59 +855,114 @@ verify_depot_tools_bootstrap() {
     return 1
   fi
 
-  # Exercise the exact wrapper autoninja uses, not merely the system Python.
-  if ! bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
-      "${DEPOT_TOOLS}/python-bin/python3" -c \
-      'import pathlib,sys; print(f"depot_tools bootstrap Python: {pathlib.Path(sys.executable).resolve()}")'; then
-    echo "::error::Pinned depot_tools Python wrapper is not executable after bootstrap."
+  local wrapper_status=0
+  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
+    "${DEPOT_TOOLS}/python-bin/python3" -c \
+    'import pathlib,sys; print(f"depot_tools bootstrap Python: {pathlib.Path(sys.executable).resolve()}")' \
+    || wrapper_status=$?
+  if [ "${wrapper_status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${wrapper_status}" deterministic_build)"
+    echo "::error::Pinned depot_tools Python wrapper is not executable after bootstrap (status ${wrapper_status})."
     return 1
   fi
   echo "Pinned depot_tools Python bootstrap marker: ${python_rel}"
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 install_depot_tools() {
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
   local deps_file="${CHROMIUM_SRC}/DEPS"
-  test -s "${deps_file}"
+  if [ ! -s "${deps_file}" ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Chromium DEPS is unavailable for pinned depot_tools resolution."
+    return 1
+  fi
   local revision
-  revision="$(python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${deps_file}" --field depot_tools_revision)"
+  if ! revision="$(python3 "${WORKSPACE}/scripts/chromium_tool_pins.py" --deps "${deps_file}" --field depot_tools_revision)"; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Could not resolve immutable depot_tools revision from Chromium DEPS."
+    return 1
+  fi
   [[ "${revision}" =~ ^[0-9a-f]{40}$ ]] || {
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
     echo "::error::Invalid Chromium-pinned depot_tools revision: ${revision}"
     return 1
   }
 
-  bounded_rm_rf "${DEPOT_TOOLS}"
-  mkdir -p "${DEPOT_TOOLS}"
-  git -C "${DEPOT_TOOLS}" init -q
-  git -C "${DEPOT_TOOLS}" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
+  if ! bounded_rm_rf "${DEPOT_TOOLS}" || ! mkdir -p "${DEPOT_TOOLS}"; then
+    echo "::error::Could not prepare pinned depot_tools checkout directory."
+    return 1
+  fi
+  if ! git -C "${DEPOT_TOOLS}" init -q \
+      || ! git -C "${DEPOT_TOOLS}" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git; then
+    echo "::error::Could not initialize pinned depot_tools checkout."
+    return 1
+  fi
   echo "Fetching Chromium-pinned depot_tools revision ${revision}."
+  local fetch_status=0
   bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" \
-    git -C "${DEPOT_TOOLS}" fetch --depth=1 origin "${revision}"
-  git -C "${DEPOT_TOOLS}" checkout -q --detach FETCH_HEAD
-  test "$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" = "${revision}"
+    git -C "${DEPOT_TOOLS}" fetch --depth=1 origin "${revision}" || fetch_status=$?
+  if [ "${fetch_status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${fetch_status}" infrastructure)"
+    echo "::error::Could not fetch Chromium-pinned depot_tools revision ${revision} (status ${fetch_status})."
+    return 1
+  fi
+  if ! git -C "${DEPOT_TOOLS}" checkout -q --detach FETCH_HEAD; then
+    echo "::error::Could not check out fetched depot_tools revision."
+    return 1
+  fi
+  local checked_out
+  if ! checked_out="$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)"; then
+    echo "::error::Could not read pinned depot_tools checkout revision."
+    return 1
+  fi
+  if [ "${checked_out}" != "${revision}" ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Pinned depot_tools checkout mismatch: expected ${revision}, got ${checked_out}."
+    return 1
+  fi
 
   export DEPOT_TOOLS_UPDATE=0
-  echo "DEPOT_TOOLS_UPDATE=0" >> "${GITHUB_ENV}"
-  echo "${DEPOT_TOOLS}" >> "${GITHUB_PATH}"
-  echo "${DEPOT_TOOLS}/.cipd_bin" >> "${GITHUB_PATH}"
+  if ! printf '%s\n' 'DEPOT_TOOLS_UPDATE=0' >> "${GITHUB_ENV}" \
+      || ! printf '%s\n' "${DEPOT_TOOLS}" >> "${GITHUB_PATH}" \
+      || ! printf '%s\n' "${DEPOT_TOOLS}/.cipd_bin" >> "${GITHUB_PATH}"; then
+    echo "::error::Could not export pinned depot_tools environment paths."
+    return 1
+  fi
   export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
 
-  # Bootstrap all tools required by this exact checkout without updating the
-  # repository. `ensure_bootstrap` is depot_tools' supported pinned-checkout path;
-  # unlike update_depot_tools it does not roll the Git revision.
   if [ ! -x "${DEPOT_TOOLS}/ensure_bootstrap" ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
     echo "::error::Pinned depot_tools revision ${revision} lacks executable ensure_bootstrap."
     return 1
   fi
   echo "Bootstrapping Chromium-pinned depot_tools revision ${revision} without self-update."
+  local bootstrap_status=0
   bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
-    env DEPOT_TOOLS_UPDATE=0 "${DEPOT_TOOLS}/ensure_bootstrap"
+    env DEPOT_TOOLS_UPDATE=0 "${DEPOT_TOOLS}/ensure_bootstrap" || bootstrap_status=$?
+  if [ "${bootstrap_status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${bootstrap_status}" infrastructure)"
+    echo "::error::Pinned depot_tools bootstrap failed with status ${bootstrap_status}."
+    return 1
+  fi
 
-  # Keep the lightweight CIPD identity probe, but only after the full bootstrap
-  # that autoninja/python-bin actually requires.
-  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" "${DEPOT_TOOLS}/cipd" version
-  verify_depot_tools_bootstrap
-  test "$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" = "${revision}"
-  echo "Pinned depot_tools revision: $(git -C "${DEPOT_TOOLS}" rev-parse HEAD)"
+  local cipd_status=0
+  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" "${DEPOT_TOOLS}/cipd" version || cipd_status=$?
+  if [ "${cipd_status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${cipd_status}" infrastructure)"
+    echo "::error::Pinned depot_tools CIPD client probe failed with status ${cipd_status}."
+    return 1
+  fi
+  if ! verify_depot_tools_bootstrap; then
+    return 1
+  fi
+  if ! checked_out="$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" || [ "${checked_out}" != "${revision}" ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::depot_tools revision changed during pinned bootstrap."
+    return 1
+  fi
+  echo "Pinned depot_tools revision: ${checked_out}"
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 chromium_gn_version() {
@@ -985,10 +1069,10 @@ PY
 ensure_source_archive_extract_space() {
   local stats_file="${1:?source archive stats path is required}"
   local target_parent="${2:?source extraction parent is required}"
-  [[ "${CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
-    echo "::error::CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB must be a non-negative integer."
+  if ! validate_bounded_reserve_gib \
+      "${CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB}" CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB; then
     return 1
-  }
+  fi
   local unpacked_bytes available_bytes reserve_bytes required_bytes required_gib
   if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${stats_file}" 2>/dev/null)"; then
     echo "::error::Source archive stats are missing or malformed: ${stats_file}"
@@ -1289,17 +1373,56 @@ prepare_chromium_source() {
 }
 
 install_chromium_clang() {
-  cd "${CHROMIUM_SRC}"
-  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" python3 tools/clang/scripts/update.py
-  test -x third_party/llvm-build/Release+Asserts/bin/clang
-  test -s third_party/llvm-build/Release+Asserts/cr_build_revision
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
+  if ! cd "${CHROMIUM_SRC}"; then
+    echo "::error::Chromium source directory is unavailable for Clang installation."
+    return 1
+  fi
+  local status=0
+  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
+    python3 tools/clang/scripts/update.py || status=$?
+  if [ "${status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${status}" infrastructure)"
+    echo "::error::Chromium-pinned Clang installation failed with status ${status}."
+    return 1
+  fi
+  if [ ! -x third_party/llvm-build/Release+Asserts/bin/clang \
+      ] || [ ! -s third_party/llvm-build/Release+Asserts/cr_build_revision ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Chromium Clang update succeeded without the required compiler/revision outputs."
+    return 1
+  fi
   echo "Chromium clang revision:"
-  cat third_party/llvm-build/Release+Asserts/cr_build_revision
+  if ! cat third_party/llvm-build/Release+Asserts/cr_build_revision; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
+    return 1
+  fi
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 install_i386_sysroot() {
-  cd "${CHROMIUM_SRC}"
-  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}"     python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
+  if ! cd "${CHROMIUM_SRC}"; then
+    echo "::error::Chromium source directory is unavailable for i386 sysroot installation."
+    return 1
+  fi
+  local status=0
+  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
+    python3 build/linux/sysroot_scripts/install-sysroot.py --arch=i386 || status=$?
+  if [ "${status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${status}" infrastructure)"
+    echo "::error::Chromium i386 sysroot installation failed with status ${status}."
+    return 1
+  fi
+  local sysroot
+  sysroot="$(find build/linux -maxdepth 1 -type d -name '*_i386-sysroot' -print -quit 2>/dev/null || true)"
+  if [ -z "${sysroot}" ] || [ ! -d "${sysroot}" ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Chromium sysroot installer succeeded without an i386 sysroot directory."
+    return 1
+  fi
+  echo "Pinned Chromium i386 sysroot: ${sysroot}"
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 patch_build_gn_for_x86_linux() {
@@ -1324,25 +1447,53 @@ PY
 }
 
 write_lastchange() {
-  cd "${CHROMIUM_SRC}"
-  mkdir -p build/util
-  echo "LASTCHANGE=0000000000000000000000000000000000000000-refs/heads/main@{#0}" > build/util/LASTCHANGE
-  cat build/util/LASTCHANGE
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
+  if ! cd "${CHROMIUM_SRC}" || ! mkdir -p build/util; then
+    echo "::error::Could not prepare Chromium LASTCHANGE path."
+    return 1
+  fi
+  if ! printf '%s\n' 'LASTCHANGE=0000000000000000000000000000000000000000-refs/heads/main@{#0}' > build/util/LASTCHANGE; then
+    echo "::error::Could not write deterministic Chromium LASTCHANGE."
+    return 1
+  fi
+  if ! cat build/util/LASTCHANGE; then
+    echo "::error::Could not read back deterministic Chromium LASTCHANGE."
+    return 1
+  fi
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 configure_ccache() {
-  mkdir -p "${CCACHE_DIR}"
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
+  if ! mkdir -p "${CCACHE_DIR}"; then
+    echo "::error::Could not create ccache directory ${CCACHE_DIR}."
+    return 1
+  fi
   ccache --set-config=cache_dir="${CCACHE_DIR}" || true
   ccache --set-config=compression=true || true
   ccache --set-config=compiler_check=content || true
   ccache --max-size="${CCACHE_MAX_SIZE:-8G}" || true
   ccache -s || true
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 install_gn_from_cipd() {
-  cd "${CHROMIUM_SRC}"
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
+  if ! cd "${CHROMIUM_SRC}"; then
+    echo "::error::Chromium source directory is unavailable for GN installation."
+    return 1
+  fi
   local expected_version
-  expected_version="$(chromium_gn_version)"
+  if ! expected_version="$(chromium_gn_version)"; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Could not resolve immutable GN version from Chromium DEPS."
+    return 1
+  fi
+  if [[ ! "${expected_version}" =~ ^git_revision:[0-9a-f]{40}$ ]]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Chromium DEPS returned unsupported GN pin: ${expected_version}."
+    return 1
+  fi
   if [ -x "${GN_BINARY}" ]; then
     echo "Existing GN binary will be re-asserted against Chromium's exact CIPD pin: $("${GN_BINARY}" --version || true)"
   fi
@@ -1352,23 +1503,62 @@ install_gn_from_cipd() {
     x86_64|amd64) host_arch=amd64 ;;
     aarch64|arm64) host_arch=arm64 ;;
     *)
+      CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
       echo "::error::Unsupported GN host architecture: $(uname -m)"
       return 1
       ;;
   esac
 
   echo "Installing Chromium-pinned GN ${expected_version} from CIPD..."
-  mkdir -p "$(dirname "${GN_BINARY}")"
-  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}"     cipd install "gn/gn/linux-${host_arch}" "${expected_version}" -root "$(dirname "${GN_BINARY}")"
-  test -x "${GN_BINARY}"
-  "${GN_BINARY}" --version
+  if ! mkdir -p "$(dirname "${GN_BINARY}")"; then
+    echo "::error::Could not create GN install directory."
+    return 1
+  fi
+  local status=0
+  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" \
+    cipd install "gn/gn/linux-${host_arch}" "${expected_version}" \
+      -root "$(dirname "${GN_BINARY}")" || status=$?
+  if [ "${status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${status}" infrastructure)"
+    echo "::error::Chromium-pinned GN CIPD install failed with status ${status}."
+    return 1
+  fi
+  if [ ! -x "${GN_BINARY}" ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Pinned GN CIPD install completed without executable ${GN_BINARY}."
+    return 1
+  fi
+  if ! "${GN_BINARY}" --version; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::Pinned GN binary is not executable after installation."
+    return 1
+  fi
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 configure_gn() {
-  cd "${CHROMIUM_SRC}"
-  install_gn_from_cipd
-  mkdir -p out/Release_x86
-  "${GN_BINARY}" gen out/Release_x86 --args="$(chromium_i686_gn_args)"
+  if ! install_gn_from_cipd; then
+    return 1
+  fi
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
+  if ! cd "${CHROMIUM_SRC}" || ! mkdir -p out/Release_x86; then
+    echo "::error::Could not prepare Chromium GN output directory."
+    return 1
+  fi
+  local status=0
+  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
+    "${GN_BINARY}" gen out/Release_x86 --args="$(chromium_i686_gn_args)" || status=$?
+  if [ "${status}" -ne 0 ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS="$(classify_prepare_command_status "${status}" deterministic_build)"
+    echo "::error::Chromium i686 GN graph generation failed with status ${status}."
+    return 1
+  fi
+  if [ ! -s out/Release_x86/build.ninja ] || [ ! -s out/Release_x86/args.gn ]; then
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::GN generation succeeded without build.ninja/args.gn."
+    return 1
+  fi
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
 run_build_until_checkpoint() {
@@ -1573,10 +1763,10 @@ validate_release_archive_with_stats() {
 ensure_release_archive_extract_space() {
   local stats_file="${1:?release archive stats path is required}"
   local target_parent="${2:?release extraction parent is required}"
-  [[ "${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
-    echo "::error::CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB must be a non-negative integer."
+  if ! validate_bounded_reserve_gib \
+      "${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB}" CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB; then
     return 1
-  }
+  fi
   local unpacked_bytes available_bytes reserve_bytes required_bytes required_gib
   if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${stats_file}" 2>/dev/null)"; then
     echo "::error::Release archive stats are missing or malformed: ${stats_file}"
@@ -1602,7 +1792,7 @@ CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=""
 
 classify_runtime_smoke_status() {
   case "${1:-1}" in
-    124|137|143) printf '%s\n' infrastructure ;;
+    124|126|127|137|143) printf '%s\n' infrastructure ;;
     *) printf '%s\n' deterministic_build ;;
   esac
 }

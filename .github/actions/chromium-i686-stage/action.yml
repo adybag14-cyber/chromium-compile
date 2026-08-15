@@ -36,32 +36,41 @@ outputs:
     value: ${{ steps.compile.outputs.complete }}
   failure_class:
     description: Classified failure type used to decide whether a fresh runner retry is useful.
-    value: ${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.system_dependencies.outputs.failure_class || steps.package.outputs.failure_class || steps.final_recovery.outputs.failure_class || steps.checkpoint.outputs.failure_class }}
+    value: ${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.system_dependencies.outputs.failure_class || steps.runner_setup.outputs.failure_class || steps.job_start.outputs.failure_class || steps.package.outputs.failure_class || steps.final_recovery.outputs.failure_class || steps.checkpoint.outputs.failure_class }}
 
 runs:
   using: composite
   steps:
     - name: Mark Job Start
+      id: job_start
       shell: bash
-      run: echo "JOB_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+      run: |
+        if ! printf 'JOB_STARTED_AT=%s\n' "$(date +%s)" >> "${GITHUB_ENV}"; then
+          echo "failure_class=infrastructure" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
 
     - name: Log Initial Runner Storage
       shell: bash
       run: |
         source .github/scripts/runner_diagnostics.sh
-        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} initial"
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} initial" || true
 
     - name: Maximize Runner Disk Space
+      id: runner_setup
       shell: bash
       run: |
         source .github/scripts/chromium_i686_common.sh
-        maximize_runner_disk_space
+        if ! maximize_runner_disk_space; then
+          echo "failure_class=infrastructure" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
 
     - name: Log Storage After Cleanup
       shell: bash
       run: |
         source .github/scripts/runner_diagnostics.sh
-        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after cleanup"
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after cleanup" || true
 
     - name: Install System Dependencies
       id: system_dependencies
@@ -104,18 +113,39 @@ runs:
         source .github/scripts/chromium_i686_resume.sh
         source .github/scripts/runner_diagnostics.sh
 
-        if ! prepare_chromium_source "${{ inputs.version }}"; then
-          echo "failure_class=${CHROMIUM_SOURCE_FAILURE_CLASS:-infrastructure}" >> "${GITHUB_OUTPUT}"
+        fail_prepare_step() {
+          local failure_class="${1:-infrastructure}"
+          echo "failure_class=${failure_class}" >> "${GITHUB_OUTPUT}"
           exit 1
+        }
+
+        if ! prepare_chromium_source "${{ inputs.version }}"; then
+          fail_prepare_step "${CHROMIUM_SOURCE_FAILURE_CLASS:-infrastructure}"
         fi
-        install_depot_tools
-        install_chromium_clang
-        install_i386_sysroot
-        patch_build_gn_for_x86_linux
-        write_lastchange
-        configure_ccache
-        install_gn_from_cipd
-        normalize_chromium_resume_inputs
+        if ! install_depot_tools; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-infrastructure}"
+        fi
+        if ! install_chromium_clang; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-infrastructure}"
+        fi
+        if ! install_i386_sysroot; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-infrastructure}"
+        fi
+        if ! patch_build_gn_for_x86_linux; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-deterministic_build}"
+        fi
+        if ! write_lastchange; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-infrastructure}"
+        fi
+        if ! configure_ccache; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-infrastructure}"
+        fi
+        if ! install_gn_from_cipd; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-infrastructure}"
+        fi
+        if ! normalize_chromium_resume_inputs; then
+          fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-infrastructure}"
+        fi
 
         checkpoint_restored=false
         resume_archive=""
@@ -136,28 +166,40 @@ runs:
             preferred_stage="${CHECKPOINT_PRODUCER_STAGE}"
             preferred_run_attempt="${CHECKPOINT_PRODUCER_RUN_ATTEMPT}"
             echo "Preferred checkpoint provenance accepted; downloading trusted artifact on demand."
-            mkdir -p "${GITHUB_WORKSPACE}/resume/preferred"
+            if ! mkdir -p "${GITHUB_WORKSPACE}/resume/preferred"; then
+              fail_prepare_step infrastructure
+            fi
             if bounded_gh run download "${{ inputs.preferred-checkpoint-run-id }}" \
               --repo "${GITHUB_REPOSITORY}" \
               --name "${{ inputs.preferred-checkpoint-artifact }}" \
               --dir "${GITHUB_WORKSPACE}/resume/preferred"; then
               preferred_candidate="${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst"
-              if [ -s "${preferred_candidate}" ] && checkpoint_bundle_is_usable \
+              preferred_bundle_rc=1
+              if [ -s "${preferred_candidate}" ]; then
+                preferred_bundle_rc=0
+                checkpoint_bundle_is_usable \
                   "${preferred_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}" \
                   "${preferred_sha}" "${preferred_stage}" "${{ inputs.preferred-checkpoint-run-id }}" \
-                  "${preferred_run_attempt}"; then
+                  "${preferred_run_attempt}" || preferred_bundle_rc=$?
+              fi
+              if [ "${preferred_bundle_rc}" -eq 0 ]; then
                 resume_archive="${preferred_candidate}"
                 resume_producer_sha="${preferred_sha}"
                 resume_producer_stage="${preferred_stage}"
                 resume_producer_run_id="${{ inputs.preferred-checkpoint-run-id }}"
                 resume_producer_run_attempt="${preferred_run_attempt}"
+              elif [ "${CHECKPOINT_BUNDLE_FAILURE_CLASS:-deterministic_build}" = infrastructure ]; then
+                echo "::error::Preferred checkpoint validation failed due to runner/tool infrastructure; preserving the checkpoint opportunity for a fresh-runner retry."
+                bounded_rm_rf "${GITHUB_WORKSPACE}/resume/preferred" || true
+                fail_prepare_step infrastructure
               else
-                echo "::warning::Rejecting unusable preferred checkpoint bundle: ${preferred_candidate}"
+                echo "::warning::Rejecting deterministically unusable preferred checkpoint bundle: ${preferred_candidate}"
                 bounded_rm_rf "${GITHUB_WORKSPACE}/resume/preferred" || true
               fi
             else
-              echo "::warning::Preferred checkpoint download failed; trying fallback/fresh output instead of trusting partial bytes."
+              echo "::error::Preferred checkpoint download failed after provenance succeeded; retrying on a fresh runner instead of discarding same-stage progress."
               bounded_rm_rf "${GITHUB_WORKSPACE}/resume/preferred" || true
+              fail_prepare_step infrastructure
             fi
           elif [ "${preferred_rc}" -eq 2 ]; then
             echo "Preferred checkpoint is unavailable under artifact retention; trying fallback/fresh output."
@@ -180,27 +222,40 @@ runs:
             fallback_stage="${CHECKPOINT_PRODUCER_STAGE}"
             fallback_run_attempt="${CHECKPOINT_PRODUCER_RUN_ATTEMPT}"
             echo "Fallback provenance accepted; downloading checkpoint on demand."
-            mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"
+            if ! mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"; then
+              fail_prepare_step infrastructure
+            fi
             if bounded_gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
               --repo "${GITHUB_REPOSITORY}" \
               --name "${{ inputs.fallback-checkpoint-artifact }}" \
               --dir "${GITHUB_WORKSPACE}/resume/fallback"; then
               fallback_candidate="${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"
-              if [ -s "${fallback_candidate}" ] && checkpoint_bundle_is_usable \
+              fallback_bundle_rc=1
+              if [ -s "${fallback_candidate}" ]; then
+                fallback_bundle_rc=0
+                checkpoint_bundle_is_usable \
                   "${fallback_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}" \
                   "${fallback_sha}" "${fallback_stage}" "${{ inputs.fallback-checkpoint-run-id }}" \
-                  "${fallback_run_attempt}"; then
+                  "${fallback_run_attempt}" || fallback_bundle_rc=$?
+              fi
+              if [ "${fallback_bundle_rc}" -eq 0 ]; then
                 resume_archive="${fallback_candidate}"
                 resume_producer_sha="${fallback_sha}"
                 resume_producer_stage="${fallback_stage}"
                 resume_producer_run_id="${{ inputs.fallback-checkpoint-run-id }}"
                 resume_producer_run_attempt="${fallback_run_attempt}"
+              elif [ "${CHECKPOINT_BUNDLE_FAILURE_CLASS:-deterministic_build}" = infrastructure ]; then
+                echo "::error::Fallback checkpoint validation failed due to runner/tool infrastructure; retrying rather than discarding prior-stage progress."
+                bounded_rm_rf "${GITHUB_WORKSPACE}/resume/fallback" || true
+                fail_prepare_step infrastructure
               else
-                echo "::warning::Rejecting unusable fallback checkpoint bundle: ${fallback_candidate}"
+                echo "::warning::Rejecting deterministically unusable fallback checkpoint bundle: ${fallback_candidate}"
+                bounded_rm_rf "${GITHUB_WORKSPACE}/resume/fallback" || true
               fi
             else
-              echo "::warning::Fallback checkpoint download failed; continuing with fresh output/ccache instead of failing the stage."
+              echo "::error::Fallback checkpoint download failed after provenance succeeded; retrying on a fresh runner instead of rebuilding from scratch."
               bounded_rm_rf "${GITHUB_WORKSPACE}/resume/fallback" || true
+              fail_prepare_step infrastructure
             fi
           elif [ "${fallback_rc}" -eq 2 ]; then
             echo "Fallback checkpoint is unavailable under artifact retention; continuing with fresh output/ccache."
@@ -211,23 +266,31 @@ runs:
         fi
 
         if [ -n "${resume_archive}" ]; then
-          restore_out_checkpoint \
+          if ! restore_out_checkpoint \
             "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true \
             "${resume_producer_sha}" "${resume_producer_stage}" \
-            "${resume_producer_run_id}" "${resume_producer_run_attempt}"
+            "${resume_producer_run_id}" "${resume_producer_run_attempt}"; then
+            fail_prepare_step "${CHECKPOINT_RESTORE_FAILURE_CLASS:-infrastructure}"
+          fi
           checkpoint_restored=true
           echo "Checkpoint restored from ${resume_archive}"
         else
-          restore_out_checkpoint "" "${{ inputs.version }}" "${{ inputs.stage }}"
+          if ! restore_out_checkpoint "" "${{ inputs.version }}" "${{ inputs.stage }}"; then
+            fail_prepare_step "${CHECKPOINT_RESTORE_FAILURE_CLASS:-infrastructure}"
+          fi
         fi
         bounded_rm_rf "${GITHUB_WORKSPACE}/resume" || true
 
-        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after source/checkpoint extraction"
+        log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after source/checkpoint extraction" || true
         if [ "${checkpoint_restored}" = "true" ] && [ "${CHECKPOINT_REQUIRES_GN_REFRESH}" = "true" ]; then
           echo "Migrating restored checkpoint graph to Chromium's exact source-declared GN pin."
-          configure_gn
+          if ! configure_gn; then
+            fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-deterministic_build}"
+          fi
         else
-          configure_gn_from_checkpoint_or_fresh "${checkpoint_restored}"
+          if ! configure_gn_from_checkpoint_or_fresh "${checkpoint_restored}"; then
+            fail_prepare_step "${CHROMIUM_PREPARE_FAILURE_CLASS:-deterministic_build}"
+          fi
         fi
         if [ "${checkpoint_restored}" = "true" ]; then
           report_ninja_resume_state
@@ -362,7 +425,7 @@ runs:
           "${{ inputs.stage }}" \
           "${{ inputs.attempt }}" \
           "${{ steps.compile.outputs.complete || 'false' }}" \
-          "${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.system_dependencies.outputs.failure_class || steps.package.outputs.failure_class || steps.final_recovery.outputs.failure_class || steps.checkpoint.outputs.failure_class || 'none' }}"
+          "${{ steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.runtime.outputs.failure_class || steps.system_dependencies.outputs.failure_class || steps.runner_setup.outputs.failure_class || steps.job_start.outputs.failure_class || steps.package.outputs.failure_class || steps.final_recovery.outputs.failure_class || steps.checkpoint.outputs.failure_class || 'none' }}"
 
     - name: Fail When Final Stage Is Still Incomplete
       if: ${{ always() && inputs.final-stage == 'true' && steps.prepare.outcome == 'success' && steps.compile.outputs.complete != 'true' }}
