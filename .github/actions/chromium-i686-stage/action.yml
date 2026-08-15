@@ -92,14 +92,38 @@ runs:
           exit 1
         fi
 
+    - name: Resolve authoritative Chromium source cache identity
+      id: source_cache_identity
+      shell: bash
+      run: |
+        set -u -o pipefail
+        metadata="${RUNNER_TEMP}/chromium-${{ inputs.version }}-source-object.json"
+        stderr_file="${RUNNER_TEMP}/chromium-source-cache-identity.stderr"
+        rm -f "${metadata}" "${stderr_file}"
+        if cache_key="$(python3 scripts/chromium_source_object.py \
+            --version "${{ inputs.version }}" \
+            --metadata-out "${metadata}" \
+            --cache-key-only 2>"${stderr_file}")"; then
+          echo "resolved=true" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=${cache_key}" >> "${GITHUB_OUTPUT}"
+          echo "Authoritative source cache identity: ${cache_key}"
+        else
+          echo "::warning::Could not resolve authoritative source cache identity before restore; skipping cache and letting source preparation retry normally."
+          cat "${stderr_file}" >&2 || true
+          echo "resolved=false" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=" >> "${GITHUB_OUTPUT}"
+        fi
+
     - name: Restore Chromium source tarball cache
       id: source_cache
+      if: ${{ steps.source_cache_identity.outputs.resolved == 'true' }}
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       continue-on-error: true
       with:
         path: ${{ github.workspace }}/.chromium-source-cache
-        key: chromium-src-v3-${{ inputs.version }}
+        key: ${{ steps.source_cache_identity.outputs.cache_key }}
         restore-keys: |
+          chromium-src-v3-${{ inputs.version }}
           chromium-src-v2-${{ inputs.version }}
           chromium-src-${{ inputs.version }}
 
@@ -300,13 +324,44 @@ runs:
           exit 1
         fi
 
+    - name: Resolve prepared Chromium source cache identity
+      id: prepared_source_cache_identity
+      if: ${{ always() && steps.prepare.outcome == 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        metadata="${GITHUB_WORKSPACE}/.chromium-source-cache/chromium-${{ inputs.version }}.source-object.json"
+        test -s "${metadata}" || {
+          echo "::warning::Prepared source metadata is unavailable; skipping immutable source cache save."
+          echo "cache_key=" >> "${GITHUB_OUTPUT}"
+          exit 0
+        }
+        cache_key="$(python3 scripts/chromium_source_object.py \
+          --version "${{ inputs.version }}" \
+          --metadata-in "${metadata}" \
+          --cache-key-only)"
+        echo "cache_key=${cache_key}" >> "${GITHUB_OUTPUT}"
+        if [ "${{ steps.source_cache_identity.outputs.resolved }}" = "true" ] \
+            && [ "${cache_key}" != "${{ steps.source_cache_identity.outputs.cache_key }}" ]; then
+          echo "::warning::Chromium source object generation changed during this job; saving only under the prepared authoritative generation key ${cache_key}."
+        fi
+
     - name: Save Chromium source tarball cache
-      if: ${{ always() && steps.prepare.outcome == 'success' && steps.source_cache.outputs.cache-hit != 'true' }}
+      if: >-
+        ${{
+          always() &&
+          steps.prepare.outcome == 'success' &&
+          steps.prepared_source_cache_identity.outputs.cache_key != '' &&
+          (
+            steps.source_cache.outputs.cache-hit != 'true' ||
+            steps.source_cache_identity.outputs.cache_key != steps.prepared_source_cache_identity.outputs.cache_key
+          )
+        }}
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       continue-on-error: true
       with:
         path: ${{ github.workspace }}/.chromium-source-cache
-        key: chromium-src-v3-${{ inputs.version }}
+        key: ${{ steps.prepared_source_cache_identity.outputs.cache_key }}
 
     - name: Log Storage Before Compile
       if: ${{ steps.prepare.outcome == 'success' }}

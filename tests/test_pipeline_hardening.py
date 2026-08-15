@@ -544,7 +544,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("Restore ccache", action)
         self.assertNotIn("Save ccache", action)
         self.assertNotIn("chromium-i686-ccache-", action)
-        self.assertIn("key: chromium-src-v3-${{ inputs.version }}", action)
+        self.assertIn("steps.source_cache_identity.outputs.cache_key", action)
+        self.assertIn("chromium-src-v3-${{ inputs.version }}", action)
         self.assertIn("chromium-src-v2-${{ inputs.version }}", action)
         self.assertIn("chromium-src-${{ inputs.version }}", action)
         self.assertIn("steps.source_cache.outputs.cache-hit != 'true'", action)
@@ -711,17 +712,30 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn('xz -t "${tarball}"', common)
 
 
-    def test_source_cache_contract_can_migrate_legacy_cache_to_v3_stats(self):
+    def test_source_cache_contract_is_generation_bound_and_migrates_v3_once(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        resolve_pos = action.index("Resolve authoritative Chromium source cache identity")
         restore_pos = action.index("Restore Chromium source tarball cache")
+        prepare_pos = action.index("Prepare Chromium Source")
+        prepared_key_pos = action.index("Resolve prepared Chromium source cache identity")
         save_pos = action.index("Save Chromium source tarball cache")
-        restore = action[restore_pos:save_pos]
+        self.assertLess(resolve_pos, restore_pos)
+        self.assertLess(restore_pos, prepare_pos)
+        self.assertLess(prepare_pos, prepared_key_pos)
+        self.assertLess(prepared_key_pos, save_pos)
+        restore = action[restore_pos:prepare_pos]
         save = action[save_pos:]
-        self.assertIn("key: chromium-src-v3-${{ inputs.version }}", restore)
+        self.assertIn("steps.source_cache_identity.outputs.cache_key", restore)
+        self.assertIn("chromium-src-v3-${{ inputs.version }}", restore)
         self.assertIn("chromium-src-v2-${{ inputs.version }}", restore)
         self.assertIn("chromium-src-${{ inputs.version }}", restore)
-        self.assertIn("key: chromium-src-v3-${{ inputs.version }}", save)
-        self.assertIn("cache-hit != 'true'", save)
+        self.assertIn("steps.prepared_source_cache_identity.outputs.cache_key", save)
+        self.assertIn("cache-hit != 'true'", action[prepared_key_pos:save_pos + 800])
+        self.assertIn("source object generation changed during this job", action)
+        self.assertIn("skipping cache and letting source preparation retry normally", action)
+        self.assertIn("--cache-key-only", action)
+        self.assertIn("Latest source cache identity", (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8"))
+        self.assertNotIn("key: chromium-src-v3-${{ inputs.version }}", save)
 
 
     def test_checkpoint_restore_has_archive_and_run_provenance_boundaries(self):

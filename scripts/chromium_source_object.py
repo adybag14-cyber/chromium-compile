@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
+GENERATION_RE = re.compile(r"^[1-9][0-9]{0,39}$")
 SOURCE_BUCKET = "chromium-browser-official"
 GCS_METADATA_HOST = "storage.googleapis.com"
 GCS_DOWNLOAD_HOST = "commondatastorage.googleapis.com"
@@ -33,6 +34,19 @@ def validate_version(version: str) -> str:
 
 def source_download_url(version: str) -> str:
     return SOURCE_DOWNLOAD_TEMPLATE.format(version=validate_version(version))
+
+
+def source_cache_key(version: str, metadata: dict[str, object]) -> str:
+    version = validate_version(version)
+    generation = str(metadata.get("generation", ""))
+    if not GENERATION_RE.fullmatch(generation):
+        raise ValueError(f"Invalid GCS source generation for cache identity: {generation!r}")
+    expected_url = source_download_url(version)
+    if metadata.get("url") != expected_url:
+        raise ValueError(
+            f"Source cache metadata URL does not match Chromium {version}: {metadata.get('url')!r}"
+        )
+    return f"chromium-src-v4-{version}-{generation}"
 
 
 def source_metadata_url(version: str) -> str:
@@ -105,8 +119,8 @@ def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
     md5 = str(payload.get("md5Hash", ""))
     crc32c = str(payload.get("crc32c", ""))
     etag = str(payload.get("etag", ""))
-    if not generation.isdigit():
-        raise ValueError(f"GCS source object lacks numeric generation: {generation!r}")
+    if not GENERATION_RE.fullmatch(generation):
+        raise ValueError(f"GCS source object lacks bounded numeric generation: {generation!r}")
     if not length.isdigit():
         raise ValueError(f"GCS source object lacks numeric content length: {length!r}")
     if not md5:
@@ -192,6 +206,7 @@ def main() -> int:
     parser.add_argument("--write-marker", action="store_true")
     parser.add_argument("--safe-archive-verified", action="store_true")
     parser.add_argument("--gitiles-identity-verified", action="store_true")
+    parser.add_argument("--cache-key-only", action="store_true")
     args = parser.parse_args()
     version = validate_version(args.version)
     if args.metadata_in:
@@ -203,6 +218,9 @@ def main() -> int:
         result.update(verify_file(args.file, metadata))
     if args.metadata_out:
         args.metadata_out.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
+    if args.cache_key_only:
+        print(source_cache_key(version, result))
+        return 0
     if args.check_marker:
         if not args.marker or "sha256" not in result:
             parser.error("--check-marker requires --marker and verified --file metadata")

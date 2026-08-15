@@ -74,6 +74,34 @@ class ChromiumSourceObjectTests(unittest.TestCase):
         result=subprocess.CompletedProcess(["curl"],22,"","404")
         with mock.patch.object(source_object.subprocess,"run",return_value=result), self.assertRaises(ValueError): source_object.fetch_metadata(VERSION)
 
+    def test_cache_key_is_bound_to_version_and_bounded_gcs_generation(self):
+        metadata = self._metadata(b"abc")
+        self.assertEqual(
+            source_object.source_cache_key(VERSION, metadata),
+            f"chromium-src-v4-{VERSION}-12345",
+        )
+        for generation in ("0", "-1", "abc", "1" * 41):
+            changed = dict(metadata)
+            changed["generation"] = generation
+            with self.subTest(generation=generation), self.assertRaises(ValueError):
+                source_object.source_cache_key(VERSION, changed)
+        changed = dict(metadata)
+        changed["url"] = "https://evil.invalid/source.tar.xz"
+        with self.assertRaises(ValueError):
+            source_object.source_cache_key(VERSION, changed)
+
+    def test_cache_key_only_cli_uses_metadata_generation(self):
+        metadata = self._metadata(b"abc")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "metadata.json"
+            path.write_text(json.dumps(metadata), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), "--version", VERSION, "--metadata-in", str(path), "--cache-key-only"],
+                check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"chromium-src-v4-{VERSION}-12345")
+
     def test_verify_file_checks_gcs_length_md5_and_computes_sha256(self):
         data=b"chromium source bytes"; metadata=self._metadata(data)
         with tempfile.TemporaryDirectory() as tmp:
