@@ -76,23 +76,29 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA)
 
     def test_artifact_pagination_is_bounded(self):
-        with mock.patch.object(cleanup, "run_gh", return_value=done({"total_count": cleanup.MAX_ARTIFACTS + 1, "artifacts": []})), self.assertRaises(cleanup.CleanupError):
-            cleanup.list_artifacts(REPO)
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            return_value=done({"total_count": cleanup.MAX_ARTIFACTS_PER_STAGE + 1, "artifacts": []}),
+        ), self.assertRaises(cleanup.CleanupError):
+            cleanup.list_checkpoint_artifacts(REPO)
 
     def test_only_exact_version_workflow_checkpoints_are_selected(self):
-        artifacts = {
-            "total_count": 4,
-            "artifacts": [
+        stage_artifacts = {
+            2: [
                 artifact(101, 201, 2, 111),
-                artifact(102, 202, 3, 222),
                 artifact(103, 203, 2, 333),
-                {"id": 104, "name": "not-a-checkpoint", "size_in_bytes": 1, "expired": False, "workflow_run": {"id": 204}},
             ],
+            3: [artifact(102, 202, 3, 222)],
         }
+
         def fake(args, **kwargs):
             joined = " ".join(args)
-            if "actions/artifacts?" in joined:
-                return done(artifacts)
+            if "actions/artifacts?name=chromium-i686-out-stage-" in joined:
+                match = __import__("re").search(r"name=chromium-i686-out-stage-(\d+)", joined)
+                assert match
+                values = stage_artifacts.get(int(match.group(1)), [])
+                return done({"total_count": len(values), "artifacts": values})
             if joined.endswith("actions/runs/201"):
                 return done(run_payload(stage=2, path=".github/workflows/chromium-i686.yml@refs/heads/main"))
             if joined.endswith("actions/runs/202"):
@@ -100,9 +106,15 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             if joined.endswith("actions/runs/203"):
                 return done(run_payload(stage=2, display_title="legacy title"))
             raise AssertionError(args)
+
         with mock.patch.object(cleanup, "run_gh", side_effect=fake):
             found = cleanup.find_version_checkpoints(REPO, VERSION, BRANCH)
         self.assertEqual(found, [cleanup.CheckpointArtifact(101, 201, 2, 111)])
+
+    def test_checkpoint_name_filter_must_be_honored(self):
+        payload = {"total_count": 1, "artifacts": [artifact(101, 201, 2)]}
+        with mock.patch.object(cleanup, "run_gh", return_value=done(payload)), self.assertRaises(cleanup.CleanupError):
+            cleanup.list_checkpoint_artifacts(REPO)
 
     def test_dry_run_never_deletes(self):
         item = cleanup.CheckpointArtifact(101, 201, 2, 111)

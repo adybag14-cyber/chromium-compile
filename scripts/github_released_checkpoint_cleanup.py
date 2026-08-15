@@ -17,7 +17,8 @@ SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 CHECKPOINT_NAME_RE = re.compile(r"^chromium-i686-out-stage-([1-9][0-9]?)$")
 RUN_TITLE_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]?) - attempt ([0-9]+)$")
-MAX_ARTIFACTS = 1000
+MAX_STAGE = 50
+MAX_ARTIFACTS_PER_STAGE = 1000
 PER_PAGE = 100
 
 
@@ -111,27 +112,47 @@ def verify_healthy_release(repository: str, version: str, expected_build_sha: st
     return commit.lower()
 
 
-def list_artifacts(repository: str) -> list[dict[str, object]]:
-    first = parse_object(run_gh(["api", f"repos/{repository}/actions/artifacts?per_page={PER_PAGE}&page=1"]), "artifact listing")
-    total = first.get("total_count")
-    if not isinstance(total, int) or isinstance(total, bool) or total < 0 or total > MAX_ARTIFACTS:
-        raise CleanupError(f"repository artifact count exceeds bounded 0..{MAX_ARTIFACTS} contract: {total!r}")
-    pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+def list_checkpoint_artifacts(repository: str) -> list[dict[str, object]]:
     values: list[dict[str, object]] = []
-    for page in range(1, pages + 1):
-        payload = first if page == 1 else parse_object(
-            run_gh(["api", f"repos/{repository}/actions/artifacts?per_page={PER_PAGE}&page={page}"]),
-            f"artifact listing page {page}",
+    for stage in range(1, MAX_STAGE + 1):
+        name = f"chromium-i686-out-stage-{stage}"
+        first = parse_object(
+            run_gh(["api", f"repos/{repository}/actions/artifacts?name={name}&per_page={PER_PAGE}&page=1"]),
+            f"artifact listing for {name}",
         )
-        raw = payload.get("artifacts")
-        if not isinstance(raw, list):
-            raise CleanupError(f"artifact listing page {page} lacks an artifacts array")
-        for item in raw:
-            if not isinstance(item, dict):
-                raise CleanupError(f"artifact listing page {page} contains malformed metadata")
-            values.append(item)
-    if len(values) < total:
-        raise CleanupError(f"artifact pagination returned only {len(values)} of {total} advertised artifacts")
+        total = first.get("total_count")
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or total < 0
+            or total > MAX_ARTIFACTS_PER_STAGE
+        ):
+            raise CleanupError(
+                f"checkpoint artifact count for {name} exceeds bounded 0..{MAX_ARTIFACTS_PER_STAGE} contract: {total!r}"
+            )
+        pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+        stage_values: list[dict[str, object]] = []
+        for page in range(1, pages + 1):
+            payload = first if page == 1 else parse_object(
+                run_gh(["api", f"repos/{repository}/actions/artifacts?name={name}&per_page={PER_PAGE}&page={page}"]),
+                f"artifact listing for {name} page {page}",
+            )
+            raw = payload.get("artifacts")
+            if not isinstance(raw, list):
+                raise CleanupError(f"artifact listing for {name} page {page} lacks an artifacts array")
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise CleanupError(f"artifact listing for {name} page {page} contains malformed metadata")
+                if item.get("name") != name:
+                    raise CleanupError(
+                        f"artifact name filter for {name} returned unexpected artifact {item.get('name')!r}"
+                    )
+                stage_values.append(item)
+        if len(stage_values) != total:
+            raise CleanupError(
+                f"artifact pagination for {name} returned {len(stage_values)} of {total} advertised artifacts"
+            )
+        values.extend(stage_values)
     return values
 
 
@@ -164,7 +185,7 @@ def _run_matches_checkpoint(
 def find_version_checkpoints(repository: str, version: str, default_branch: str) -> list[CheckpointArtifact]:
     run_cache: dict[int, dict[str, object]] = {}
     found: list[CheckpointArtifact] = []
-    for item in list_artifacts(repository):
+    for item in list_checkpoint_artifacts(repository):
         name = str(item.get("name", ""))
         match = CHECKPOINT_NAME_RE.fullmatch(name)
         if not match:
