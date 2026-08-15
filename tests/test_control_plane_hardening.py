@@ -14,6 +14,18 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("Redispatch failed stage exactly once", workflow)
         self.assertIn("CHROMIUM_VERSION", workflow)
 
+    def test_early_build_failure_still_enters_bounded_runner_recovery(self):
+        workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        recover = workflow[workflow.index("  recover_bad_runner:"):workflow.index("  report_terminal_failure:")]
+        control = workflow[workflow.index("Resolve stage controls"):workflow.index("Resolve checkpoint sources")]
+        self.assertNotIn("fromJSON(needs.build.outputs.max_retries", recover)
+        self.assertIn("needs.build.outputs.failure_class != 'deterministic_build'", recover)
+        self.assertIn("MAX_RETRIES: ${{ needs.build.outputs.max_retries || vars.CHROMIUM_RUNNER_RETRIES || '2' }}", recover)
+        self.assertIn("scripts/chromium_runner_recovery.py", recover)
+        self.assertIn('--max-retries "${MAX_RETRIES}"', recover)
+        self.assertIn("CHROMIUM_RUNNER_RETRIES must not exceed 10", control)
+        self.assertIn("CHROMIUM_I686_MAX_STAGES must be between 1 and 50", control)
+
     def test_terminal_build_failure_has_same_run_issue_mirror(self):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         self.assertIn("report_terminal_failure:", workflow)

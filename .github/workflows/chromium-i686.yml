@@ -88,18 +88,26 @@ jobs:
             echo "::error::stage must be an integer"
             exit 1
           }
-          [[ "${max_stage}" =~ ^[0-9]+$ ]] || {
-            echo "::error::CHROMIUM_I686_MAX_STAGES must be an integer"
+          [[ "${max_stage}" =~ ^[0-9]{1,2}$ ]] || {
+            echo "::error::CHROMIUM_I686_MAX_STAGES must be an integer from 1 through 50"
             exit 1
           }
+          if [ "${max_stage}" -lt 1 ] || [ "${max_stage}" -gt 50 ]; then
+            echo "::error::CHROMIUM_I686_MAX_STAGES must be between 1 and 50"
+            exit 1
+          fi
           if [ "${stage}" -lt 1 ] || [ "${stage}" -gt "${max_stage}" ]; then
             echo "::error::stage must be between 1 and ${max_stage}"
             exit 1
           fi
-          [[ "${MAX_RUNNER_RETRIES}" =~ ^[0-9]+$ ]] || {
-            echo "::error::CHROMIUM_RUNNER_RETRIES must be an integer"
+          [[ "${MAX_RUNNER_RETRIES}" =~ ^[0-9]{1,2}$ ]] || {
+            echo "::error::CHROMIUM_RUNNER_RETRIES must be an integer from 0 through 10"
             exit 1
           }
+          if [ "${MAX_RUNNER_RETRIES}" -gt 10 ]; then
+            echo "::error::CHROMIUM_RUNNER_RETRIES must not exceed 10 automatic fresh-runner attempts"
+            exit 1
+          fi
           [[ "${retry_count}" =~ ^[0-9]+$ ]] || {
             echo "::error::retry_count must be an integer"
             exit 1
@@ -211,8 +219,7 @@ jobs:
         always() &&
         (needs.build.result == 'failure' || needs.build.result == 'cancelled') &&
         github.ref_name == github.event.repository.default_branch &&
-        needs.build.outputs.failure_class != 'deterministic_build' &&
-        fromJSON(needs.build.outputs.retry_count || inputs.retry_count || '0') < fromJSON(needs.build.outputs.max_retries || '0')
+        needs.build.outputs.failure_class != 'deterministic_build'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -229,12 +236,17 @@ jobs:
           STAGE: ${{ needs.build.outputs.stage || inputs.stage || '1' }}
           CHROMIUM_VERSION: ${{ needs.build.outputs.version || inputs.version }}
           RETRY_COUNT: ${{ needs.build.outputs.retry_count || inputs.retry_count || '0' }}
+          MAX_RETRIES: ${{ needs.build.outputs.max_retries || vars.CHROMIUM_RUNNER_RETRIES || '2' }}
           FALLBACK_RUN_ID: ${{ inputs.fallback_checkpoint_run_id }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
           set -euo pipefail
-          next_retry=$((RETRY_COUNT + 1))
+          next_retry="$(python3 scripts/chromium_runner_recovery.py \
+            --version "${CHROMIUM_VERSION}" \
+            --stage "${STAGE}" \
+            --retry-count "${RETRY_COUNT}" \
+            --max-retries "${MAX_RETRIES}")"
           expected_title="Chromium i686 ${CHROMIUM_VERSION} - stage ${STAGE} - attempt ${next_retry}"
           echo "Runner/environment failure during stage ${STAGE}; dispatching recovery attempt ${next_retry}."
           echo "The recovery run will first try a same-stage checkpoint from run ${GITHUB_RUN_ID}, then fall back to ${FALLBACK_RUN_ID:-a fresh stage}."
