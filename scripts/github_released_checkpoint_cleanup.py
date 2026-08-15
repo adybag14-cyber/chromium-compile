@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Delete checkpoint artifacts only after a version has a healthy immutable release."""
+"""Delete resumable build state only after a version has a healthy immutable release."""
 from __future__ import annotations
 
 import argparse
 import json
 import re
 import subprocess
+import urllib.parse
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -20,6 +21,7 @@ RUN_TITLE_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - st
 ACTIVE_RUN_VERSION_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)")
 MAX_STAGE = 50
 MAX_ARTIFACTS_PER_STAGE = 1000
+MAX_SOURCE_CACHES_PER_FILTER = 100
 PER_PAGE = 100
 
 
@@ -32,6 +34,13 @@ class CheckpointArtifact:
     artifact_id: int
     run_id: int
     stage: int
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class SourceCache:
+    cache_id: int
+    key: str
     size_bytes: int
 
 
@@ -289,6 +298,114 @@ def cleanup_released_version(
     return results, total_bytes
 
 
+
+def source_cache_filters(version: str) -> list[tuple[str, re.Pattern[str]]]:
+    escaped = re.escape(version)
+    return [
+        (f"chromium-src-v4-{version}-", re.compile(rf"^chromium-src-v4-{escaped}-[1-9][0-9]{{0,39}}$")),
+        (f"chromium-src-v3-{version}", re.compile(rf"^chromium-src-v3-{escaped}$")),
+        (f"chromium-src-v2-{version}", re.compile(rf"^chromium-src-v2-{escaped}$")),
+        (f"chromium-src-{version}", re.compile(rf"^chromium-src-{escaped}$")),
+    ]
+
+
+def list_source_caches(repository: str, version: str, default_branch: str) -> list[SourceCache]:
+    expected_ref = f"refs/heads/{default_branch}"
+    encoded_ref = urllib.parse.quote(expected_ref, safe="")
+    found: dict[int, SourceCache] = {}
+    for key_filter, key_pattern in source_cache_filters(version):
+        encoded_key = urllib.parse.quote(key_filter, safe="")
+        payload = parse_object(
+            run_gh([
+                "api",
+                f"repos/{repository}/actions/caches?ref={encoded_ref}&key={encoded_key}&per_page={PER_PAGE}",
+            ]),
+            f"source cache listing for {key_filter}",
+        )
+        total = payload.get("total_count")
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or total < 0
+            or total > MAX_SOURCE_CACHES_PER_FILTER
+        ):
+            raise CleanupError(
+                f"source cache count for {key_filter} exceeds bounded 0..{MAX_SOURCE_CACHES_PER_FILTER} contract: {total!r}"
+            )
+        raw = payload.get("actions_caches")
+        if not isinstance(raw, list):
+            raise CleanupError(f"source cache listing for {key_filter} lacks an actions_caches array")
+        if len(raw) != total:
+            raise CleanupError(
+                f"source cache listing for {key_filter} returned {len(raw)} of {total} advertised caches"
+            )
+        for item in raw:
+            if not isinstance(item, dict):
+                raise CleanupError(f"source cache listing for {key_filter} contains malformed metadata")
+            key = str(item.get("key", ""))
+            ref = str(item.get("ref", ""))
+            if ref != expected_ref or not key_pattern.fullmatch(key):
+                raise CleanupError(
+                    f"source cache filter {key_filter!r} returned unexpected cache key/ref {key!r} / {ref!r}"
+                )
+            cache_id = str(item.get("id", ""))
+            if not ID_RE.fullmatch(cache_id):
+                raise CleanupError(f"source cache {key!r} has invalid id: {cache_id!r}")
+            size = item.get("size_in_bytes")
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                raise CleanupError(f"source cache {cache_id} has invalid size metadata: {size!r}")
+            numeric_id = int(cache_id)
+            candidate = SourceCache(numeric_id, key, size)
+            previous = found.get(numeric_id)
+            if previous is not None and previous != candidate:
+                raise CleanupError(f"source cache id {numeric_id} appeared with conflicting metadata")
+            found[numeric_id] = candidate
+    return sorted(found.values(), key=lambda item: (item.key, item.cache_id))
+
+
+def source_cache_is_missing(
+    repository: str, version: str, default_branch: str, cache_id: int
+) -> bool:
+    return all(item.cache_id != cache_id for item in list_source_caches(repository, version, default_branch))
+
+
+def delete_source_cache(
+    repository: str, version: str, default_branch: str, cache: SourceCache
+) -> str:
+    result = run_gh(
+        ["api", "--method", "DELETE", f"repos/{repository}/actions/caches/{cache.cache_id}"],
+        timeout=120,
+        check=False,
+    )
+    missing = source_cache_is_missing(repository, version, default_branch, cache.cache_id)
+    if result.returncode != 0 and not missing:
+        detail = (result.stderr or result.stdout or "GitHub CLI failure").strip()
+        raise CleanupError(f"source cache delete failed for {cache.cache_id}: {detail}")
+    if not missing:
+        raise CleanupError(f"source cache {cache.cache_id} is still visible after DELETE")
+    return f"deleted-cache:{cache.cache_id}:key={cache.key}"
+
+
+def cleanup_released_source_caches(
+    repository: str, version: str, default_branch: str, expected_build_sha: str, *, dry_run: bool
+) -> tuple[list[str], int]:
+    # Revalidate independently from checkpoint deletion so a same-version build that
+    # starts between the two phases protects its source cache.
+    validate_inputs(repository, version, default_branch, expected_build_sha)
+    verify_healthy_release(repository, version, expected_build_sha)
+    ensure_no_active_build_for_version(repository, version, default_branch)
+    caches = list_source_caches(repository, version, default_branch)
+    total_bytes = sum(item.size_bytes for item in caches)
+    results: list[str] = []
+    for item in caches:
+        if dry_run:
+            line = f"dry-run-cache:{item.cache_id}:key={item.key}:bytes={item.size_bytes}"
+        else:
+            line = delete_source_cache(repository, version, default_branch, item)
+        print(line, flush=True)
+        results.append(line)
+    return results, total_bytes
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", required=True)
@@ -305,10 +422,19 @@ def main() -> int:
             args.expected_build_sha,
             dry_run=not args.apply,
         )
+        cache_results, cache_bytes = cleanup_released_source_caches(
+            args.repository,
+            args.version,
+            args.default_branch,
+            args.expected_build_sha,
+            dry_run=not args.apply,
+        )
     except CleanupError as exc:
         parser.error(str(exc))
     print(f"checkpoint_count={len(results)}")
     print(f"checkpoint_bytes={total_bytes}")
+    print(f"source_cache_count={len(cache_results)}")
+    print(f"source_cache_bytes={cache_bytes}")
     return 0
 
 
