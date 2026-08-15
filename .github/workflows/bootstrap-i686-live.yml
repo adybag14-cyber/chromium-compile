@@ -4,21 +4,23 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   actions: write
 
 concurrency:
-  group: chromium-i686-bootstrap
+  group: ${{ github.ref_name == github.event.repository.default_branch && 'chromium-i686-bootstrap' || format('chromium-i686-bootstrap-nonprod-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
   dispatch:
+    if: ${{ github.ref_name == github.event.repository.default_branch }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout bootstrap helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Dispatch or record the baseline exactly once
@@ -72,19 +74,9 @@ jobs:
             '{schema:2,version:$version,release_exists:$released,dispatched_by_this_run:$dispatched,recorded_at:$timestamp,preflight:$run}' \
             > bootstrap-status.json
 
-          encoded="$(base64 -w0 bootstrap-status.json)"
-          existing_sha="$(timeout -k 10s 60s gh api \
-            "repos/${GITHUB_REPOSITORY}/contents/support/bootstrap-status.json" --jq .sha 2>/dev/null || true)"
-          args=(
-            --method PUT
-            -H "Accept: application/vnd.github+json"
-            "repos/${GITHUB_REPOSITORY}/contents/support/bootstrap-status.json"
-            -f message="Record live Chromium i686 bootstrap status"
-            -f content="${encoded}"
-            -f branch="${DEFAULT_BRANCH}"
-          )
-          if [ -n "${existing_sha}" ]; then
-            args+=(-f sha="${existing_sha}")
-          fi
-          timeout -k 15s 120s gh api "${args[@]}" >/dev/null
-          cat bootstrap-status.json
+          {
+            echo "## Chromium i686 bootstrap status"
+            echo '```json'
+            cat bootstrap-status.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
