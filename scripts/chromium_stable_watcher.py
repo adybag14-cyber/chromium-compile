@@ -157,15 +157,20 @@ def list_workflow_runs(
     workflow: str,
     *,
     created_after: datetime,
+    status_filter: str | None = None,
     max_pages: int = RUN_HISTORY_MAX_PAGES,
 ) -> list[dict[str, object]]:
-    """Read a bounded, newest-first time window of one relevant workflow.
+    """Read one bounded relevant state/conclusion window for a workflow.
 
-    Saturating the configured page horizon fails closed. API cost therefore stays
-    bounded as repository history grows, without silently forgetting recent state.
+    Callers that use status_filter avoid letting successful high-volume compiler
+    stages consume the three-year quarantine horizon. Every filtered response is
+    verified locally so an ignored/changed GitHub filter fails closed.
     """
     if max_pages < 1:
         raise ValueError("max_pages must be at least 1")
+    allowed_filters = ACTIVE_RUN_STATES | QUARANTINE_RUN_CONCLUSIONS
+    if status_filter is not None and status_filter not in allowed_filters:
+        raise ValueError(f"unsupported workflow status filter: {status_filter!r}")
     collected: list[dict[str, object]] = []
     encoded_workflow = urllib.parse.quote(workflow, safe="")
     for page in range(1, max_pages + 2):
@@ -176,6 +181,8 @@ def list_workflow_runs(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
         }
+        if status_filter is not None:
+            params["status"] = status_filter
         payload = gh_json(
             [
                 "api",
@@ -189,12 +196,28 @@ def list_workflow_runs(
             raise WatcherError(f"Actions response lacks workflow_runs for {workflow}")
         if page > max_pages:
             if page_runs:
+                state = f" for status {status_filter}" if status_filter else ""
                 raise WatcherError(
-                    f"Workflow history horizon saturated for {workflow} at {max_pages * 100} "
+                    f"Workflow history horizon saturated for {workflow}{state} at {max_pages * 100} "
                     "runs in the quarantine window; refusing to guess about port state"
                 )
             return collected
         valid = [item for item in page_runs if isinstance(item, dict)]
+        if len(valid) != len(page_runs):
+            raise WatcherError(f"Actions response contains malformed run metadata for {workflow}")
+        if status_filter is not None:
+            for item in valid:
+                actual_status = str(item.get("status", ""))
+                actual_conclusion = str(item.get("conclusion", ""))
+                if status_filter in ACTIVE_RUN_STATES:
+                    matches = actual_status == status_filter
+                else:
+                    matches = actual_status == "completed" and actual_conclusion == status_filter
+                if not matches:
+                    raise WatcherError(
+                        f"GitHub ignored or changed workflow status filter {status_filter!r} for {workflow}; "
+                        f"observed status={actual_status!r}, conclusion={actual_conclusion!r}"
+                    )
         collected.extend(valid)
         if len(page_runs) < 100:
             return collected
@@ -327,34 +350,47 @@ def list_port_run_state(
     active: set[str] = set()
     quarantined: set[str] = set()
     cutoff = datetime.now(timezone.utc) - timedelta(days=RUN_HISTORY_DAYS)
-    for workflow in PORT_WORKFLOWS:
-        for run in list_workflow_runs(repository, workflow, created_after=cutoff):
-            status = str(run.get("status", ""))
-            conclusion = str(run.get("conclusion", ""))
-            title = str(run.get("display_title", ""))
-            version = extract_port_version(title)
-            if not version:
-                if status in ACTIVE_RUN_STATES:
-                    raise WatcherError(
-                        f"Active {workflow} run has an unparseable display title {title!r}; "
-                        "refusing to assume the global port queue is free"
-                    )
-                # Legacy completed runs predate the explicit versioned run-name contract.
-                continue
+
+    def consume(workflow: str, run: dict[str, object]) -> None:
+        status = str(run.get("status", ""))
+        conclusion = str(run.get("conclusion", ""))
+        title = str(run.get("display_title", ""))
+        version = extract_port_version(title)
+        if not version:
             if status in ACTIVE_RUN_STATES:
-                active.add(version)
-            elif status == "completed" and conclusion in QUARANTINE_RUN_CONCLUSIONS:
-                if production_ref is None:
-                    quarantined.add(version)
-                    continue
-                head_branch = str(run.get("head_branch", ""))
-                if not head_branch:
-                    raise WatcherError(
-                        f"Terminal {workflow} run for Chromium {version} lacks head_branch; "
-                        "refusing to guess whether it belongs to the production ref"
-                    )
-                if head_branch == production_ref:
-                    quarantined.add(version)
+                raise WatcherError(
+                    f"Active {workflow} run has an unparseable display title {title!r}; "
+                    "refusing to assume the global port queue is free"
+                )
+            # Legacy completed runs predate the explicit versioned run-name contract.
+            return
+        if status in ACTIVE_RUN_STATES:
+            active.add(version)
+            return
+        if status == "completed" and conclusion in QUARANTINE_RUN_CONCLUSIONS:
+            if production_ref is None:
+                quarantined.add(version)
+                return
+            head_branch = str(run.get("head_branch", ""))
+            if not head_branch:
+                raise WatcherError(
+                    f"Terminal {workflow} run for Chromium {version} lacks head_branch; "
+                    "refusing to guess whether it belongs to the production ref"
+                )
+            if head_branch == production_ref:
+                quarantined.add(version)
+
+    for workflow in PORT_WORKFLOWS:
+        for state in sorted(ACTIVE_RUN_STATES):
+            for run in list_workflow_runs(
+                repository, workflow, created_after=cutoff, status_filter=state
+            ):
+                consume(workflow, run)
+        for conclusion in sorted(QUARANTINE_RUN_CONCLUSIONS):
+            for run in list_workflow_runs(
+                repository, workflow, created_after=cutoff, status_filter=conclusion
+            ):
+                consume(workflow, run)
     return active, quarantined
 
 
