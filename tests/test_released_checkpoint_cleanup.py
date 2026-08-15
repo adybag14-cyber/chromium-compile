@@ -107,11 +107,41 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             cleanup.CheckpointArtifact(101, 201, 2, 111),
             cleanup.CheckpointArtifact(102, 202, 3, 222),
         ]
-        with mock.patch.object(cleanup, "verify_healthy_release", return_value=BUILD_SHA),              mock.patch.object(cleanup, "find_version_checkpoints", return_value=items),              mock.patch.object(cleanup, "delete_checkpoint", side_effect=["deleted:101", "deleted:102"]) as delete:
+        with mock.patch.object(cleanup, "verify_healthy_release", return_value=BUILD_SHA), \
+             mock.patch.object(cleanup, "ensure_no_active_build_for_version"), \
+             mock.patch.object(cleanup, "find_version_checkpoints", return_value=items), \
+             mock.patch.object(cleanup, "delete_checkpoint", side_effect=["deleted:101", "deleted:102"]) as delete:
             results, total = cleanup.cleanup_released_version(REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False)
         self.assertEqual(delete.call_count, 2)
         self.assertEqual(results, ["deleted:101", "deleted:102"])
         self.assertEqual(total, 333)
+
+    def test_same_version_active_build_defers_cleanup(self):
+        active = {
+            "workflow_runs": [
+                {
+                    "status": "in_progress",
+                    "display_title": f"Chromium i686 {VERSION} - stage 4 - attempt 0",
+                }
+            ]
+        }
+        with mock.patch.object(cleanup, "run_gh", return_value=done(active)), self.assertRaises(cleanup.CleanupError):
+            cleanup.ensure_no_active_build_for_version(REPO, VERSION, BRANCH)
+
+        safe = {
+            "workflow_runs": [
+                {
+                    "status": "completed",
+                    "display_title": f"Chromium i686 {VERSION} - stage 4 - attempt 0",
+                },
+                {
+                    "status": "in_progress",
+                    "display_title": "Chromium i686 151.0.7922.137 - stage 1 - attempt 0",
+                },
+            ]
+        }
+        with mock.patch.object(cleanup, "run_gh", return_value=done(safe)):
+            cleanup.ensure_no_active_build_for_version(REPO, VERSION, BRANCH)
 
     def test_artifact_pagination_is_bounded(self):
         with mock.patch.object(
@@ -156,7 +186,8 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
 
     def test_dry_run_never_deletes(self):
         item = cleanup.CheckpointArtifact(101, 201, 2, 111)
-        with mock.patch.object(cleanup, "verify_healthy_release", return_value="b" * 40), \
+        with mock.patch.object(cleanup, "verify_healthy_release", return_value=BUILD_SHA), \
+             mock.patch.object(cleanup, "ensure_no_active_build_for_version"), \
              mock.patch.object(cleanup, "find_version_checkpoints", return_value=[item]), \
              mock.patch.object(cleanup, "delete_checkpoint") as delete:
             results, total = cleanup.cleanup_released_version(REPO, VERSION, BRANCH, BUILD_SHA, dry_run=True)

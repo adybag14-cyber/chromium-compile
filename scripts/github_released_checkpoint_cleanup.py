@@ -112,6 +112,36 @@ def verify_healthy_release(repository: str, version: str, expected_build_sha: st
     return commit.lower()
 
 
+ACTIVE_RUN_STATES = {"queued", "in_progress", "waiting", "pending", "requested"}
+
+
+def ensure_no_active_build_for_version(repository: str, version: str, default_branch: str) -> None:
+    payload = parse_object(
+        run_gh(
+            [
+                "api",
+                f"repos/{repository}/actions/workflows/chromium-i686.yml/runs?branch={default_branch}&per_page=100",
+            ]
+        ),
+        "active build listing",
+    )
+    runs = payload.get("workflow_runs")
+    if not isinstance(runs, list):
+        raise CleanupError("active build listing lacks a workflow_runs array")
+    for run in runs:
+        if not isinstance(run, dict):
+            raise CleanupError("active build listing contains malformed run metadata")
+        status = str(run.get("status", ""))
+        if status not in ACTIVE_RUN_STATES:
+            continue
+        title = str(run.get("display_title", ""))
+        match = RUN_TITLE_RE.fullmatch(title)
+        if match and match.group(1) == version:
+            raise CleanupError(
+                f"Chromium {version} still has an active staged build ({status}); deferring checkpoint cleanup"
+            )
+
+
 def list_checkpoint_artifacts(repository: str) -> list[dict[str, object]]:
     values: list[dict[str, object]] = []
     for stage in range(1, MAX_STAGE + 1):
@@ -244,6 +274,7 @@ def cleanup_released_version(
 ) -> tuple[list[str], int]:
     validate_inputs(repository, version, default_branch, expected_build_sha)
     verify_healthy_release(repository, version, expected_build_sha)
+    ensure_no_active_build_for_version(repository, version, default_branch)
     candidates = find_version_checkpoints(repository, version, default_branch)
     total_bytes = sum(item.size_bytes for item in candidates)
     results: list[str] = []
