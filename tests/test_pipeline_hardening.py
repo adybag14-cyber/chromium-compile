@@ -500,6 +500,10 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("chromium.googlesource.com/chromium/src/+/refs/tags/${version}", common)
         self.assertIn("chrome/installer/linux/BUILD.gn", common)
         self.assertIn("critical source files against the authoritative Gitiles tag", common)
+        self.assertIn("validate_effective_https_host()", common)
+        self.assertIn("--proto '=https' --proto-redir '=https'", common)
+        self.assertIn("chromium.googlesource.com", common)
+        self.assertIn("commondatastorage.googleapis.com", common)
 
     def test_gn_pin_is_reasserted_even_if_binary_already_exists(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
