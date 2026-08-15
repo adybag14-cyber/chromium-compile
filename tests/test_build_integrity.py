@@ -1,13 +1,16 @@
 import importlib.util
 import io
+import json
 import os
 import pathlib
+import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).parents[1]
+MODULE_RELEASE_ARCHIVE = ROOT / "scripts" / "validate_release_archive.py"
 
 
 def load_module(name: str, rel: str):
@@ -262,6 +265,53 @@ class ReleaseArchiveTests(unittest.TestCase):
                 archive.addfile(link)
             with self.assertRaises(ValueError):
                 archive_validator.validate_archive(path)
+
+    def test_reports_streaming_archive_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            self._archive(path, names)
+            stats = archive_validator.validate_archive(path)
+            self.assertEqual(stats["member_count"], len(names))
+            self.assertEqual(stats["unpacked_bytes"], len(names) * len(b"runtime"))
+        source = MODULE_RELEASE_ARCHIVE.read_text(encoding="utf-8")
+        self.assertIn('mode="r|xz"', source)
+        self.assertNotIn("getmembers()", source)
+
+    def test_rejects_release_member_count_over_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            self._archive(path, names)
+            with self.assertRaisesRegex(ValueError, "member limit"):
+                archive_validator.validate_archive(path, max_members=len(names) - 1)
+
+    def test_rejects_release_unpacked_size_over_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            self._archive(path, names)
+            with self.assertRaisesRegex(ValueError, "unpacked-byte limit"):
+                archive_validator.validate_archive(path, max_unpacked_bytes=1)
+
+    def test_release_validator_cli_writes_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = root / "bundle.tar.xz"
+            stats_path = root / "stats.json"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            self._archive(path, names)
+            result = subprocess.run(
+                [sys.executable, str(MODULE_RELEASE_ARCHIVE), str(path), "--stats-file", str(stats_path)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(stats_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["member_count"], len(names))
+            self.assertGreater(payload["unpacked_bytes"], 0)
 
 
 if __name__ == "__main__":
