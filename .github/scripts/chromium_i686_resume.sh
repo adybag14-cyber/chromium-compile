@@ -5,8 +5,10 @@ set -euo pipefail
 # runners. Source chromium_i686_common.sh before sourcing this file.
 
 CHECKPOINT_REQUIRES_GN_REFRESH=false
+CHECKPOINT_RESTORE_FAILURE_CLASS=""
 
 normalize_chromium_resume_inputs() {
+  CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
   local epoch="${CHROMIUM_RESUME_INPUT_EPOCH:-946684800}"
   local started_at
   started_at="$(date +%s)"
@@ -15,30 +17,42 @@ normalize_chromium_resume_inputs() {
     echo "::error::Chromium source directory is unavailable for timestamp normalization."
     return 1
   fi
+  [[ "${epoch}" =~ ^[0-9]+$ ]] || {
+    CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
+    echo "::error::CHROMIUM_RESUME_INPUT_EPOCH must be a non-negative integer."
+    return 1
+  }
 
   echo "Normalizing non-output Chromium source/toolchain mtimes to @${epoch}."
   echo "This prevents files recreated on a fresh runner from appearing newer than restored Ninja outputs."
 
-  find "${CHROMIUM_SRC}" \
+  if ! find "${CHROMIUM_SRC}" \
     -path "${CHROMIUM_SRC}/out" -prune -o \
     -type f -print0 \
-    | xargs -0 -r -n 512 touch -d "@${epoch}" --
+    | xargs -0 -r -n 512 touch -d "@${epoch}" --; then
+    echo "::error::Could not normalize Chromium source file mtimes."
+    return 1
+  fi
 
-  find "${CHROMIUM_SRC}" \
+  if ! find "${CHROMIUM_SRC}" \
     -path "${CHROMIUM_SRC}/out" -prune -o \
     -type l -print0 \
-    | xargs -0 -r -n 512 touch -h -d "@${epoch}" --
+    | xargs -0 -r -n 512 touch -h -d "@${epoch}" --; then
+    echo "::error::Could not normalize Chromium source symlink mtimes."
+    return 1
+  fi
 
-  # Ninja can track directories as regeneration inputs. Touch them last so
-  # extraction-created directory mtimes do not invalidate build.ninja.stamp.
-  find "${CHROMIUM_SRC}" \
+  if ! find "${CHROMIUM_SRC}" \
     -path "${CHROMIUM_SRC}/out" -prune -o \
     -type d -print0 \
-    | xargs -0 -r -n 512 touch -d "@${epoch}" --
+    | xargs -0 -r -n 512 touch -d "@${epoch}" --; then
+    echo "::error::Could not normalize Chromium source directory mtimes."
+    return 1
+  fi
 
   echo "Timestamp normalization finished in $(( $(date +%s) - started_at )) seconds."
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
-
 configure_gn_from_checkpoint_or_fresh() {
   local checkpoint_restored="${1:-false}"
 
@@ -47,13 +61,15 @@ configure_gn_from_checkpoint_or_fresh() {
       && [ -s "${OUT_DIR}/args.gn" ]; then
     echo "Reusing build.ninja and args.gn from the restored checkpoint."
     echo "Ninja will regenerate the graph itself only if a stable input genuinely changed."
+    CHROMIUM_PREPARE_FAILURE_CLASS=""
     return 0
   fi
 
   echo "No reusable GN graph was restored; generating a fresh Ninja graph."
-  configure_gn
+  if ! configure_gn; then
+    return 1
+  fi
 }
-
 report_ninja_resume_state() {
   if [ ! -s "${OUT_DIR}/build.ninja" ]; then
     echo "No restored build.ninja exists; skipping Ninja resume diagnostics."
@@ -80,6 +96,7 @@ report_ninja_resume_state() {
 # patch layer. The source version is read from Chromium itself so existing
 # composite-action callers do not need another input.
 patch_build_gn_for_x86_linux() {
+  CHROMIUM_PREPARE_FAILURE_CLASS=deterministic_build
   local version_file="${CHROMIUM_SRC}/chrome/VERSION"
   if [ ! -s "${version_file}" ]; then
     echo "::error::Cannot determine Chromium version from ${version_file}."
@@ -92,16 +109,26 @@ patch_build_gn_for_x86_linux() {
   build="$(awk -F= '$1 == "BUILD" {print $2}' "${version_file}")"
   patch="$(awk -F= '$1 == "PATCH" {print $2}' "${version_file}")"
   version="${major}.${minor}.${build}.${patch}"
+  if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "::error::Extracted Chromium VERSION file is malformed: ${version}"
+    return 1
+  fi
 
-  source "${GITHUB_WORKSPACE}/.github/scripts/chromium_i686_port.sh"
-  apply_i686_port_patches "${version}"
+  if ! source "${GITHUB_WORKSPACE}/.github/scripts/chromium_i686_port.sh"; then
+    echo "::error::Could not load maintained i686 patch layer."
+    return 1
+  fi
+  if ! apply_i686_port_patches "${version}"; then
+    return 1
+  fi
+  CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
-
 verify_i386_runtime_dependencies() {
   verify_or_repair_i386_runtime_dependencies
 }
 
 
+CHECKPOINT_BUNDLE_FAILURE_CLASS=""
 CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
 CHECKPOINT_PROVENANCE_STATUS=""
 CHECKPOINT_PRODUCER_SHA=""
@@ -314,6 +341,7 @@ validate_checkpoint_source_run() {
 }
 
 checkpoint_bundle_is_usable() {
+  CHECKPOINT_BUNDLE_FAILURE_CLASS=deterministic_build
   local archive="${1:?checkpoint archive is required}"
   local expected_version="${2:?expected version is required}"
   local current_stage="${3:?current stage is required}"
@@ -332,8 +360,11 @@ checkpoint_bundle_is_usable() {
   fi
 
   echo "Validating checkpoint compression stream: ${archive}"
-  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${archive}"; then
-    echo "::error::Checkpoint compression stream is corrupt: ${archive}"
+  local compression_status=0
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${archive}" || compression_status=$?
+  if [ "${compression_status}" -ne 0 ]; then
+    CHECKPOINT_BUNDLE_FAILURE_CLASS="$(classify_prepare_command_status "${compression_status}" deterministic_build)"
+    echo "::error::Checkpoint compression validation failed with status ${compression_status}: ${archive}"
     return 1
   fi
 
@@ -341,18 +372,29 @@ checkpoint_bundle_is_usable() {
   # A legacy migration opt-in relaxes metadata requirements only; it never permits
   # unsafe archive paths, links, special files, duplicates, or missing Ninja graph files.
   local archive_stats="${bundle_dir}/checkpoint-archive-stats.json"
-  rm -f "${archive_stats}"
-  if ! bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+  if ! rm -f "${archive_stats}"; then
+    CHECKPOINT_BUNDLE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not clear stale checkpoint archive stats before validation."
+    return 1
+  fi
+  local archive_validation_status=0
+  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
       python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" \
-        "${archive}" --stats-file "${archive_stats}"; then
-    echo "::error::Checkpoint archive member/link/resource safety validation failed: ${archive}"
+        "${archive}" --stats-file "${archive_stats}" || archive_validation_status=$?
+  if [ "${archive_validation_status}" -ne 0 ]; then
+    CHECKPOINT_BUNDLE_FAILURE_CLASS="$(classify_prepare_command_status "${archive_validation_status}" deterministic_build)"
+    echo "::error::Checkpoint archive member/link/resource safety validation failed with status ${archive_validation_status}: ${archive}"
     return 1
   fi
 
   if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
     if [ "${ALLOW_LEGACY_CHECKPOINT_VERSION:-}" = "${expected_version}" ]; then
       echo "::warning::Legacy checkpoint accepted only because ALLOW_LEGACY_CHECKPOINT_VERSION explicitly permits Chromium ${expected_version}; structural safety passed and the next checkpoint will regenerate integrity metadata."
-      mark_checkpoint_bundle_validated "${archive}" "${expected_version}" "${current_stage}"
+      if ! mark_checkpoint_bundle_validated "${archive}" "${expected_version}" "${current_stage}"; then
+        CHECKPOINT_BUNDLE_FAILURE_CLASS=infrastructure
+        return 1
+      fi
+      CHECKPOINT_BUNDLE_FAILURE_CLASS=""
       return 0
     fi
     echo "::error::Legacy checkpoint lacks integrity metadata and no version-scoped migration opt-in is active."
@@ -480,14 +522,19 @@ PY
     echo "::error::Checkpoint depot_tools pin differs from the Chromium source DEPS pin."
     return 1
   fi
-  mark_checkpoint_bundle_validated \
+  if ! mark_checkpoint_bundle_validated \
     "${archive}" "${expected_version}" "${current_stage}" \
     "${expected_producer_sha}" "${expected_producer_stage}" \
-    "${expected_producer_run_id}" "${expected_producer_run_attempt}"
+    "${expected_producer_run_id}" "${expected_producer_run_attempt}"; then
+    CHECKPOINT_BUNDLE_FAILURE_CLASS=infrastructure
+    return 1
+  fi
+  CHECKPOINT_BUNDLE_FAILURE_CLASS=""
 }
 
 restore_out_checkpoint() {
   CHECKPOINT_REQUIRES_GN_REFRESH=false
+  CHECKPOINT_RESTORE_FAILURE_CLASS=infrastructure
   local archive="${1:-}"
   local expected_version="${2:-}"
   local current_stage="${3:-1}"
@@ -497,11 +544,18 @@ restore_out_checkpoint() {
   local expected_producer_run_id="${7:-}"
   local expected_producer_run_attempt="${8:-}"
   local out_parent="${CHROMIUM_SRC}/out"
-  mkdir -p "${out_parent}"
+  if ! mkdir -p "${out_parent}"; then
+    echo "::error::Could not create Chromium output parent for checkpoint restore."
+    return 1
+  fi
 
   if [ -z "${archive}" ] || [ ! -s "${archive}" ]; then
     echo "No previous output checkpoint found; continuing with ccache and a fresh out directory."
-    mkdir -p "${OUT_DIR}"
+    if ! mkdir -p "${OUT_DIR}"; then
+      echo "::error::Could not create fresh Chromium output directory."
+      return 1
+    fi
+    CHECKPOINT_RESTORE_FAILURE_CLASS=""
     return 0
   fi
 
@@ -510,14 +564,18 @@ restore_out_checkpoint() {
         "${archive}" "${expected_version}" "${current_stage}" \
         "${expected_producer_sha}" "${expected_producer_stage}" \
         "${expected_producer_run_id}" "${expected_producer_run_attempt}"; then
+      CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
       echo "::error::restore_out_checkpoint was told to skip validation without matching in-process validation state."
       return 1
     fi
   else
-    checkpoint_bundle_is_usable \
+    if ! checkpoint_bundle_is_usable \
       "${archive}" "${expected_version}" "${current_stage}" \
       "${expected_producer_sha}" "${expected_producer_stage}" \
-      "${expected_producer_run_id}" "${expected_producer_run_attempt}"
+      "${expected_producer_run_id}" "${expected_producer_run_attempt}"; then
+      CHECKPOINT_RESTORE_FAILURE_CLASS="${CHECKPOINT_BUNDLE_FAILURE_CLASS:-deterministic_build}"
+      return 1
+    fi
   fi
 
   # Refuse extraction if the validated archive would consume nearly all remaining
@@ -526,14 +584,17 @@ restore_out_checkpoint() {
   bundle_dir="$(dirname "${archive}")"
   archive_stats="${bundle_dir}/checkpoint-archive-stats.json"
   if [ ! -s "${archive_stats}" ]; then
+    CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
     echo "::error::Checkpoint archive stats are missing; refusing extraction without a validated size bound."
     return 1
   fi
   if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${archive_stats}" 2>/dev/null)"; then
+    CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
     echo "::error::Checkpoint archive stats are malformed."
     return 1
   fi
   [[ "${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
+    CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
     echo "::error::CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB must be a non-negative integer."
     return 1
   }
@@ -568,7 +629,10 @@ restore_out_checkpoint() {
   backup_out="${out_parent}/.Release_x86-before-restore-${nonce}"
   bounded_rm_rf "${restore_root}" || true
   bounded_rm_rf "${backup_out}" || true
-  mkdir -p "${restore_root}"
+  if ! mkdir -p "${restore_root}"; then
+    echo "::error::Could not create isolated checkpoint restore directory."
+    return 1
+  fi
 
   echo "Staging previous Ninja output checkpoint from ${archive}"
   if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
@@ -578,6 +642,7 @@ restore_out_checkpoint() {
     return 1
   fi
   if [ ! -s "${staged_out}/build.ninja" ] || [ ! -s "${staged_out}/args.gn" ]; then
+    CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
     echo "::error::Staged checkpoint lacks required Ninja graph files."
     bounded_rm_rf "${restore_root}" || true
     return 1
@@ -588,11 +653,21 @@ restore_out_checkpoint() {
   manifest="${bundle_dir}/$(basename "${CHECKPOINT_MANIFEST}")"
   if [ -s "${manifest}" ]; then
     local args_hash ninja_hash expected_args_hash expected_ninja_hash
-    args_hash="$(sha256sum "${staged_out}/args.gn" | awk '{print $1}')"
-    ninja_hash="$(sha256sum "${staged_out}/build.ninja" | awk '{print $1}')"
-    expected_args_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["args_gn_sha256"])' "${manifest}")"
-    expected_ninja_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_ninja_sha256"])' "${manifest}")"
+    if ! args_hash="$(sha256sum "${staged_out}/args.gn" | awk '{print $1}')" \
+        || ! ninja_hash="$(sha256sum "${staged_out}/build.ninja" | awk '{print $1}')"; then
+      echo "::error::Could not hash staged checkpoint Ninja metadata."
+      bounded_rm_rf "${restore_root}" || true
+      return 1
+    fi
+    if ! expected_args_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["args_gn_sha256"])' "${manifest}" 2>/dev/null)" \
+        || ! expected_ninja_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_ninja_sha256"])' "${manifest}" 2>/dev/null)"; then
+      CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
+      echo "::error::Checkpoint manifest lacks readable Ninja metadata hashes."
+      bounded_rm_rf "${restore_root}" || true
+      return 1
+    fi
     if [ "${args_hash}" != "${expected_args_hash}" ] || [ "${ninja_hash}" != "${expected_ninja_hash}" ]; then
+      CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
       echo "::error::Extracted checkpoint Ninja metadata differs from its manifest; active output remains untouched."
       bounded_rm_rf "${restore_root}" || true
       return 1
@@ -600,8 +675,13 @@ restore_out_checkpoint() {
     echo "Checkpoint manifest matches staged Ninja metadata."
 
     local manifest_gn manifest_depot
-    manifest_gn="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gn_version", ""))' "${manifest}")"
-    manifest_depot="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("depot_tools_revision", ""))' "${manifest}")"
+    if ! manifest_gn="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gn_version", ""))' "${manifest}" 2>/dev/null)" \
+        || ! manifest_depot="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("depot_tools_revision", ""))' "${manifest}" 2>/dev/null)"; then
+      CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
+      echo "::error::Checkpoint manifest tool-pin metadata is malformed."
+      bounded_rm_rf "${restore_root}" || true
+      return 1
+    fi
     if [ -z "${manifest_gn}" ] || [ -z "${manifest_depot}" ]; then
       CHECKPOINT_REQUIRES_GN_REFRESH=true
       echo "::warning::Restored checkpoint predates exact GN/depot_tools provenance; regenerating the Ninja graph once with Chromium's source-declared pinned GN before reuse."
@@ -638,6 +718,7 @@ restore_out_checkpoint() {
       || echo "::warning::Checkpoint promotion succeeded but old output cleanup did not; disk guard will handle residue."
   fi
 
+  CHECKPOINT_RESTORE_FAILURE_CLASS=""
   echo "Checkpoint restored atomically after staged validation."
   du -sh "${OUT_DIR}" || true
 }
