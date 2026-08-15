@@ -598,7 +598,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("All draft assets are byte-identical", publish)
         self.assertIn("exact provenance is enforced by verified Git ref", publish)
         self.assertIn("--draft=false", publish)
-        self.assertIn("group: chromium-i686-release", publish)
+        concurrency = publish[publish.index("concurrency:"):publish.index("jobs:")]
+        self.assertIn("'chromium-i686-release'", concurrency)
+        self.assertIn("chromium-i686-release-nonprod-{0}", concurrency)
         self.assertNotIn("github.event.workflow_run.id || inputs.build_run_id", publish[publish.index("concurrency:"):publish.index("jobs:")])
         self.assertIn("required release-digest capability is unavailable", publish)
         self.assertNotIn("install_i386_runtime_libraries", publish)
