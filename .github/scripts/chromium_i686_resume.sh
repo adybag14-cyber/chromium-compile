@@ -7,6 +7,7 @@ set -euo pipefail
 CHECKPOINT_REQUIRES_GN_REFRESH=false
 CHECKPOINT_RESTORE_FAILURE_CLASS=""
 CHECKPOINT_CREATE_FAILURE_CLASS=""
+CHECKPOINT_NO_PROGRESS_STREAK=0
 
 normalize_chromium_resume_inputs() {
   CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
@@ -144,6 +145,7 @@ CHECKPOINT_VALIDATED_PRODUCER_RUN_ID=""
 CHECKPOINT_VALIDATED_PRODUCER_RUN_ATTEMPT=""
 
 clear_checkpoint_validation_state() {
+  CHECKPOINT_NO_PROGRESS_STREAK=0
   CHECKPOINT_VALIDATED_ARCHIVE=""
   CHECKPOINT_VALIDATED_VERSION=""
   CHECKPOINT_VALIDATED_STAGE=""
@@ -471,6 +473,7 @@ checkpoint_bundle_is_usable() {
   EXPECTED_PRODUCER_STAGE="${expected_producer_stage}" \
   EXPECTED_PRODUCER_RUN_ID="${expected_producer_run_id}" \
   EXPECTED_PRODUCER_RUN_ATTEMPT="${expected_producer_run_attempt}" \
+  EXPECTED_MAX_NO_PROGRESS_STREAK="${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" \
   CHECKPOINT_MANIFEST_PATH="${manifest}" python3 - <<'PY'
 import json
 import os
@@ -516,6 +519,12 @@ manifest_run_attempt = str(manifest.get("producer_run_attempt", ""))
 if expected_run_attempt and manifest_run_attempt and manifest_run_attempt != expected_run_attempt:
     raise SystemExit(
         f"Checkpoint producer run attempt {manifest_run_attempt} does not match trusted attempt {expected_run_attempt}"
+    )
+streak = manifest.get("ninja_no_progress_streak", 0)
+max_streak = int(os.environ["EXPECTED_MAX_NO_PROGRESS_STREAK"])
+if isinstance(streak, bool) or not isinstance(streak, int) or not 0 <= streak <= max_streak:
+    raise SystemExit(
+        f"Checkpoint Ninja no-progress streak is outside 0..{max_streak}: {streak!r}"
     )
 PY
   then
@@ -568,6 +577,11 @@ PY
     echo "::error::Checkpoint depot_tools pin differs from the Chromium source DEPS pin."
     return 1
   fi
+  if ! CHECKPOINT_NO_PROGRESS_STREAK="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("ninja_no_progress_streak",0); m=int(sys.argv[2]); assert type(v) is int and 0 <= v <= m; print(v)' "${manifest}" "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" 2>/dev/null)"; then
+    echo "::error::Checkpoint Ninja no-progress streak could not be loaded after validation."
+    return 1
+  fi
+  echo "Checkpoint prior Ninja no-progress streak: ${CHECKPOINT_NO_PROGRESS_STREAK}/${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}."
   if ! mark_checkpoint_bundle_validated \
     "${archive}" "${expected_version}" "${current_stage}" \
     "${expected_producer_sha}" "${expected_producer_stage}" \
@@ -790,6 +804,11 @@ create_out_checkpoint() {
     echo "::error::Chromium checkpoint stage exceeds hard maximum 50: ${stage}"
     return 1
   fi
+  local no_progress_streak="${CHROMIUM_I686_NO_PROGRESS_STREAK:-0}"
+  if ! validate_no_progress_streak "${no_progress_streak}"; then
+    echo "::error::Refusing to create checkpoint with invalid Ninja no-progress streak."
+    return 1
+  fi
 
   if [ ! -d "${OUT_DIR}" ]; then
     echo "::error::Expected build output directory not found: ${OUT_DIR}"
@@ -939,6 +958,7 @@ create_out_checkpoint() {
   CHECKPOINT_NINJA_HASH="${ninja_hash}" \
   CHECKPOINT_GN_VERSION="${gn_version}" \
   CHECKPOINT_DEPOT_REVISION="${depot_revision}" \
+  CHECKPOINT_NO_PROGRESS_STREAK_VALUE="${no_progress_streak}" \
   CHECKPOINT_CONTRACT_VERSION_VALUE="${CHECKPOINT_CONTRACT_VERSION}" \
   CHECKPOINT_MANIFEST_PATH="${CHECKPOINT_MANIFEST}" \
   python3 - <<'PY' || manifest_status=$?
@@ -961,6 +981,7 @@ payload = {
     "build_ninja_sha256": os.environ["CHECKPOINT_NINJA_HASH"],
     "gn_version": os.environ["CHECKPOINT_GN_VERSION"],
     "depot_tools_revision": os.environ["CHECKPOINT_DEPOT_REVISION"],
+    "ninja_no_progress_streak": int(os.environ["CHECKPOINT_NO_PROGRESS_STREAK_VALUE"]),
     "checkpoint_contract_version": int(os.environ["CHECKPOINT_CONTRACT_VERSION_VALUE"]),
     "workflow_sha": os.environ.get("GITHUB_SHA", "unknown"),
     "producer_run_id": os.environ.get("GITHUB_RUN_ID", "unknown"),

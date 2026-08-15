@@ -362,6 +362,23 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("libatk-bridge-2.0.so.0", validation)
         self.assertIn("libpango-1.0.so.0", validation)
 
+    def test_consecutive_zero_progress_slices_are_checkpoint_bound_and_terminal(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        validate = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_MAX_NO_PROGRESS_STREAK=2", common)
+        self.assertIn("ninja_log_entry_count()", common)
+        self.assertIn("compute_no_progress_streak()", common)
+        self.assertIn("record_ninja_progress_streak", common)
+        self.assertIn("Two consecutive compiler slices made no durable Ninja progress", common)
+        self.assertIn('"ninja_no_progress_streak"', resume)
+        self.assertIn("CHECKPOINT_NO_PROGRESS_STREAK", resume)
+        self.assertIn("checkpoint_no_progress_streak=${CHECKPOINT_NO_PROGRESS_STREAK:-0}", action)
+        self.assertIn("CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK", action)
+        self.assertIn("CHROMIUM_I686_NO_PROGRESS_STREAK", action)
+        self.assertIn("bash tests/test_ninja_progress_stall.sh", validate)
+
     def test_post_compile_artifact_boundaries_are_fail_closed(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")

@@ -123,6 +123,12 @@ jobs:
           set -euo pipefail
           bash tests/test_timeout_policy_ceiling.sh
 
+      - name: Exercise Ninja progress stall contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_ninja_progress_stall.sh
+
       - name: Exercise source archive stats and capacity contract
         shell: bash
         run: |
