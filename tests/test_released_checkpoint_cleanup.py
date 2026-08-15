@@ -48,6 +48,10 @@ def artifact(artifact_id, run_id, stage, size=1000, expired=False):
     }
 
 
+
+def source_cache(cache_id, key, size=1000, ref="refs/heads/main"):
+    return {"id": cache_id, "key": key, "size_in_bytes": size, "ref": ref}
+
 def run_payload(version=VERSION, stage=2, **changes):
     payload = {
         "path": ".github/workflows/chromium-i686.yml",
@@ -203,6 +207,108 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
         with mock.patch.object(cleanup, "run_gh", side_effect=[done(code=1, stderr="timeout"), done(code=1, stderr="gh: Not Found (HTTP 404)"), done(code=1, stderr="gh: Not Found (HTTP 404)")]) as gh:
             self.assertEqual(cleanup.delete_checkpoint(REPO, item), "deleted:101")
             self.assertEqual(gh.call_count, 3)
+
+
+    def test_source_cache_filters_accept_only_version_scoped_contracts(self):
+        payloads = {
+            f"chromium-src-v4-{VERSION}-": [source_cache(301, f"chromium-src-v4-{VERSION}-12345", 5000)],
+            f"chromium-src-v3-{VERSION}": [source_cache(302, f"chromium-src-v3-{VERSION}", 4000)],
+            f"chromium-src-v2-{VERSION}": [],
+            f"chromium-src-{VERSION}": [source_cache(303, f"chromium-src-{VERSION}", 3000)],
+        }
+
+        def fake(args, **kwargs):
+            joined = " ".join(args)
+            for key_filter, values in payloads.items():
+                encoded = __import__("urllib.parse", fromlist=["quote"]).quote(key_filter, safe="")
+                if f"key={encoded}" in joined:
+                    return done({"total_count": len(values), "actions_caches": values})
+            raise AssertionError(args)
+
+        with mock.patch.object(cleanup, "run_gh", side_effect=fake):
+            found = cleanup.list_source_caches(REPO, VERSION, BRANCH)
+        self.assertEqual(
+            found,
+            [
+                cleanup.SourceCache(303, f"chromium-src-{VERSION}", 3000),
+                cleanup.SourceCache(302, f"chromium-src-v3-{VERSION}", 4000),
+                cleanup.SourceCache(301, f"chromium-src-v4-{VERSION}-12345", 5000),
+            ],
+        )
+
+    def test_source_cache_listing_is_bounded_and_filter_is_enforced(self):
+        too_many = {"total_count": cleanup.MAX_SOURCE_CACHES_PER_FILTER + 1, "actions_caches": []}
+        with mock.patch.object(cleanup, "run_gh", return_value=done(too_many)), self.assertRaises(cleanup.CleanupError):
+            cleanup.list_source_caches(REPO, VERSION, BRANCH)
+
+        wrong = {
+            "total_count": 1,
+            "actions_caches": [source_cache(301, "chromium-src-v4-151.0.7922.137-12345")],
+        }
+        with mock.patch.object(cleanup, "run_gh", return_value=done(wrong)), self.assertRaises(cleanup.CleanupError):
+            cleanup.list_source_caches(REPO, VERSION, BRANCH)
+
+        wrong_ref = {
+            "total_count": 1,
+            "actions_caches": [source_cache(301, f"chromium-src-v4-{VERSION}-12345", ref="refs/heads/dev")],
+        }
+        with mock.patch.object(cleanup, "run_gh", return_value=done(wrong_ref)), self.assertRaises(cleanup.CleanupError):
+            cleanup.list_source_caches(REPO, VERSION, BRANCH)
+
+    def test_source_cache_delete_is_read_confirmed_without_write_retry(self):
+        item = cleanup.SourceCache(301, f"chromium-src-v4-{VERSION}-12345", 5000)
+        with mock.patch.object(cleanup, "run_gh", return_value=done(code=1, stderr="timeout")) as gh, \
+             mock.patch.object(cleanup, "source_cache_is_missing", return_value=True):
+            self.assertEqual(
+                cleanup.delete_source_cache(REPO, VERSION, BRANCH, item),
+                f"deleted-cache:301:key={item.key}",
+            )
+            self.assertEqual(gh.call_count, 1)
+
+        with mock.patch.object(cleanup, "run_gh", return_value=done(code=1, stderr="timeout")) as gh, \
+             mock.patch.object(cleanup, "source_cache_is_missing", return_value=False), \
+             self.assertRaises(cleanup.CleanupError):
+            cleanup.delete_source_cache(REPO, VERSION, BRANCH, item)
+        self.assertEqual(gh.call_count, 1)
+
+    def test_released_source_cache_cleanup_revalidates_and_dry_run_never_deletes(self):
+        items = [cleanup.SourceCache(301, f"chromium-src-v4-{VERSION}-12345", 5000)]
+        with mock.patch.object(cleanup, "verify_healthy_release"), \
+             mock.patch.object(cleanup, "ensure_no_active_build_for_version"), \
+             mock.patch.object(cleanup, "list_source_caches", return_value=items), \
+             mock.patch.object(cleanup, "delete_source_cache") as delete:
+            results, total = cleanup.cleanup_released_source_caches(
+                REPO, VERSION, BRANCH, BUILD_SHA, dry_run=True
+            )
+        delete.assert_not_called()
+        self.assertEqual(total, 5000)
+        self.assertEqual(
+            results,
+            [f"dry-run-cache:301:key=chromium-src-v4-{VERSION}-12345:bytes=5000"],
+        )
+
+    def test_released_source_cache_apply_deletes_each_cache_once(self):
+        items = [
+            cleanup.SourceCache(301, f"chromium-src-v4-{VERSION}-12345", 5000),
+            cleanup.SourceCache(302, f"chromium-src-v3-{VERSION}", 4000),
+        ]
+        with mock.patch.object(cleanup, "verify_healthy_release"), \
+             mock.patch.object(cleanup, "ensure_no_active_build_for_version"), \
+             mock.patch.object(cleanup, "list_source_caches", return_value=items), \
+             mock.patch.object(
+                 cleanup,
+                 "delete_source_cache",
+                 side_effect=[
+                     f"deleted-cache:301:key={items[0].key}",
+                     f"deleted-cache:302:key={items[1].key}",
+                 ],
+             ) as delete:
+            results, total = cleanup.cleanup_released_source_caches(
+                REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False
+            )
+        self.assertEqual(delete.call_count, 2)
+        self.assertEqual(total, 9000)
+        self.assertEqual(len(results), 2)
 
 
 if __name__ == "__main__":
