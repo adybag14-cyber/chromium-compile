@@ -32,6 +32,8 @@ fi
 exit 2
 EOF
 chmod +x "${bundle}/chrome-wrapper"
+printf 'fake egl\n' > "${bundle}/libEGL.so"
+printf 'fake gles\n' > "${bundle}/libGLESv2.so"
 
 
 REPAIR_CALLS=0
@@ -55,7 +57,16 @@ bounded_ldd() {
 
 smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null
 [ -z "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" ]
-[ "${REPAIR_CALLS}" -eq 1 ]
+[ "${REPAIR_CALLS}" -eq 3 ]
+
+mv "${bundle}/libEGL.so" "${bundle}/libEGL.so.missing"
+set +e
+smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null 2>&1
+missing_gpu_status=$?
+set -e
+[ "${missing_gpu_status}" -ne 0 ]
+[ "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" = deterministic_build ]
+mv "${bundle}/libEGL.so.missing" "${bundle}/libEGL.so"
 
 FAKE_REPAIR_STATUS=1
 FAKE_REPAIR_CLASS=infrastructure

@@ -578,7 +578,7 @@ capture_ldd_output() {
   fi
   printf -v "${output_name}" '%s' "${output}"
   I386_RUNTIME_REPAIR_FAILURE_CLASS="$(classify_prepare_command_status "${status}" deterministic_build)"
-  echo "::error::ldd failed or timed out for ELF32 executable ${binary} (status ${status}); refusing an unbounded runtime probe."
+  echo "::error::ldd failed or timed out for ELF32 runtime object ${binary} (status ${status}); refusing an unbounded runtime probe."
   return 1
 }
 
@@ -1752,6 +1752,19 @@ validate_i686_runtime_bundle() {
       return 1
     }
   done
+  local -a required_executables=(
+    chrome
+    chrome-wrapper
+    chrome_crashpad_handler
+    chrome_management_service
+    chrome_sandbox
+  )
+  for item in "${required_executables[@]}"; do
+    test -f "${root}/${item}" && test -x "${root}/${item}" || {
+      echo "::error::Required runtime executable is missing execute permission: ${item}"
+      return 1
+    }
+  done
 
   local path resolved file_output elf_class elf_machine root_real
   root_real="$(realpath "${root}" 2>/dev/null || true)"
@@ -1911,10 +1924,34 @@ smoke_test_i686_runtime_bundle() {
   fi
 
   # The baseline i386 set is for host build tools and is intentionally small.
+  # Validate only GPU runtime objects that the standalone package explicitly
+  # promises. Avoid broad shared-object scanning: optional Qt shims may target a
+  # toolkit that is intentionally absent on this distro and are selected lazily.
+  local runtime_object repair_status=0
+  local -a gpu_runtime_objects=(libEGL.so libGLESv2.so)
+  if [ -f "${root}/libvk_swiftshader.so" ]; then
+    gpu_runtime_objects+=(libvk_swiftshader.so)
+  fi
+  for runtime_object in "${gpu_runtime_objects[@]}"; do
+    if [ ! -f "${root}/${runtime_object}" ]; then
+      CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=deterministic_build
+      echo "::error::Required packaged GPU runtime object is missing: ${runtime_object}"
+      return 1
+    fi
+    repair_status=0
+    LD_LIBRARY_PATH="${runtime_library_path}" \
+      repair_missing_i386_runtime_for_binary "${root}/${runtime_object}" || repair_status=$?
+    if [ "${repair_status}" -ne 0 ]; then
+      CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS="${I386_RUNTIME_REPAIR_FAILURE_CLASS:-deterministic_build}"
+      echo "::error::Could not establish i386 dependencies for packaged GPU runtime object ${runtime_object} (status ${repair_status})."
+      return 1
+    fi
+  done
+
   # Before executing the target browser, resolve/install any additional Ubuntu
   # i386 providers it genuinely needs. This keeps smoke failures about the
   # package/runtime contract instead of incidental runner package inventory.
-  local repair_status=0
+  repair_status=0
   LD_LIBRARY_PATH="${runtime_library_path}" \
     repair_missing_i386_runtime_for_binary "${browser}" || repair_status=$?
   if [ "${repair_status}" -ne 0 ]; then

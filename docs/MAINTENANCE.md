@@ -111,3 +111,7 @@ All workflow dispatches that can start expensive work should use `scripts/github
 Maintenance issue creation should use `scripts/github_maintenance_issue.py`. Exact-title lookup is bounded to 1,000 open issues, duplicate exact titles fail closed, a create timeout is confirmed by rereading state rather than retried, and failure to append a comment never triggers a duplicate issue. Preflight and terminal staged-build failures attempt same-run issue mirrors; the secondary failure reporter is redundancy and also covers trusted publisher failures.
 
 `bootstrap-i686-live.yml` is now manual-only. It first checks the immutable Chromium 150 release tag and will not dispatch a released baseline. It exists only as historical/bootstrap recovery tooling, not as part of normal stable-version automation. Bootstrap no longer has repository-content write permission or commits status files; it reports status only in the workflow summary, and all production write-capable manual workflows require trusted default-branch workflow code.
+
+### Linux sandbox executable policy
+
+The standalone runtime archive requires `chrome_sandbox` (and the other Chromium helper binaries) to retain execute permission. The archive intentionally does **not** require setuid/root ownership: whether to install the legacy setuid sandbox with elevated ownership/mode is a target-system deployment policy. Runtime CI uses `--no-sandbox` only for the isolated headless smoke test so the package can be validated on an unprivileged GitHub runner without mutating host security policy.

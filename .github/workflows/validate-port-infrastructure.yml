@@ -119,6 +119,7 @@ jobs:
           set -euo pipefail
           bash tests/test_release_runtime_smoke.sh
           bash tests/test_release_archive_space.sh
+          bash tests/test_runtime_executable_permissions.sh
 
       - name: Reject floating first-party action tags
         shell: bash

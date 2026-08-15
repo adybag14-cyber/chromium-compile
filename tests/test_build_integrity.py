@@ -177,7 +177,7 @@ class ReleaseArchiveTests(unittest.TestCase):
                 data = b"runtime"
                 info = tarfile.TarInfo(name)
                 info.size = len(data)
-                info.mode = 0o755 if name in {"chrome", "chrome_crashpad_handler", "chrome_management_service", "chrome_sandbox"} else 0o644
+                info.mode = 0o755 if name in runtime.REQUIRED_EXECUTABLE_RUNTIME else 0o644
                 archive.addfile(info, io.BytesIO(data))
 
     def test_accepts_complete_safe_bundle(self):
@@ -247,6 +247,22 @@ class ReleaseArchiveTests(unittest.TestCase):
             names = sorted(runtime.REQUIRED_RUNTIME - {"locales", "chrome_sandbox"}) + ["locales/en-US.pak"]
             self._archive(path, names)
             with self.assertRaises(ValueError):
+                archive_validator.validate_archive(path)
+
+    def test_rejects_required_runtime_without_execute_permission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            with tarfile.open(path, "w:xz") as archive:
+                for name in names:
+                    data = b"runtime"
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    info.mode = 0o755 if name in runtime.REQUIRED_EXECUTABLE_RUNTIME else 0o644
+                    if name == "chrome_crashpad_handler":
+                        info.mode = 0o644
+                    archive.addfile(info, io.BytesIO(data))
+            with self.assertRaisesRegex(ValueError, "lack execute permission"):
                 archive_validator.validate_archive(path)
 
     def test_rejects_required_runtime_stored_as_symlink(self):
