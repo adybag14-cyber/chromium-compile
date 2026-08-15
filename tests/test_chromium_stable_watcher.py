@@ -159,6 +159,52 @@ class StableWatcherTests(unittest.TestCase):
             with self.assertRaises(watcher.WatcherError):
                 watcher.list_port_run_state("owner/repository", "main")
 
+    def test_filtered_workflow_history_rejects_ignored_status_filter(self):
+        wrong = {
+            "workflow_runs": [
+                {
+                    "status": "completed",
+                    "conclusion": "success",
+                    "display_title": "Chromium i686 155.0.1.2 - stage 2 - attempt 0",
+                }
+            ]
+        }
+        with mock.patch.object(watcher, "gh_json", return_value=wrong), self.assertRaises(watcher.WatcherError):
+            watcher.list_workflow_runs(
+                "owner/repository",
+                "chromium-i686.yml",
+                created_after=watcher.datetime.now(watcher.timezone.utc),
+                status_filter="failure",
+            )
+
+    def test_filtered_workflow_history_uses_status_parameter(self):
+        with mock.patch.object(watcher, "gh_json", return_value={"workflow_runs": []}) as gh_json:
+            watcher.list_workflow_runs(
+                "owner/repository",
+                "chromium-i686.yml",
+                created_after=watcher.datetime.now(watcher.timezone.utc),
+                status_filter="cancelled",
+            )
+        endpoint = gh_json.call_args.args[0][-1]
+        self.assertIn("status=cancelled", endpoint)
+
+    def test_port_state_queries_only_active_and_terminal_filters(self):
+        calls = []
+
+        def fake_runs(_repository, workflow, **kwargs):
+            calls.append((workflow, kwargs.get("status_filter")))
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            watcher.list_port_run_state("owner/repository", "main")
+        expected_filters = watcher.ACTIVE_RUN_STATES | watcher.QUARANTINE_RUN_CONCLUSIONS
+        self.assertEqual(
+            set(calls),
+            {(workflow, state) for workflow in watcher.PORT_WORKFLOWS for state in expected_filters},
+        )
+        self.assertNotIn(("chromium-i686.yml", None), calls)
+        self.assertNotIn(("chromium-i686.yml", "success"), calls)
+
     def test_workflow_history_saturation_fails_closed(self):
         full_page = {"workflow_runs": [{"display_title": "old"}] * 100}
         with mock.patch.object(watcher, "gh_json", return_value=full_page):
