@@ -25,6 +25,7 @@ def completed(payload):
 def run_payload(stage=2, **changes):
     payload = {
         "status": "completed",
+        "actor": {"login": "github-actions[bot]"},
         "path": ".github/workflows/chromium-i686.yml",
         "head_repository": {"full_name": REPO},
         "head_branch": BRANCH,
@@ -44,6 +45,26 @@ class CheckpointPruneTests(unittest.TestCase):
     def test_resolve_accepts_exact_checkpoint_provenance(self):
         with mock.patch.object(prune, "run_gh", side_effect=[completed(run_payload()), completed(artifacts_payload())]):
             self.assertEqual(prune.resolve_checkpoint_artifact(REPO, RUN_ID, VERSION, "2", BRANCH), 777)
+
+    def test_only_bot_producers_are_prunable_and_ref_suffixed_paths_are_valid(self):
+        with mock.patch.object(
+            prune, "run_gh",
+            side_effect=[
+                completed(run_payload(path=".github/workflows/chromium-i686.yml@refs/heads/main")),
+                completed(artifacts_payload()),
+            ],
+        ):
+            self.assertEqual(prune.resolve_checkpoint_artifact(REPO, RUN_ID, VERSION, "2", BRANCH), 777)
+
+        with mock.patch.object(
+            prune, "run_gh", side_effect=[completed(run_payload(actor={"login": "human"}))]
+        ), self.assertRaisesRegex(prune.PruneError, "not github-actions"):
+            prune.resolve_checkpoint_artifact(REPO, RUN_ID, VERSION, "2", BRANCH)
+
+        with mock.patch.object(
+            prune, "run_gh", side_effect=[completed(run_payload(actor=None))]
+        ), self.assertRaisesRegex(prune.PruneError, "not github-actions"):
+            prune.resolve_checkpoint_artifact(REPO, RUN_ID, VERSION, "2", BRANCH)
 
     def test_missing_or_expired_checkpoint_is_noop(self):
         cases = [

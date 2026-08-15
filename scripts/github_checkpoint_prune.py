@@ -64,7 +64,12 @@ def resolve_checkpoint_artifact(
     run = _json(run_gh(["api", f"repos/{repository}/actions/runs/{run_id}"]), "run provenance")
     if run.get("status") != "completed":
         raise PruneError(f"run {run_id} is not completed and cannot be pruned safely")
-    if run.get("path") != ".github/workflows/chromium-i686.yml":
+    actor = run.get("actor")
+    actor_login = actor.get("login") if isinstance(actor, dict) else None
+    if actor_login != "github-actions[bot]":
+        raise PruneError(f"run {run_id} was created by {actor_login!r}, not github-actions[bot]")
+    workflow_path = str(run.get("path", "")).split("@", 1)[0]
+    if workflow_path != ".github/workflows/chromium-i686.yml":
         raise PruneError(f"run {run_id} is not the Chromium i686 build workflow")
     head_repo = (run.get("head_repository") or {}).get("full_name") if isinstance(run.get("head_repository"), dict) else None
     if head_repo != repository:
