@@ -157,7 +157,13 @@ class PipelineHardeningTests(unittest.TestCase):
 
     def test_runtime_discovery_and_apt_operations_are_bounded(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS", common)
         self.assertIn("CHROMIUM_I686_APT_TIMEOUT_SECONDS", common)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_APT_UPDATE_TIMEOUT_SECONDS=300", common)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_APT_TIMEOUT_SECONDS=1800", common)
+        self.assertIn("normalize_ubuntu_archive_mirrors()", common)
+        self.assertIn("APT index refresh failed/timed out; trying canonical Ubuntu mirrors once", common)
+        self.assertIn("bash tests/test_apt_mirror_resilience.sh", (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8"))
         self.assertIn("CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS", common)
         self.assertIn("CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS", common)
         self.assertIn("timeout -k 20s", common)

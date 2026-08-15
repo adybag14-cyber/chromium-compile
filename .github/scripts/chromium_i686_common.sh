@@ -274,26 +274,102 @@ RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=""
 RUNNER_DISTRO_ID=""
 RUNNER_DISTRO_VERSION_ID=""
 I386_MULTIARCH="i386-linux-gnu"
+CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS="${CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS:-180}"
 CHROMIUM_I686_APT_TIMEOUT_SECONDS="${CHROMIUM_I686_APT_TIMEOUT_SECONDS:-900}"
+CHROMIUM_I686_HARD_MAX_APT_UPDATE_TIMEOUT_SECONDS=300
+CHROMIUM_I686_HARD_MAX_APT_TIMEOUT_SECONDS=1800
 CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS="${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS:-180}"
 CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS="${CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS:-20}"
 
-bounded_sudo_apt_get() {
-  timeout -k 30s "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}s" \
+validate_apt_timeout_seconds() {
+  local value="${1:?APT timeout value is required}"
+  local name="${2:?APT timeout variable name is required}"
+  local hard_max="${3:?APT timeout hard maximum is required}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,3}$ ]] || [ "${value}" -gt "${hard_max}" ]; then
+    echo "::error::${name} must be a positive integer no greater than ${hard_max} seconds."
+    return 1
+  fi
+}
+
+_run_sudo_apt_get_with_timeout() {
+  local seconds="${1:?APT timeout seconds are required}"
+  shift
+  timeout -k 30s "${seconds}s" \
     sudo env DEBIAN_FRONTEND=noninteractive apt-get \
-      -o Acquire::Retries=3 \
-      -o Acquire::http::Timeout=30 \
-      -o Acquire::https::Timeout=30 \
+      -o Acquire::Retries=2 \
+      -o Acquire::http::Timeout=20 \
+      -o Acquire::https::Timeout=20 \
       -o DPkg::Lock::Timeout=60 \
       "$@"
 }
 
+normalize_ubuntu_archive_mirrors() {
+  local os_release_file="${CHROMIUM_I686_OS_RELEASE_FILE:-/etc/os-release}"
+  if [ ! -r "${os_release_file}" ] || ! grep -Eq '^ID=(ubuntu|"ubuntu")$' "${os_release_file}"; then
+    return 1
+  fi
+
+  local apt_root="${CHROMIUM_I686_APT_ROOT:-/}"
+  apt_root="${apt_root%/}"
+  [ -n "${apt_root}" ] || apt_root=/
+  local -a files=("${apt_root}/etc/apt/apt-mirrors.txt" "${apt_root}/etc/apt/sources.list")
+  shopt -s nullglob
+  files+=("${apt_root}"/etc/apt/sources.list.d/*.list "${apt_root}"/etc/apt/sources.list.d/*.sources)
+  shopt -u nullglob
+
+  local file changed=false
+  for file in "${files[@]}"; do
+    [ -f "${file}" ] || continue
+    if sudo grep -Eq 'azure\.(archive|ports)\.ubuntu\.com' "${file}"; then
+      echo "Rewriting unavailable Azure Ubuntu mirror in ${file} to the canonical Ubuntu archive."
+      sudo sed -i \
+        -e 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' \
+        -e 's/azure\.ports\.ubuntu\.com/ports.ubuntu.com/g' \
+        "${file}" || return 1
+      changed=true
+    fi
+  done
+  [ "${changed}" = true ]
+}
+
+bounded_sudo_apt_get() {
+  local command="${1:-}"
+  local seconds name hard_max
+  if [ "${command}" = update ]; then
+    seconds="${CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS}"
+    name=CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS
+    hard_max="${CHROMIUM_I686_HARD_MAX_APT_UPDATE_TIMEOUT_SECONDS}"
+  else
+    seconds="${CHROMIUM_I686_APT_TIMEOUT_SECONDS}"
+    name=CHROMIUM_I686_APT_TIMEOUT_SECONDS
+    hard_max="${CHROMIUM_I686_HARD_MAX_APT_TIMEOUT_SECONDS}"
+  fi
+  validate_apt_timeout_seconds "${seconds}" "${name}" "${hard_max}" || return 1
+
+  if _run_sudo_apt_get_with_timeout "${seconds}" "$@"; then
+    return 0
+  fi
+  if [ "${command}" != update ]; then
+    return 1
+  fi
+
+  echo "::warning::APT index refresh failed/timed out; trying canonical Ubuntu mirrors once before giving up."
+  if ! normalize_ubuntu_archive_mirrors; then
+    echo "::warning::No Azure Ubuntu mirror entry could be safely normalized for retry."
+    return 1
+  fi
+  _run_sudo_apt_get_with_timeout "${seconds}" "$@"
+}
+
 bounded_apt_get_simulate() {
+  validate_apt_timeout_seconds \
+    "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}" CHROMIUM_I686_APT_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_APT_TIMEOUT_SECONDS}" || return 1
   timeout -k 15s "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}s" \
     apt-get -s \
-      -o Acquire::Retries=3 \
-      -o Acquire::http::Timeout=30 \
-      -o Acquire::https::Timeout=30 \
+      -o Acquire::Retries=2 \
+      -o Acquire::http::Timeout=20 \
+      -o Acquire::https::Timeout=20 \
       "$@"
 }
 
