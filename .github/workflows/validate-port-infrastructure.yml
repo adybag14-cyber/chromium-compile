@@ -188,6 +188,14 @@ jobs:
           source .github/scripts/chromium_i686_common.sh
           version="$(resolve_latest_version)"
           echo "Probing Chromium ${version} source contract."
+          source_metadata="${RUNNER_TEMP}/latest-chromium-source-object.json"
+          source_cache_key="$(python3 scripts/chromium_source_object.py \
+            --version "${version}" --metadata-out "${source_metadata}" --cache-key-only)"
+          [[ "${source_cache_key}" =~ ^chromium-src-v4-${version}-[1-9][0-9]{0,39}$ ]] || {
+            echo "::error::Latest Chromium source cache identity is malformed: ${source_cache_key}"
+            exit 1
+          }
+          echo "Latest source cache identity: ${source_cache_key}"
           mkdir -p "${CHROMIUM_SRC}/chrome/installer/linux"
           for rel in DEPS chrome/installer/linux/BUILD.gn; do
             encoded="${RUNNER_TEMP}/$(basename "${rel}").b64"
