@@ -84,14 +84,20 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/test_source_archive_space.sh
+          bash tests/test_system_dependencies.sh
+          bash tests/test_source_trust_hosts.sh
 
       - name: Exercise prepare failure classification contract
         shell: bash
         run: |
           set -euo pipefail
           bash tests/test_prepare_failure_classification.sh
-          bash tests/test_system_dependencies.sh
-          bash tests/test_source_trust_hosts.sh
+
+      - name: Exercise post-compile artifact integrity contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_post_compile_artifact_integrity.sh
 
       - name: Exercise checkpoint provenance contract
         shell: bash

@@ -202,6 +202,8 @@ I386_RUNTIME_REPAIR_FAILURE_CLASS=""
 I386_RUNTIME_REPAIR_CHANGED=false
 I386_RESOLVED_PACKAGE=""
 CHROMIUM_PACKAGE_FAILURE_CLASS=""
+RELEASE_ARCHIVE_FAILURE_CLASS=""
+RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=""
 RUNNER_DISTRO_ID=""
 RUNNER_DISTRO_VERSION_ID=""
 I386_MULTIARCH="i386-linux-gnu"
@@ -1751,16 +1753,32 @@ EOF
 }
 
 validate_release_archive_with_stats() {
+  RELEASE_ARCHIVE_FAILURE_CLASS=deterministic_build
   local package="${1:?release package is required}"
   local stats_file="${2:?release archive stats path is required}"
-  rm -f "${stats_file}"
+  if ! rm -f "${stats_file}"; then
+    RELEASE_ARCHIVE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not clear stale release archive stats."
+    return 1
+  fi
+  local status=0
   bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
     python3 "${WORKSPACE}/scripts/validate_release_archive.py" \
-      "${package}" --stats-file "${stats_file}"
-  test -s "${stats_file}"
+      "${package}" --stats-file "${stats_file}" || status=$?
+  if [ "${status}" -ne 0 ]; then
+    RELEASE_ARCHIVE_FAILURE_CLASS="$(classify_prepare_command_status "${status}" deterministic_build)"
+    echo "::error::Release archive validation failed with status ${status}."
+    return 1
+  fi
+  if [ ! -s "${stats_file}" ]; then
+    echo "::error::Release archive validator succeeded without emitting stats."
+    return 1
+  fi
+  RELEASE_ARCHIVE_FAILURE_CLASS=""
 }
 
 ensure_release_archive_extract_space() {
+  RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=deterministic_build
   local stats_file="${1:?release archive stats path is required}"
   local target_parent="${2:?release extraction parent is required}"
   if ! validate_bounded_reserve_gib \
@@ -1774,18 +1792,29 @@ ensure_release_archive_extract_space() {
   fi
   reserve_bytes=$((CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB * 1024 * 1024 * 1024))
   required_bytes=$((unpacked_bytes + reserve_bytes))
-  mkdir -p "${target_parent}"
-  available_bytes="$(df -PB1 "${target_parent}" | awk 'NR == 2 {print $4}')"
+  if ! mkdir -p "${target_parent}"; then
+    RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=infrastructure
+    echo "::error::Could not create release extraction target: ${target_parent}"
+    return 1
+  fi
+  if ! available_bytes="$(df -PB1 "${target_parent}" | awk 'NR == 2 {print $4}')"; then
+    RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=infrastructure
+    echo "::error::Could not query free disk bytes for release extraction."
+    return 1
+  fi
   [[ "${available_bytes}" =~ ^[0-9]+$ ]] || {
+    RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=infrastructure
     echo "::error::Could not determine free disk bytes for release extraction."
     return 1
   }
   required_gib=$(( (required_bytes + 1024 * 1024 * 1024 - 1) / (1024 * 1024 * 1024) ))
   echo "Release extraction requires ${required_bytes} bytes including reserve (~${required_gib} GiB); ${available_bytes} bytes are available."
   if [ "${available_bytes}" -lt "${required_bytes}" ]; then
+    RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=infrastructure
     echo "::error::Insufficient disk space for bounded release extraction."
     return 1
   fi
+  RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS=""
 }
 
 CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=""
@@ -1815,6 +1844,19 @@ smoke_test_i686_runtime_bundle() {
   fi
   if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     runtime_library_path="${runtime_library_path}:${LD_LIBRARY_PATH}"
+  fi
+
+  # The baseline i386 set is for host build tools and is intentionally small.
+  # Before executing the target browser, resolve/install any additional Ubuntu
+  # i386 providers it genuinely needs. This keeps smoke failures about the
+  # package/runtime contract instead of incidental runner package inventory.
+  local repair_status=0
+  LD_LIBRARY_PATH="${runtime_library_path}" \
+    repair_missing_i386_runtime_for_binary "${browser}" || repair_status=$?
+  if [ "${repair_status}" -ne 0 ]; then
+    CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS="${I386_RUNTIME_REPAIR_FAILURE_CLASS:-deterministic_build}"
+    echo "::error::Could not establish the packaged Chromium target i386 runtime (status ${repair_status})."
+    return 1
   fi
 
   local ldd_output ldd_status=0
@@ -1887,45 +1929,109 @@ smoke_test_i686_runtime_bundle() {
 
 package_chromium_i686() {
   local version="${1:?version is required}"
-  CHROMIUM_PACKAGE_FAILURE_CLASS="deterministic_build"
-  cd "${OUT_DIR}"
+  CHROMIUM_PACKAGE_FAILURE_CLASS=deterministic_build
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "::error::Invalid Chromium package version: ${version}"
+    return 1
+  }
+  if ! cd "${OUT_DIR}"; then
+    echo "::error::Chromium output directory is unavailable for packaging: ${OUT_DIR}"
+    return 1
+  fi
   local package="${WORKSPACE}/chromium-${version}-linux-i686.tar.xz"
   local checksum="${package}.sha256"
   local manifest="${WORKSPACE}/chromium-${version}-linux-i686-manifest.txt"
   local runtime_list="${WORKSPACE}/chromium-${version}-linux-i686-runtime-files.txt"
 
-  if ! python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py"       --source-root "${CHROMIUM_SRC}" --out-dir "${OUT_DIR}" --output-list "${runtime_list}" \
-      --render-wrapper; then
-    echo "::error::Chromium Linux runtime definition/output closure requires maintenance."
+  local runtime_status=0
+  bounded_external "${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}" \
+    python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py" \
+      --source-root "${CHROMIUM_SRC}" --out-dir "${OUT_DIR}" --output-list "${runtime_list}" \
+      --render-wrapper || runtime_status=$?
+  if [ "${runtime_status}" -ne 0 ]; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS="$(classify_prepare_command_status "${runtime_status}" deterministic_build)"
+    echo "::error::Chromium Linux runtime definition/output closure failed with status ${runtime_status}."
     return 1
   fi
-  mapfile -t files < "${runtime_list}"
+  local -a files=()
+  if ! mapfile -t files < "${runtime_list}"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not read Chromium runtime package file list."
+    return 1
+  fi
   if [ "${#files[@]}" -eq 0 ]; then
     echo "::error::Chromium runtime collector produced an empty package."
     return 1
   fi
 
-  rm -f "${package}" "${checksum}" "${manifest}"
-  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"       tar -cJf "${package}" "${files[@]}"; then
-    CHROMIUM_PACKAGE_FAILURE_CLASS="infrastructure"
-    echo "::error::Failed or timed out while packaging Chromium runtime files."
+  if ! rm -f "${package}" "${checksum}" "${manifest}"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not clear stale Chromium release outputs."
+    return 1
+  fi
+  local archive_status=0
+  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+    tar -cJf "${package}" -- "${files[@]}" || archive_status=$?
+  if [ "${archive_status}" -ne 0 ]; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS="$(classify_prepare_command_status "${archive_status}" infrastructure)"
+    echo "::error::Failed or timed out while packaging Chromium runtime files (status ${archive_status})."
     return 1
   fi
 
+  # Once compilation and archive creation succeeded, failures collecting local
+  # provenance/sidecar state are recoverable runner/filesystem failures.
+  CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
   local package_sha source_sha clang_revision gn_version depot_revision port_hash
-  package_sha="$(sha256sum "${package}" | awk '{print $1}')"
-  (
-    cd "${WORKSPACE}"
-    printf '%s  %s
-' "${package_sha}" "$(basename "${package}")" > "$(basename "${checksum}")"
-  )
-  source_sha="$(awk 'NR == 1 {print $1}' "${WORKSPACE}/.chromium-source-cache/chromium-${version}.tar.xz.sha256")"
-  clang_revision="$(cat "${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision")"
-  gn_version="$(chromium_gn_version)"
-  depot_revision="$(chromium_depot_tools_revision)"
-  port_hash="$(compute_port_config_sha256 "${version}")"
+  if ! package_sha="$(sha256sum "${package}" | awk '{print $1}')"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not hash packaged Chromium archive."
+    return 1
+  fi
+  [[ "${package_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Packaged Chromium SHA-256 is malformed."
+    return 1
+  }
+  if ! (
+    cd "${WORKSPACE}" \
+      && printf '%s  %s\n' "${package_sha}" "$(basename "${package}")" > "$(basename "${checksum}")"
+  ); then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not write packaged Chromium checksum sidecar."
+    return 1
+  fi
 
-  {
+  local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${version}.tar.xz.sha256"
+  if [ ! -s "${source_checksum_file}" ]; then
+    echo "::error::Prepared Chromium source checksum is missing during packaging."
+    return 1
+  fi
+  if ! source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not read prepared Chromium source checksum."
+    return 1
+  fi
+  [[ "${source_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "::error::Prepared Chromium source checksum is malformed during packaging."
+    return 1
+  }
+  local clang_revision_file="${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision"
+  if [ ! -s "${clang_revision_file}" ] || ! clang_revision="$(cat "${clang_revision_file}")"; then
+    echo "::error::Chromium Clang revision metadata is missing during packaging."
+    return 1
+  fi
+  if ! gn_version="$(chromium_gn_version)" \
+      || ! depot_revision="$(chromium_depot_tools_revision)" \
+      || ! port_hash="$(compute_port_config_sha256 "${version}")"; then
+    echo "::error::Could not resolve immutable tool/port provenance for Chromium package."
+    return 1
+  fi
+  [[ "${port_hash}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "::error::Chromium package port configuration hash is malformed."
+    return 1
+  }
+
+  if ! {
     echo "manifest_schema=2"
     echo "version=${version}"
     echo "target_cpu=x86"
@@ -1945,33 +2051,42 @@ package_chromium_i686() {
     echo "runner_image_version=${ImageVersion:-unknown}"
     echo
     echo "packaged_files:"
-    printf '%s
-' "${files[@]}"
-  } > "${manifest}"
+    printf '%s\n' "${files[@]}"
+  } > "${manifest}"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not write Chromium release provenance manifest."
+    return 1
+  fi
 
   local release_stats="${WORKSPACE}/release-archive-stats-${version}.json"
+  CHROMIUM_PACKAGE_FAILURE_CLASS=deterministic_build
   if ! validate_release_archive_with_stats "${package}" "${release_stats}"; then
-    echo "::error::Packaged runtime archive failed deterministic safety/completeness/resource validation."
+    CHROMIUM_PACKAGE_FAILURE_CLASS="${RELEASE_ARCHIVE_FAILURE_CLASS:-deterministic_build}"
+    echo "::error::Packaged runtime archive failed safety/completeness/resource validation."
     return 1
   fi
 
   local smoke_dir="${WORKSPACE}/release-smoke-${version}"
-  bounded_rm_rf "${smoke_dir}"
-  mkdir -p "${smoke_dir}"
-  if ! ensure_release_archive_extract_space "${release_stats}" "${smoke_dir}"; then
+  if ! bounded_rm_rf "${smoke_dir}" || ! mkdir -p "${smoke_dir}"; then
     CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not prepare isolated package smoke directory."
+    rm -f "${release_stats}" || true
+    return 1
+  fi
+  if ! ensure_release_archive_extract_space "${release_stats}" "${smoke_dir}"; then
+    CHROMIUM_PACKAGE_FAILURE_CLASS="${RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS:-infrastructure}"
     bounded_rm_rf "${smoke_dir}" || true
-    rm -f "${release_stats}"
+    rm -f "${release_stats}" || true
     return 1
   fi
   local extract_status=0
   bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
     tar -xJf "${package}" -C "${smoke_dir}" || extract_status=$?
   if [ "${extract_status}" -ne 0 ]; then
-    CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure
+    CHROMIUM_PACKAGE_FAILURE_CLASS="$(classify_prepare_command_status "${extract_status}" infrastructure)"
     echo "::error::Validated release archive extraction failed with status ${extract_status}."
     bounded_rm_rf "${smoke_dir}" || true
-    rm -f "${release_stats}"
+    rm -f "${release_stats}" || true
     return 1
   fi
   local smoke_status=0
@@ -1980,13 +2095,14 @@ package_chromium_i686() {
     smoke_test_i686_runtime_bundle "${smoke_dir}" "${version}" || smoke_status=$?
   fi
   bounded_rm_rf "${smoke_dir}" || true
-  rm -f "${release_stats}"
+  rm -f "${release_stats}" || true
   if [ "${smoke_status}" -ne 0 ]; then
     CHROMIUM_PACKAGE_FAILURE_CLASS="${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS:-deterministic_build}"
-    echo "::error::Packaged runtime bundle failed deterministic i686/runtime smoke validation."
+    echo "::error::Packaged runtime bundle failed i686/runtime smoke validation."
     return 1
   fi
 
   CHROMIUM_PACKAGE_FAILURE_CLASS=""
-  ls -lh "${package}" "${checksum}" "${manifest}"
+  ls -lh "${package}" "${checksum}" "${manifest}" || true
+  return 0
 }

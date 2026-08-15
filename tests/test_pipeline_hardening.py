@@ -197,6 +197,38 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils", validation)
         self.assertIn('ldd_output="$(ldd "${RUNNER_TEMP}/lts-i386-canary")"', validation)
 
+    def test_post_compile_artifact_boundaries_are_fail_closed(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("RELEASE_ARCHIVE_FAILURE_CLASS", common)
+        self.assertIn("RELEASE_ARCHIVE_EXTRACT_FAILURE_CLASS", common)
+        self.assertIn("Could not clear stale Chromium release outputs", common)
+        self.assertIn("Could not hash packaged Chromium archive", common)
+        self.assertIn("Could not write Chromium release provenance manifest", common)
+        package = common[common.index("package_chromium_i686()"):]
+        self.assertLess(package.index("CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure"), package.index("local package_sha source_sha"))
+        self.assertLess(package.index("local package_sha source_sha"), package.index("CHROMIUM_PACKAGE_FAILURE_CLASS=deterministic_build", package.index("local release_stats")))
+        self.assertIn('tar -cJf "${package}" -- "${files[@]}"', common)
+        self.assertIn('ls -lh "${package}" "${checksum}" "${manifest}" || true', common)
+        self.assertIn("CHECKPOINT_CREATE_FAILURE_CLASS", resume)
+        self.assertIn("Checkpoint archive creation failed with status", resume)
+        self.assertIn("Produced checkpoint archive failed structural/resource validation", resume)
+        self.assertIn("Could not create/verify checkpoint SHA-256 sidecar", resume)
+        self.assertIn("Could not write checkpoint manifest", resume)
+        create = resume[resume.index("create_out_checkpoint()"):]
+        self.assertLess(create.index("CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure"), create.index("ensure_build_disk_space 10"))
+        self.assertIn('failure_class=${CHECKPOINT_CREATE_FAILURE_CLASS:-infrastructure}', action)
+        self.assertIn("id: checkpoint_artifact_failure", action)
+        self.assertIn("id: final_recovery_artifact", action)
+        self.assertIn("id: recovery_artifact_failure", action)
+        output_expr = action[action.index("outputs:"):action.index("runs:")]
+        self.assertLess(output_expr.index("steps.recovery_artifact_failure.outputs.failure_class"), output_expr.index("steps.package.outputs.failure_class"))
+        self.assertLess(output_expr.index("steps.checkpoint_artifact_failure.outputs.failure_class"), output_expr.index("steps.checkpoint.outputs.failure_class"))
+        self.assertIn('log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after compile" || true', action)
+        self.assertIn("bash tests/test_post_compile_artifact_integrity.sh", validation)
+
     def test_prepare_pipeline_classifies_setup_and_restore_failures(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
@@ -501,7 +533,7 @@ class PipelineHardeningTests(unittest.TestCase):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         self.assertIn("CHROMIUM_PACKAGE_FAILURE_CLASS", common)
-        self.assertIn('CHROMIUM_PACKAGE_FAILURE_CLASS="infrastructure"', common)
+        self.assertIn("CHROMIUM_PACKAGE_FAILURE_CLASS=infrastructure", common)
         self.assertIn('id: package', action)
         self.assertIn("steps.package.outputs.failure_class", action)
         self.assertIn("if-no-files-found: error", action)
