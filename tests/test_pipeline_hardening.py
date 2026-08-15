@@ -220,6 +220,53 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", build)
         self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", preflight)
 
+    def test_validation_heavy_jobs_use_resolved_explicit_lts_runner(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("  resolve_production_runner:\n", validation)
+        resolver_start = validation.index("  resolve_production_runner:\n")
+        validate_start = validation.index("  validate:\n", resolver_start)
+        resolver = validation[resolver_start:validate_start]
+        self.assertIn("ubuntu-22.04|ubuntu-24.04", resolver)
+        self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", resolver)
+        full_start = validation.index("  validate_full_source_preflight:\n")
+        i386_start = validation.index("  validate_i386_runtime:\n")
+        lts_start = validation.index("  validate_lts_compatibility:\n")
+        full_job = validation[full_start:i386_start]
+        i386_job = validation[i386_start:lts_start]
+        for job in (full_job, i386_job):
+            self.assertIn("needs: resolve_production_runner", job)
+            self.assertIn("runs-on: ${{ needs.resolve_production_runner.outputs.label }}", job)
+            self.assertNotIn("runs-on: ${{ vars.CHROMIUM_I686_RUNNER", job)
+        self.assertNotIn("runs-on: ${{ vars.CHROMIUM_I686_RUNNER", validation)
+        self.assertIn("  report_runner_configuration:\n", validation)
+        reporter = validation[validation.index("  report_runner_configuration:\n"):validation.index("  report_lts_drift:\n")]
+        self.assertIn("issues: write", reporter)
+        self.assertIn("github.ref_name == github.event.repository.default_branch", reporter)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", reporter)
+
+    def test_validation_drift_issues_close_after_healthy_recovery(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        source_start = validation.index("  close_upstream_contract_drift:\n")
+        runner_start = validation.index("  report_runner_configuration:\n")
+        source_close = validation[source_start:runner_start]
+        self.assertIn("needs: validate_upstream_contract", source_close)
+        self.assertIn("needs.validate_upstream_contract.result == 'success'", source_close)
+        self.assertIn("continue-on-error: true", source_close)
+        self.assertIn("[i686-port] Chromium source/tool contract drift", source_close)
+        self.assertIn("--close-if-open", source_close)
+        self.assertIn("github.ref_name == github.event.repository.default_branch", source_close)
+
+        lts_start = validation.index("  close_lts_drift:\n")
+        report_start = validation.index("  report_lts_drift:\n")
+        lts_close = validation[lts_start:report_start]
+        self.assertIn("needs: [resolve_production_runner, validate_lts_compatibility]", lts_close)
+        self.assertIn("needs.resolve_production_runner.result == 'success'", lts_close)
+        self.assertIn("needs.validate_lts_compatibility.result == 'success'", lts_close)
+        self.assertIn("continue-on-error: true", lts_close)
+        self.assertIn("[i686-port] Ubuntu LTS compatibility drift", lts_close)
+        self.assertIn("--close-if-open", lts_close)
+        self.assertIn("github.ref_name == github.event.repository.default_branch", lts_close)
+
     def test_runtime_failure_uses_exact_failed_tool_before_scanning(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn("repair_i386_runtime_from_build_log()", common)
