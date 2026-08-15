@@ -20,6 +20,16 @@ mkdir -p "${CHROMIUM_SRC}"
 [ "$(classify_prepare_command_status 143 deterministic_build)" = infrastructure ]
 [ "$(classify_prepare_command_status 2 deterministic_build)" = deterministic_build ]
 [ "$(classify_prepare_command_status 2 infrastructure)" = infrastructure ]
+validate_bounded_reserve_gib 0 TEST_RESERVE >/dev/null
+validate_bounded_reserve_gib 64 TEST_RESERVE >/dev/null
+set +e
+validate_bounded_reserve_gib 65 TEST_RESERVE >/dev/null 2>&1
+reserve_over_status=$?
+validate_bounded_reserve_gib 999999999999999999999999999 TEST_RESERVE >/dev/null 2>&1
+reserve_huge_status=$?
+set -e
+[ "${reserve_over_status}" -ne 0 ]
+[ "${reserve_huge_status}" -ne 0 ]
 
 # Invalid/mutable source-declared tooling is deterministic and must never reach network setup.
 printf '%s\n' "vars = {'gn_version': 'latest', 'depot_tools_revision': 'main'}" > "${CHROMIUM_SRC}/DEPS"

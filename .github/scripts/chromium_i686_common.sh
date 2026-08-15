@@ -46,6 +46,20 @@ bounded_external() {
   timeout -k 30s "${seconds}s" "$@"
 }
 
+# Hard ceiling for extraction/restore reserve knobs. Values are validated as
+# short decimal text before arithmetic so malicious/accidental huge integers
+# cannot overflow Bash's signed integer calculations.
+CHROMIUM_I686_HARD_MAX_RESERVE_GIB=64
+validate_bounded_reserve_gib() {
+  local value="${1:?reserve value is required}"
+  local name="${2:?reserve variable name is required}"
+  if [[ ! "${value}" =~ ^(0|[1-9][0-9]{0,2})$ ]] \
+      || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_RESERVE_GIB}" ]; then
+    echo "::error::${name} must be a non-negative integer no greater than ${CHROMIUM_I686_HARD_MAX_RESERVE_GIB} GiB."
+    return 1
+  fi
+}
+
 bounded_gh() {
   bounded_external "${CHROMIUM_I686_GH_TIMEOUT_SECONDS}" gh "$@"
 }
@@ -1055,10 +1069,10 @@ PY
 ensure_source_archive_extract_space() {
   local stats_file="${1:?source archive stats path is required}"
   local target_parent="${2:?source extraction parent is required}"
-  [[ "${CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
-    echo "::error::CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB must be a non-negative integer."
+  if ! validate_bounded_reserve_gib \
+      "${CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB}" CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB; then
     return 1
-  }
+  fi
   local unpacked_bytes available_bytes reserve_bytes required_bytes required_gib
   if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${stats_file}" 2>/dev/null)"; then
     echo "::error::Source archive stats are missing or malformed: ${stats_file}"
@@ -1749,10 +1763,10 @@ validate_release_archive_with_stats() {
 ensure_release_archive_extract_space() {
   local stats_file="${1:?release archive stats path is required}"
   local target_parent="${2:?release extraction parent is required}"
-  [[ "${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
-    echo "::error::CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB must be a non-negative integer."
+  if ! validate_bounded_reserve_gib \
+      "${CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB}" CHROMIUM_I686_RELEASE_EXTRACT_RESERVE_GIB; then
     return 1
-  }
+  fi
   local unpacked_bytes available_bytes reserve_bytes required_bytes required_gib
   if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${stats_file}" 2>/dev/null)"; then
     echo "::error::Release archive stats are missing or malformed: ${stats_file}"

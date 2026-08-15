@@ -593,11 +593,11 @@ restore_out_checkpoint() {
     echo "::error::Checkpoint archive stats are malformed."
     return 1
   fi
-  [[ "${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
+  if ! validate_bounded_reserve_gib \
+      "${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB}" CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB; then
     CHECKPOINT_RESTORE_FAILURE_CLASS=deterministic_build
-    echo "::error::CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB must be a non-negative integer."
     return 1
-  }
+  fi
   reserve_bytes=$((CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB * 1024 * 1024 * 1024))
   required_bytes=$((unpacked_bytes + reserve_bytes))
   available_bytes="$(df -PB1 "${out_parent}" | awk 'NR == 2 {print $4}')"
