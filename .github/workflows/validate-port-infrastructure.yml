@@ -36,6 +36,11 @@ on:
         required: false
         default: ""
         type: string
+      release_smoke_version:
+        description: "Optional published Chromium version whose immutable i686 release should be launched on a real Ubuntu runner"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "23 6 * * 1"
 
@@ -82,6 +87,12 @@ jobs:
           set -euo pipefail
           bash tests/test_checkpoint_provenance.sh
           bash tests/test_checkpoint_restore_atomic.sh
+
+      - name: Exercise release runtime smoke contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_release_runtime_smoke.sh
 
       - name: Reject floating first-party action tags
         shell: bash
@@ -274,6 +285,71 @@ jobs:
             "${manifest}" >/dev/null
           cat "${proof_dir}/checkpoint-archive-stats.json"
           echo "Production checkpoint recovery drill passed for ${artifact_name} from run ${CHECKPOINT_RUN_ID}."
+
+  validate_real_release_runtime:
+    name: Validate real published i686 runtime
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_smoke_version != '' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted runtime validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download, verify and launch immutable release bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SMOKE_VERSION: ${{ inputs.release_smoke_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_SMOKE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::release_smoke_version must use the form 151.0.7922.75"
+            exit 1
+          }
+          source .github/scripts/chromium_i686_common.sh
+          install_i386_runtime_libraries
+          bounded_sudo_apt_get install -y --no-install-recommends file binutils xz-utils
+
+          tag="chromium-${RELEASE_SMOKE_VERSION}-linux-i686"
+          package_name="chromium-${RELEASE_SMOKE_VERSION}-linux-i686.tar.xz"
+          checksum_name="${package_name}.sha256"
+          release_json="$(bounded_gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json tagName,isDraft,isPrerelease,assets)"
+          test "$(jq -r '.tagName' <<<"${release_json}")" = "${tag}"
+          test "$(jq -r '.isDraft' <<<"${release_json}")" = false
+          test "$(jq -r '.isPrerelease' <<<"${release_json}")" = false
+          test "$(jq -r --arg name "${package_name}" '[.assets[] | select(.name == $name)] | length' <<<"${release_json}")" -eq 1
+          test "$(jq -r --arg name "${checksum_name}" '[.assets[] | select(.name == $name)] | length' <<<"${release_json}")" -eq 1
+
+          proof_dir="${RUNNER_TEMP}/release-runtime-proof"
+          bounded_rm_rf "${proof_dir}" || true
+          mkdir -p "${proof_dir}"
+          bounded_gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" --pattern "${package_name}" --dir "${proof_dir}"
+          bounded_gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" --pattern "${checksum_name}" --dir "${proof_dir}"
+          test "$(awk 'NF {count++} END {print count + 0}' "${proof_dir}/${checksum_name}")" -eq 1
+          listed_sha="$(awk 'NR == 1 {print $1}' "${proof_dir}/${checksum_name}")"
+          [[ "${listed_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+            echo "::error::Published checksum asset does not begin with a SHA-256 digest."
+            exit 1
+          }
+          package_sha="$(sha256sum "${proof_dir}/${package_name}" | awk '{print $1}')"
+          checksum_asset_sha="$(sha256sum "${proof_dir}/${checksum_name}" | awk '{print $1}')"
+          test "${package_sha}" = "${listed_sha,,}"
+          remote_digest="$(jq -er --arg name "${package_name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}")"
+          remote_checksum_digest="$(jq -er --arg name "${checksum_name}" '.assets[] | select(.name == $name) | .digest' <<<"${release_json}")"
+          test "${remote_digest}" = "sha256:${package_sha}"
+          test "${remote_checksum_digest}" = "sha256:${checksum_asset_sha}"
+          python3 scripts/validate_release_archive.py "${proof_dir}/${package_name}"
+
+          runtime_dir="${proof_dir}/runtime"
+          mkdir -p "${runtime_dir}"
+          bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" tar -xJf "${proof_dir}/${package_name}" -C "${runtime_dir}"
+          validate_i686_runtime_bundle "${runtime_dir}"
+          smoke_test_i686_runtime_bundle "${runtime_dir}" "${RELEASE_SMOKE_VERSION}"
+          echo "Real published Chromium ${RELEASE_SMOKE_VERSION} i686 runtime smoke passed."
 
   validate_full_source_preflight:
     name: Full Chromium i686 compatibility proof

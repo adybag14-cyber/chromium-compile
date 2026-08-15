@@ -23,6 +23,7 @@ CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS:-
 CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS:-600}"
 CHROMIUM_I686_GH_TIMEOUT_SECONDS="${CHROMIUM_I686_GH_TIMEOUT_SECONDS:-600}"
 CHROMIUM_I686_LDD_TIMEOUT_SECONDS="${CHROMIUM_I686_LDD_TIMEOUT_SECONDS:-15}"
+CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS="${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS:-60}"
 CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB="${CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB:-40}"
 CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS="${CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS:-2000000}"
 CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB="${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB:-5}"
@@ -1371,6 +1372,103 @@ EOF
   "${canary_bin}"
 }
 
+CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=""
+
+classify_runtime_smoke_status() {
+  case "${1:-1}" in
+    124|137|143) printf '%s\n' infrastructure ;;
+    *) printf '%s\n' deterministic_build ;;
+  esac
+}
+
+smoke_test_i686_runtime_bundle() {
+  local root="${1:?Runtime bundle root is required}"
+  local version="${2:?Chromium version is required}"
+  CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=deterministic_build
+
+  local launcher="${root}/chrome-wrapper"
+  local browser="${root}/chrome"
+  if [ ! -x "${launcher}" ] || [ ! -x "${browser}" ]; then
+    echo "::error::Packaged Chromium launcher/browser is not executable."
+    return 1
+  fi
+
+  local runtime_library_path="${root}"
+  if [ -d "${root}/lib" ]; then
+    runtime_library_path="${runtime_library_path}:${root}/lib"
+  fi
+  if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    runtime_library_path="${runtime_library_path}:${LD_LIBRARY_PATH}"
+  fi
+
+  local ldd_output ldd_status=0
+  ldd_output="$(LD_LIBRARY_PATH="${runtime_library_path}" bounded_ldd "${browser}" 2>&1)" || ldd_status=$?
+  printf '%s\n' "${ldd_output}"
+  if [ "${ldd_status}" -ne 0 ]; then
+    CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS="$(classify_runtime_smoke_status "${ldd_status}")"
+    echo "::error::Packaged Chromium loader probe failed with status ${ldd_status}."
+    return 1
+  fi
+  if grep -q '=> not found' <<<"${ldd_output}"; then
+    echo "::error::Packaged Chromium has unresolved dynamic-library dependencies."
+    return 1
+  fi
+
+  local smoke_root="${WORKSPACE}/release-runtime-smoke-${version}-${GITHUB_RUN_ID:-$$}-${RANDOM}"
+  local smoke_home="${smoke_root}/home"
+  local smoke_profile="${smoke_root}/profile"
+  local smoke_html="${smoke_root}/runtime-smoke.html"
+  bounded_rm_rf "${smoke_root}" || true
+  mkdir -p "${smoke_home}" "${smoke_profile}"
+  printf '%s\n' '<!doctype html><meta charset="utf-8"><main id="probe">chromium-i686-runtime-smoke</main>' > "${smoke_html}"
+
+  local version_output version_status=0
+  version_output="$(bounded_external "${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS}" \
+    env HOME="${smoke_home}" XDG_CONFIG_HOME="${smoke_home}/.config" XDG_CACHE_HOME="${smoke_home}/.cache" \
+      "${launcher}" --version 2>&1)" || version_status=$?
+  printf '%s\n' "${version_output}"
+  if [ "${version_status}" -ne 0 ]; then
+    CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS="$(classify_runtime_smoke_status "${version_status}")"
+    bounded_rm_rf "${smoke_root}" || true
+    echo "::error::Packaged chrome-wrapper --version failed with status ${version_status}."
+    return 1
+  fi
+  if ! grep -Fxq "Chromium ${version}" <<<"${version_output}"; then
+    bounded_rm_rf "${smoke_root}" || true
+    echo "::error::Packaged chrome-wrapper reported an unexpected Chromium version: ${version_output}"
+    return 1
+  fi
+
+  local dom_output dom_status=0
+  dom_output="$(bounded_external "${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS}" \
+    env HOME="${smoke_home}" XDG_CONFIG_HOME="${smoke_home}/.config" XDG_CACHE_HOME="${smoke_home}/.cache" \
+      "${launcher}" \
+        --headless \
+        --no-sandbox \
+        --disable-gpu \
+        --disable-dev-shm-usage \
+        --disable-background-networking \
+        --disable-component-update \
+        --no-first-run \
+        --no-default-browser-check \
+        --user-data-dir="${smoke_profile}" \
+        --dump-dom "file://${smoke_html}" 2>&1)" || dom_status=$?
+  printf '%s\n' "${dom_output}"
+  bounded_rm_rf "${smoke_root}" || true
+  if [ "${dom_status}" -ne 0 ]; then
+    CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS="$(classify_runtime_smoke_status "${dom_status}")"
+    echo "::error::Packaged Chromium headless launch failed with status ${dom_status}."
+    return 1
+  fi
+  if ! grep -Fq 'chromium-i686-runtime-smoke' <<<"${dom_output}"; then
+    echo "::error::Packaged Chromium headless launch returned success without rendering the local smoke document."
+    return 1
+  fi
+
+  CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=""
+  echo "Packaged Chromium runtime smoke passed via chrome-wrapper (version + local headless DOM)."
+}
+
 package_chromium_i686() {
   local version="${1:?version is required}"
   CHROMIUM_PACKAGE_FAILURE_CLASS="deterministic_build"
@@ -1446,9 +1544,13 @@ package_chromium_i686() {
   bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}"     tar -xJf "${package}" -C "${smoke_dir}"
   local smoke_status=0
   validate_i686_runtime_bundle "${smoke_dir}" || smoke_status=$?
+  if [ "${smoke_status}" -eq 0 ]; then
+    smoke_test_i686_runtime_bundle "${smoke_dir}" "${version}" || smoke_status=$?
+  fi
   bounded_rm_rf "${smoke_dir}" || true
   if [ "${smoke_status}" -ne 0 ]; then
-    echo "::error::Packaged runtime bundle failed deterministic i686 validation."
+    CHROMIUM_PACKAGE_FAILURE_CLASS="${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS:-deterministic_build}"
+    echo "::error::Packaged runtime bundle failed deterministic i686/runtime smoke validation."
     return 1
   fi
 

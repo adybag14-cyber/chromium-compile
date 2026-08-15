@@ -299,6 +299,33 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("Authoritative GCS source bytes are structurally unsafe", common)
         self.assertIn("Discarding cached Chromium source bytes that do not match the authoritative GCS object", common)
 
+    def test_packaged_runtime_is_executed_before_artifact_upload(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("smoke_test_i686_runtime_bundle()", common)
+        self.assertIn("CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS", common)
+        self.assertIn('"${launcher}" --version', common)
+        self.assertIn("--headless", common)
+        self.assertIn("--no-sandbox", common)
+        self.assertIn("--disable-background-networking", common)
+        self.assertIn('--dump-dom "file://${smoke_html}"', common)
+        package = common[common.index("package_chromium_i686()"):]
+        self.assertLess(package.index("validate_i686_runtime_bundle"), package.index("smoke_test_i686_runtime_bundle"))
+        self.assertLess(package.index("smoke_test_i686_runtime_bundle"), package.rindex('CHROMIUM_PACKAGE_FAILURE_CLASS=""'))
+        self.assertLess(action.index("Package Chromium i686 Build"), action.index("Upload Build Artifact"))
+        self.assertIn("release_smoke_version", validation)
+        self.assertIn("Validate real published i686 runtime", validation)
+        self.assertIn("install_i386_runtime_libraries", validation)
+        self.assertIn("gh release download", validation)
+        self.assertIn("remote_digest", validation)
+        self.assertIn("remote_checksum_digest", validation)
+        self.assertIn("listed_sha", validation)
+        release_drill = validation[validation.index("validate_real_release_runtime:"):validation.index("validate_full_source_preflight:")]
+        self.assertNotIn("sha256sum -c", release_drill)
+        self.assertIn("smoke_test_i686_runtime_bundle", validation)
+        self.assertIn("bash tests/test_release_runtime_smoke.sh", validation)
+
     def test_build_tracks_upstream_linux_installer_runtime(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         port = (ROOT / ".github" / "scripts" / "chromium_i686_port.sh").read_text(encoding="utf-8")
