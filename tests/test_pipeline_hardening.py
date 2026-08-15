@@ -164,6 +164,16 @@ class PipelineHardeningTests(unittest.TestCase):
 
     def test_runtime_discovery_and_apt_operations_are_bounded(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        self.assertIn("CHROMIUM_I686_HARD_MAX_EXTERNAL_TIMEOUT_SECONDS=3600", common)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_GH_TIMEOUT_SECONDS=1200", common)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_LDD_TIMEOUT_SECONDS=60", common)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_RUNTIME_SMOKE_TIMEOUT_SECONDS=300", common)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_DISCOVERY_TIMEOUT_SECONDS=600", common)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS=1800", common)
+        self.assertIn("validate_timeout_seconds()", common)
+        self.assertIn("bounded_checkpoint_archive()", common)
+        self.assertIn("bounded_discovery()", common)
+        self.assertIn("bash tests/test_timeout_policy_ceiling.sh", (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8"))
         self.assertIn("CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS", common)
         self.assertIn("CHROMIUM_I686_APT_TIMEOUT_SECONDS", common)
         self.assertIn("CHROMIUM_I686_HARD_MAX_APT_UPDATE_TIMEOUT_SECONDS=300", common)
@@ -690,7 +700,10 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("CHECKPOINT_DEPOT_REVISION", resume)
         self.assertIn("CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS", resume)
         self.assertIn("CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS", common)
-        self.assertIn("CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS", resume)
+        self.assertIn("CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS=1800", common)
+        self.assertIn("bounded_checkpoint_archive()", common)
+        self.assertIn("bounded_checkpoint_archive", resume)
+        self.assertNotIn('bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}"', resume)
 
 
     def test_latest_upstream_contract_is_probed_in_ci(self):
