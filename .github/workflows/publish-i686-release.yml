@@ -71,6 +71,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_RUN_ID: ${{ github.event.workflow_run.id || inputs.build_run_id }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VALIDATED_BUILD_SHA: ${{ needs.validate.outputs.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -660,4 +661,5 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --version "${CHROMIUM_VERSION}" \
             --default-branch "${DEFAULT_BRANCH}" \
+            --expected-build-sha "${VALIDATED_BUILD_SHA}" \
             --apply

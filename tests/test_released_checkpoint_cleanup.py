@@ -17,6 +17,7 @@ SPEC.loader.exec_module(cleanup)
 REPO = "owner/repo"
 VERSION = "151.0.7922.108"
 BRANCH = "main"
+BUILD_SHA = "b" * 40
 
 
 def done(payload=None, *, stdout=None, code=0, stderr=""):
@@ -64,11 +65,15 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
     def test_release_must_be_published_and_digest_complete(self):
         for payload in [release_payload(draft=True), release_payload(prerelease=True), release_payload(missing_digest=True)]:
             with self.subTest(payload=payload), mock.patch.object(cleanup, "run_gh", return_value=done(payload)), self.assertRaises(cleanup.CleanupError):
-                cleanup.verify_healthy_release(REPO, VERSION)
+                cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA)
 
     def test_healthy_release_resolves_tag_commit(self):
         with mock.patch.object(cleanup, "run_gh", side_effect=[done(release_payload()), done(stdout="b" * 40 + "\n")]):
-            self.assertEqual(cleanup.verify_healthy_release(REPO, VERSION), "b" * 40)
+            self.assertEqual(cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA), BUILD_SHA)
+
+    def test_release_tag_must_match_validated_build_sha(self):
+        with mock.patch.object(cleanup, "run_gh", side_effect=[done(release_payload()), done(stdout="c" * 40 + "\n")]), self.assertRaises(cleanup.CleanupError):
+            cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA)
 
     def test_artifact_pagination_is_bounded(self):
         with mock.patch.object(cleanup, "run_gh", return_value=done({"total_count": cleanup.MAX_ARTIFACTS + 1, "artifacts": []})), self.assertRaises(cleanup.CleanupError):
@@ -104,7 +109,7 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
         with mock.patch.object(cleanup, "verify_healthy_release", return_value="b" * 40), \
              mock.patch.object(cleanup, "find_version_checkpoints", return_value=[item]), \
              mock.patch.object(cleanup, "delete_checkpoint") as delete:
-            results, total = cleanup.cleanup_released_version(REPO, VERSION, BRANCH, dry_run=True)
+            results, total = cleanup.cleanup_released_version(REPO, VERSION, BRANCH, BUILD_SHA, dry_run=True)
         delete.assert_not_called()
         self.assertEqual(total, 111)
         self.assertEqual(results, ["dry-run:101:run=201:stage=2:bytes=111"])

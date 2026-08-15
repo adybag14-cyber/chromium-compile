@@ -60,16 +60,18 @@ def parse_object(result: subprocess.CompletedProcess[str], context: str) -> dict
     return value
 
 
-def validate_inputs(repository: str, version: str, default_branch: str) -> None:
+def validate_inputs(repository: str, version: str, default_branch: str, expected_build_sha: str) -> None:
     if not REPOSITORY_RE.fullmatch(repository):
         raise CleanupError(f"invalid repository: {repository!r}")
     if not VERSION_RE.fullmatch(version):
         raise CleanupError(f"invalid Chromium version: {version!r}")
     if not BRANCH_RE.fullmatch(default_branch) or ".." in default_branch:
         raise CleanupError(f"invalid default branch: {default_branch!r}")
+    if not SHA1_RE.fullmatch(expected_build_sha):
+        raise CleanupError(f"invalid expected build SHA: {expected_build_sha!r}")
 
 
-def verify_healthy_release(repository: str, version: str) -> str:
+def verify_healthy_release(repository: str, version: str, expected_build_sha: str) -> str:
     tag = f"chromium-{version}-linux-i686"
     payload = parse_object(
         run_gh(["release", "view", tag, "--repo", repository, "--json", "isDraft,isPrerelease,assets"]),
@@ -102,6 +104,10 @@ def verify_healthy_release(repository: str, version: str) -> str:
     commit = run_gh(["api", f"repos/{repository}/commits/{tag}", "--jq", ".sha"]).stdout.strip()
     if not SHA1_RE.fullmatch(commit):
         raise CleanupError(f"release tag {tag} did not resolve to a 40-hex commit")
+    if commit.lower() != expected_build_sha.lower():
+        raise CleanupError(
+            f"release tag {tag} resolves to {commit}, not validated build {expected_build_sha}; cleanup is forbidden"
+        )
     return commit.lower()
 
 
@@ -212,9 +218,11 @@ def delete_checkpoint(repository: str, artifact: CheckpointArtifact) -> str:
     return f"deleted:{artifact.artifact_id}"
 
 
-def cleanup_released_version(repository: str, version: str, default_branch: str, *, dry_run: bool) -> tuple[list[str], int]:
-    validate_inputs(repository, version, default_branch)
-    verify_healthy_release(repository, version)
+def cleanup_released_version(
+    repository: str, version: str, default_branch: str, expected_build_sha: str, *, dry_run: bool
+) -> tuple[list[str], int]:
+    validate_inputs(repository, version, default_branch, expected_build_sha)
+    verify_healthy_release(repository, version, expected_build_sha)
     candidates = find_version_checkpoints(repository, version, default_branch)
     total_bytes = sum(item.size_bytes for item in candidates)
     results: list[str] = []
@@ -231,6 +239,7 @@ def main() -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--default-branch", required=True)
+    parser.add_argument("--expected-build-sha", required=True)
     parser.add_argument("--apply", action="store_true", help="Actually delete; default is dry-run")
     args = parser.parse_args()
     try:
@@ -238,6 +247,7 @@ def main() -> int:
             args.repository,
             args.version,
             args.default_branch,
+            args.expected_build_sha,
             dry_run=not args.apply,
         )
     except CleanupError as exc:
