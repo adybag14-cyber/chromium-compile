@@ -704,6 +704,19 @@ class PipelineHardeningTests(unittest.TestCase):
             publish.index('test "${workflow_path}" = ".github/workflows/chromium-i686.yml"'),
         )
 
+    def test_publisher_checkpoint_cleanup_is_post_release_nonblocking_and_least_privilege(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        cleanup = publish[publish.index("  cleanup_published_checkpoints:"):]
+        self.assertIn("needs: [validate, smoke, publish]", cleanup)
+        self.assertIn("needs.publish.result == 'success'", cleanup)
+        self.assertIn("continue-on-error: true", cleanup)
+        self.assertIn("actions: write", cleanup)
+        self.assertIn("contents: read", cleanup)
+        self.assertNotIn("contents: write", cleanup)
+        self.assertIn("scripts/github_released_checkpoint_cleanup.py", cleanup)
+        self.assertIn("--apply", cleanup)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", cleanup)
+
     def test_publisher_is_transactional_and_runtime_smokes_target_i386(self):
         publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
         validate_job = publish[publish.index("  validate:"):publish.index("  smoke:")]
