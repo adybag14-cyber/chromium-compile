@@ -284,6 +284,25 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("resolve_i386_package_for_soname libQt5Network.so.5", workflow)
         self.assertIn("libqt5network5:i386", workflow)
 
+    def test_external_numeric_inputs_are_bounded_before_shell_arithmetic(self):
+        workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn('[[ "${stage}" =~ ^[1-9][0-9]?$ ]]', workflow)
+        self.assertIn('[[ "${retry_count}" =~ ^(0|[1-9][0-9]?)$ ]]', workflow)
+        self.assertNotIn('[[ "${stage}" =~ ^[0-9]+$ ]]', workflow)
+        self.assertNotIn('[[ "${retry_count}" =~ ^[0-9]+$ ]]', workflow)
+        self.assertIn('[[ "${run_id}" =~ ^[1-9][0-9]{0,19}$ ]]', resume)
+        self.assertIn('[[ "${current_stage}" =~ ^[1-9][0-9]?$ ]]', resume)
+        self.assertIn('Checkpoint consumer stage exceeds hard maximum 50', resume)
+        self.assertIn('Checkpoint producer stage exceeds hard maximum 50', resume)
+        self.assertIn('Chromium checkpoint stage exceeds hard maximum 50', resume)
+        self.assertIn('[[ "${REQUESTED_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]', publish)
+        self.assertIn('[[ "${CHECKPOINT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]', validation)
+        self.assertIn('[ "${CHECKPOINT_CONSUMER_STAGE}" -le 50 ]', validation)
+        self.assertIn('[ "${CHECKPOINT_ARTIFACT_STAGE}" -le 50 ]', validation)
+
     def test_checkpoint_cutoff_preserves_hard_job_reserve_and_validates_arithmetic(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")

@@ -214,23 +214,31 @@ validate_checkpoint_source_run() {
     return 1
   fi
 
-  [[ "${run_id}" =~ ^[0-9]+$ ]] || {
-    echo "::error::Checkpoint run id is not numeric: ${run_id}"
+  [[ "${run_id}" =~ ^[1-9][0-9]{0,19}$ ]] || {
+    echo "::error::Checkpoint run id must be a positive decimal with at most 20 digits: ${run_id}"
     return 1
   }
   [[ "${expected_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo "::error::Checkpoint Chromium version is invalid: ${expected_version}"
     return 1
   }
-  [[ "${current_stage}" =~ ^[1-9][0-9]*$ ]] || {
-    echo "::error::Checkpoint consumer stage is invalid: ${current_stage}"
+  [[ "${current_stage}" =~ ^[1-9][0-9]?$ ]] || {
+    echo "::error::Checkpoint consumer stage must be an integer from 1 through 50: ${current_stage}"
     return 1
   }
-  if [[ ! "${artifact_name}" =~ ^chromium-i686-out-stage-([1-9][0-9]*)$ ]]; then
+  if [ "${current_stage}" -gt 50 ]; then
+    echo "::error::Checkpoint consumer stage exceeds hard maximum 50: ${current_stage}"
+    return 1
+  fi
+  if [[ ! "${artifact_name}" =~ ^chromium-i686-out-stage-([1-9][0-9]?)$ ]]; then
     echo "::error::Checkpoint artifact name is outside the stage contract: ${artifact_name}"
     return 1
   fi
   local producer_stage="${BASH_REMATCH[1]}"
+  if [ "${producer_stage}" -gt 50 ]; then
+    echo "::error::Checkpoint producer stage exceeds hard maximum 50: ${producer_stage}"
+    return 1
+  fi
   if [ "${producer_stage}" -ne "${current_stage}" ] \
       && [ "${producer_stage}" -ne "$((current_stage - 1))" ]; then
     echo "::error::Checkpoint artifact stage ${producer_stage} is incompatible with consumer stage ${current_stage}."
@@ -282,7 +290,7 @@ validate_checkpoint_source_run() {
     echo "::error::Checkpoint run ${run_id} is from branch ${head_branch}, not ${expected_ref}."
     return 1
   }
-  if [[ ! "${title}" =~ ^Chromium\ i686\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\ -\ stage\ ([1-9][0-9]*)\ -\ attempt\ ([0-9]+)$ ]]; then
+  if [[ ! "${title}" =~ ^Chromium\ i686\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\ -\ stage\ ([1-9][0-9]?)\ -\ attempt\ ([0-9]+)$ ]]; then
     echo "::error::Checkpoint run title is outside the exact staged-build contract: ${title}"
     return 1
   fi
@@ -737,10 +745,14 @@ create_out_checkpoint() {
     echo "::error::Invalid Chromium checkpoint version: ${version}"
     return 1
   }
-  [[ "${stage}" =~ ^[1-9][0-9]*$ ]] || {
-    echo "::error::Invalid Chromium checkpoint stage: ${stage}"
+  [[ "${stage}" =~ ^[1-9][0-9]?$ ]] || {
+    echo "::error::Chromium checkpoint stage must be an integer from 1 through 50: ${stage}"
     return 1
   }
+  if [ "${stage}" -gt 50 ]; then
+    echo "::error::Chromium checkpoint stage exceeds hard maximum 50: ${stage}"
+    return 1
+  fi
 
   if [ ! -d "${OUT_DIR}" ]; then
     echo "::error::Expected build output directory not found: ${OUT_DIR}"

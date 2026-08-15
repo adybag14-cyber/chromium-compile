@@ -263,10 +263,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${CHECKPOINT_RUN_ID}" =~ ^[0-9]+$ ]]
+          [[ "${CHECKPOINT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${CHECKPOINT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "${CHECKPOINT_CONSUMER_STAGE}" =~ ^[1-9][0-9]*$ ]]
-          [[ "${CHECKPOINT_ARTIFACT_STAGE}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CHECKPOINT_CONSUMER_STAGE}" =~ ^[1-9][0-9]?$ ]]
+          [ "${CHECKPOINT_CONSUMER_STAGE}" -le 50 ]
+          [[ "${CHECKPOINT_ARTIFACT_STAGE}" =~ ^[1-9][0-9]?$ ]]
+          [ "${CHECKPOINT_ARTIFACT_STAGE}" -le 50 ]
           command -v gh >/dev/null
           command -v jq >/dev/null
           command -v zstd >/dev/null
