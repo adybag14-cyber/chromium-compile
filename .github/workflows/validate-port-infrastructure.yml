@@ -59,6 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/test_checkpoint_provenance.sh
+          bash tests/test_checkpoint_restore_atomic.sh
 
       - name: Reject floating first-party action tags
         shell: bash

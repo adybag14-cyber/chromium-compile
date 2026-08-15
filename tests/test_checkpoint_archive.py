@@ -118,6 +118,30 @@ class CheckpointArchiveTests(unittest.TestCase):
                 regular("Release_x86/args.gn"),
             ], rc=1)
 
+
+    def test_rejects_declared_unpacked_size_over_limit(self):
+        fake = FakeProcess(tar_bytes([
+            regular("Release_x86/build.ninja", b"abc"),
+            regular("Release_x86/args.gn", b"def"),
+        ]))
+        with mock.patch.dict(validator.os.environ, {"CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_BYTES": "5"}), \
+             mock.patch.object(validator.subprocess, "Popen", return_value=fake):
+            with self.assertRaises(ValueError):
+                validator.validate_checkpoint(pathlib.Path("checkpoint.tar.zst"))
+
+    def test_rejects_member_count_over_limit(self):
+        members = [
+            regular("Release_x86/build.ninja"),
+            regular("Release_x86/args.gn"),
+            regular("Release_x86/extra"),
+        ]
+        fake = FakeProcess(tar_bytes(members))
+        with mock.patch.dict(validator.os.environ, {"CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS": "2"}), \
+             mock.patch.object(validator.subprocess, "Popen", return_value=fake):
+            with self.assertRaises(ValueError):
+                validator.validate_checkpoint(pathlib.Path("checkpoint.tar.zst"))
+
+
     def test_validator_invokes_zstd_without_shell(self):
         fake = FakeProcess(tar_bytes([
             regular("Release_x86/build.ninja"),

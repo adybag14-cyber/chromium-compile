@@ -103,6 +103,9 @@ verify_i386_runtime_dependencies() {
 
 
 CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
+CHECKPOINT_PROVENANCE_STATUS=""
+CHECKPOINT_PRODUCER_SHA=""
+CHECKPOINT_PRODUCER_STAGE=""
 
 validate_checkpoint_source_run() {
   local run_id="${1:?checkpoint run id is required}"
@@ -112,6 +115,9 @@ validate_checkpoint_source_run() {
   local expected_repo="${GITHUB_REPOSITORY:-}"
   local expected_ref="${GITHUB_REF_NAME:-}"
   CHECKPOINT_PROVENANCE_FAILURE_CLASS=deterministic_build
+  CHECKPOINT_PROVENANCE_STATUS=invalid
+  CHECKPOINT_PRODUCER_SHA=""
+  CHECKPOINT_PRODUCER_STAGE=""
   if [ -z "${expected_repo}" ] || [ -z "${expected_ref}" ]; then
     CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
     echo "::error::GitHub repository/ref metadata is unavailable for checkpoint provenance validation."
@@ -147,15 +153,21 @@ validate_checkpoint_source_run() {
     echo "::error::Could not establish checkpoint run provenance for Actions run ${run_id}."
     return 1
   fi
-  local workflow_path head_repo head_branch title
+  local workflow_path head_repo head_branch head_sha title
   if ! workflow_path="$(jq -er '.path | strings' <<<"${run_json}")" \
       || ! head_repo="$(jq -er '.head_repository.full_name | strings' <<<"${run_json}")" \
       || ! head_branch="$(jq -er '.head_branch | strings' <<<"${run_json}")" \
+      || ! head_sha="$(jq -er '.head_sha | strings' <<<"${run_json}")" \
       || ! title="$(jq -er '.display_title | strings' <<<"${run_json}")"; then
     CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
     echo "::error::Checkpoint run ${run_id} returned incomplete or malformed provenance metadata."
     return 1
   fi
+  [[ "${head_sha}" =~ ^[0-9a-fA-F]{40}$ ]] || {
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=infrastructure
+    echo "::error::Checkpoint run ${run_id} returned an invalid head SHA: ${head_sha}"
+    return 1
+  }
 
   test "${workflow_path}" = ".github/workflows/chromium-i686.yml" || {
     echo "::error::Checkpoint run ${run_id} belongs to ${workflow_path}, not the Chromium i686 build workflow."
@@ -169,14 +181,16 @@ validate_checkpoint_source_run() {
     echo "::error::Checkpoint run ${run_id} is from branch ${head_branch}, not ${expected_ref}."
     return 1
   }
-  [[ "${title}" == "Chromium i686 ${expected_version}"* ]] || {
+  if [[ ! "${title}" =~ ^Chromium\ i686\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\ -\ stage\ ([1-9][0-9]*)\ -\ attempt\ ([0-9]+)$ ]]; then
+    echo "::error::Checkpoint run title is outside the exact staged-build contract: ${title}"
+    return 1
+  fi
+  test "${BASH_REMATCH[1]}" = "${expected_version}" || {
     echo "::error::Checkpoint run title does not match Chromium ${expected_version}: ${title}"
     return 1
   }
-  local title_stage
-  title_stage="$(sed -nE 's/.*stage ([0-9]+).*/\1/p' <<<"${title}")"
-  test "${title_stage}" = "${producer_stage}" || {
-    echo "::error::Checkpoint run title stage ${title_stage:-unknown} does not match artifact stage ${producer_stage}."
+  test "${BASH_REMATCH[2]}" = "${producer_stage}" || {
+    echo "::error::Checkpoint run title stage ${BASH_REMATCH[2]} does not match artifact stage ${producer_stage}."
     return 1
   }
 
@@ -202,22 +216,36 @@ validate_checkpoint_source_run() {
   fi
   count="$(jq -r --arg name "${artifact_name}" '[.artifacts[]? | select(.name == $name)] | length' <<<"${artifacts_json}")"
   expired="$(jq -r --arg name "${artifact_name}" '[.artifacts[]? | select(.name == $name and .expired == true)] | length' <<<"${artifacts_json}")"
-  test "${count}" -eq 1 || {
+  if [ "${count}" -eq 0 ]; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
+    CHECKPOINT_PROVENANCE_STATUS=unavailable
+    echo "::warning::Checkpoint artifact ${artifact_name} is no longer present on run ${run_id}; falling back without treating retention as a build defect."
+    return 2
+  fi
+  if [ "${count}" -ne 1 ]; then
     echo "::error::Expected exactly one checkpoint artifact ${artifact_name} on run ${run_id}; found ${count}."
     return 1
-  }
-  test "${expired}" -eq 0 || {
-    echo "::error::Checkpoint artifact ${artifact_name} on run ${run_id} is expired."
-    return 1
-  }
+  fi
+  if [ "${expired}" -ne 0 ]; then
+    CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
+    CHECKPOINT_PROVENANCE_STATUS=unavailable
+    echo "::warning::Checkpoint artifact ${artifact_name} on run ${run_id} has expired; falling back without treating retention as a build defect."
+    return 2
+  fi
   CHECKPOINT_PROVENANCE_FAILURE_CLASS=""
-  echo "Verified checkpoint provenance: run ${run_id}, branch ${head_branch}, stage ${producer_stage}, artifact ${artifact_name}."
+  CHECKPOINT_PROVENANCE_STATUS=usable
+  CHECKPOINT_PRODUCER_SHA="${head_sha,,}"
+  CHECKPOINT_PRODUCER_STAGE="${producer_stage}"
+  echo "Verified checkpoint provenance: run ${run_id}, branch ${head_branch}, head ${CHECKPOINT_PRODUCER_SHA}, stage ${producer_stage}, artifact ${artifact_name}."
 }
 
 checkpoint_bundle_is_usable() {
   local archive="${1:?checkpoint archive is required}"
   local expected_version="${2:?expected version is required}"
   local current_stage="${3:?current stage is required}"
+  local expected_producer_sha="${4:-}"
+  local expected_producer_stage="${5:-}"
+  local expected_producer_run_id="${6:-}"
   local bundle_dir
   bundle_dir="$(dirname "${archive}")"
   local checksum="${bundle_dir}/$(basename "${CHECKPOINT_SHA256}")"
@@ -233,9 +261,21 @@ checkpoint_bundle_is_usable() {
     return 1
   fi
 
+  # Structural safety is mandatory even for explicitly allowed legacy bundles.
+  # A legacy migration opt-in relaxes metadata requirements only; it never permits
+  # unsafe archive paths, links, special files, duplicates, or missing Ninja graph files.
+  local archive_stats="${bundle_dir}/checkpoint-archive-stats.json"
+  rm -f "${archive_stats}"
+  if ! bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+      python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" \
+        "${archive}" --stats-file "${archive_stats}"; then
+    echo "::error::Checkpoint archive member/link/resource safety validation failed: ${archive}"
+    return 1
+  fi
+
   if [ ! -s "${manifest}" ] || [ ! -s "${checksum}" ]; then
     if [ "${ALLOW_LEGACY_CHECKPOINT_VERSION:-}" = "${expected_version}" ]; then
-      echo "::warning::Legacy checkpoint accepted only because ALLOW_LEGACY_CHECKPOINT_VERSION explicitly permits Chromium ${expected_version}; the next checkpoint will regenerate integrity metadata."
+      echo "::warning::Legacy checkpoint accepted only because ALLOW_LEGACY_CHECKPOINT_VERSION explicitly permits Chromium ${expected_version}; structural safety passed and the next checkpoint will regenerate integrity metadata."
       return 0
     fi
     echo "::error::Legacy checkpoint lacks integrity metadata and no version-scoped migration opt-in is active."
@@ -250,14 +290,11 @@ checkpoint_bundle_is_usable() {
     return 1
   fi
 
-  if ! bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
-      python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" "${archive}"; then
-    echo "::error::Checkpoint archive member/link safety validation failed: ${archive}"
-    return 1
-  fi
-
   if ! EXPECTED_VERSION="${expected_version}" CURRENT_STAGE="${current_stage}" \
   EXPECTED_CHECKPOINT_CONTRACT="${CHECKPOINT_CONTRACT_VERSION}" \
+  EXPECTED_PRODUCER_SHA="${expected_producer_sha}" \
+  EXPECTED_PRODUCER_STAGE="${expected_producer_stage}" \
+  EXPECTED_PRODUCER_RUN_ID="${expected_producer_run_id}" \
   CHECKPOINT_MANIFEST_PATH="${manifest}" python3 - <<'PY'
 import json
 import os
@@ -278,11 +315,29 @@ stage = int(manifest.get("checkpoint_stage", -1))
 current = int(os.environ["CURRENT_STAGE"])
 if stage not in {current, max(1, current - 1)}:
     raise SystemExit(f"Checkpoint stage {stage} is incompatible with current stage {current}")
+expected_stage = os.environ.get("EXPECTED_PRODUCER_STAGE", "")
+if expected_stage and stage != int(expected_stage):
+    raise SystemExit(
+        f"Checkpoint manifest stage {stage} does not match trusted producer stage {expected_stage}"
+    )
 if manifest.get("target_os") != "linux" or manifest.get("target_cpu") != "x86":
     raise SystemExit("Checkpoint target tuple is not linux/x86")
+expected_sha = os.environ.get("EXPECTED_PRODUCER_SHA", "").lower()
+if expected_sha:
+    manifest_sha = str(manifest.get("workflow_sha", "")).lower()
+    if manifest_sha != expected_sha:
+        raise SystemExit(
+            f"Checkpoint workflow SHA {manifest_sha or 'missing'} does not match trusted producer {expected_sha}"
+        )
+expected_run_id = os.environ.get("EXPECTED_PRODUCER_RUN_ID", "")
+manifest_run_id = str(manifest.get("producer_run_id", ""))
+if expected_run_id and manifest_run_id and manifest_run_id != expected_run_id:
+    raise SystemExit(
+        f"Checkpoint producer run {manifest_run_id} does not match trusted run {expected_run_id}"
+    )
 PY
   then
-    echo "::error::Checkpoint manifest compatibility validation failed."
+    echo "::error::Checkpoint manifest compatibility/provenance validation failed."
     return 1
   fi
 
@@ -334,7 +389,8 @@ restore_out_checkpoint() {
   local expected_version="${2:-}"
   local current_stage="${3:-1}"
   local already_validated="${4:-false}"
-  mkdir -p "${CHROMIUM_SRC}/out"
+  local out_parent="${CHROMIUM_SRC}/out"
+  mkdir -p "${out_parent}"
 
   if [ -z "${archive}" ] || [ ! -s "${archive}" ]; then
     echo "No previous output checkpoint found; continuing with ccache and a fresh out directory."
@@ -345,24 +401,85 @@ restore_out_checkpoint() {
   if [ "${already_validated}" != "true" ]; then
     checkpoint_bundle_is_usable "${archive}" "${expected_version}" "${current_stage}"
   fi
-  echo "Restoring previous Ninja output checkpoint from ${archive}"
-  bounded_rm_rf "${OUT_DIR}"
-  bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
-    tar -I 'zstd -T0 -d' -xf "${archive}" -C "${CHROMIUM_SRC}/out"
-  du -sh "${OUT_DIR}" || true
+
+  # Refuse extraction if the validated archive would consume nearly all remaining
+  # disk. The stats file was produced by the same streaming validator before this call.
+  local bundle_dir archive_stats unpacked_bytes available_bytes reserve_bytes required_bytes required_gib
+  bundle_dir="$(dirname "${archive}")"
+  archive_stats="${bundle_dir}/checkpoint-archive-stats.json"
+  if [ ! -s "${archive_stats}" ]; then
+    echo "::error::Checkpoint archive stats are missing; refusing extraction without a validated size bound."
+    return 1
+  fi
+  if ! unpacked_bytes="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("unpacked_bytes"); assert isinstance(v,int) and v >= 0; print(v)' "${archive_stats}" 2>/dev/null)"; then
+    echo "::error::Checkpoint archive stats are malformed."
+    return 1
+  fi
+  [[ "${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB}" =~ ^[0-9]+$ ]] || {
+    echo "::error::CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB must be a non-negative integer."
+    return 1
+  }
+  reserve_bytes=$((CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB * 1024 * 1024 * 1024))
+  required_bytes=$((unpacked_bytes + reserve_bytes))
+  available_bytes="$(df -PB1 "${out_parent}" | awk 'NR == 2 {print $4}')"
+  [[ "${available_bytes}" =~ ^[0-9]+$ ]] || {
+    echo "::error::Could not determine free disk bytes for checkpoint restore."
+    return 1
+  }
+  if [ "${available_bytes}" -lt "${required_bytes}" ]; then
+    required_gib=$(( (required_bytes + 1024 * 1024 * 1024 - 1) / (1024 * 1024 * 1024) ))
+    echo "::warning::Checkpoint restore needs about ${required_gib} GiB free including reserve; attempting expendable-cache cleanup."
+    ensure_build_disk_space "${required_gib}" || true
+    available_bytes="$(df -PB1 "${out_parent}" | awk 'NR == 2 {print $4}')"
+    [[ "${available_bytes}" =~ ^[0-9]+$ ]] || {
+      echo "::error::Could not determine free disk bytes after checkpoint cleanup."
+      return 1
+    }
+    if [ "${available_bytes}" -lt "${required_bytes}" ]; then
+      echo "::error::Insufficient disk space for bounded checkpoint restore: need ${required_bytes} bytes including reserve, have ${available_bytes}."
+      return 1
+    fi
+  fi
+
+  # Extract into an isolated sibling first. Nothing in the current output tree is
+  # removed until the archive has fully extracted and its graph hashes are checked.
+  local nonce restore_root staged_out backup_out
+  nonce="${GITHUB_RUN_ID:-$$}-${RANDOM}"
+  restore_root="${out_parent}/.checkpoint-restore-${nonce}"
+  staged_out="${restore_root}/Release_x86"
+  backup_out="${out_parent}/.Release_x86-before-restore-${nonce}"
+  bounded_rm_rf "${restore_root}" || true
+  bounded_rm_rf "${backup_out}" || true
+  mkdir -p "${restore_root}"
+
+  echo "Staging previous Ninja output checkpoint from ${archive}"
+  if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" \
+      tar -I 'zstd -T0 -d' -xf "${archive}" -C "${restore_root}"; then
+    echo "::error::Checkpoint extraction failed before the active output tree was touched."
+    bounded_rm_rf "${restore_root}" || true
+    return 1
+  fi
+  if [ ! -s "${staged_out}/build.ninja" ] || [ ! -s "${staged_out}/args.gn" ]; then
+    echo "::error::Staged checkpoint lacks required Ninja graph files."
+    bounded_rm_rf "${restore_root}" || true
+    return 1
+  fi
 
   local bundle_dir manifest
   bundle_dir="$(dirname "${archive}")"
   manifest="${bundle_dir}/$(basename "${CHECKPOINT_MANIFEST}")"
   if [ -s "${manifest}" ]; then
     local args_hash ninja_hash expected_args_hash expected_ninja_hash
-    args_hash="$(sha256sum "${OUT_DIR}/args.gn" | awk '{print $1}')"
-    ninja_hash="$(sha256sum "${OUT_DIR}/build.ninja" | awk '{print $1}')"
+    args_hash="$(sha256sum "${staged_out}/args.gn" | awk '{print $1}')"
+    ninja_hash="$(sha256sum "${staged_out}/build.ninja" | awk '{print $1}')"
     expected_args_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["args_gn_sha256"])' "${manifest}")"
     expected_ninja_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_ninja_sha256"])' "${manifest}")"
-    test "${args_hash}" = "${expected_args_hash}"
-    test "${ninja_hash}" = "${expected_ninja_hash}"
-    echo "Checkpoint manifest matches extracted Ninja metadata."
+    if [ "${args_hash}" != "${expected_args_hash}" ] || [ "${ninja_hash}" != "${expected_ninja_hash}" ]; then
+      echo "::error::Extracted checkpoint Ninja metadata differs from its manifest; active output remains untouched."
+      bounded_rm_rf "${restore_root}" || true
+      return 1
+    fi
+    echo "Checkpoint manifest matches staged Ninja metadata."
 
     local manifest_gn manifest_depot
     manifest_gn="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gn_version", ""))' "${manifest}")"
@@ -375,6 +492,36 @@ restore_out_checkpoint() {
     CHECKPOINT_REQUIRES_GN_REFRESH=true
     echo "::warning::Restored legacy checkpoint has no tool-pin manifest; regenerating the Ninja graph once before reuse."
   fi
+
+  # Promote only after extraction and metadata validation. If replacing an existing
+  # tree, keep a same-filesystem rollback copy until the staged directory is in place.
+  local had_previous=false
+  if [ -e "${OUT_DIR}" ] || [ -L "${OUT_DIR}" ]; then
+    if ! mv "${OUT_DIR}" "${backup_out}"; then
+      echo "::error::Could not move the existing output tree aside for checkpoint promotion."
+      bounded_rm_rf "${restore_root}" || true
+      return 1
+    fi
+    had_previous=true
+  fi
+  if ! mv "${staged_out}" "${OUT_DIR}"; then
+    echo "::error::Could not promote the staged checkpoint output tree."
+    if [ "${had_previous}" = "true" ]; then
+      if ! mv "${backup_out}" "${OUT_DIR}"; then
+        echo "::error::Rollback also failed; preserved previous output remains at ${backup_out}."
+      fi
+    fi
+    bounded_rm_rf "${restore_root}" || true
+    return 1
+  fi
+  bounded_rm_rf "${restore_root}" || true
+  if [ "${had_previous}" = "true" ]; then
+    bounded_rm_rf "${backup_out}" \
+      || echo "::warning::Checkpoint promotion succeeded but old output cleanup did not; disk guard will handle residue."
+  fi
+
+  echo "Checkpoint restored atomically after staged validation."
+  du -sh "${OUT_DIR}" || true
 }
 
 # Override the common implementation after this file is sourced. GNU tar's
@@ -398,7 +545,8 @@ create_out_checkpoint() {
   fi
 
   mkdir -p "${CHECKPOINT_DIR}"
-  rm -f "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}"
+  rm -f "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}" \
+    "${CHECKPOINT_DIR}/checkpoint-archive-stats.json"
 
   echo "Creating nanosecond-preserving Ninja output checkpoint..."
   du -sh "${OUT_DIR}" || true
@@ -415,6 +563,10 @@ create_out_checkpoint() {
     -cf "${CHECKPOINT_ARCHIVE}" \
     Release_x86
 
+  # Validate producer output with the same streaming archive contract used by consumers.
+  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+    python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" \
+      "${CHECKPOINT_ARCHIVE}" --stats-file "${CHECKPOINT_DIR}/checkpoint-archive-stats.json"
   bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${CHECKPOINT_ARCHIVE}"
   (
     cd "${CHECKPOINT_DIR}"
@@ -465,6 +617,8 @@ payload = {
     "depot_tools_revision": os.environ["CHECKPOINT_DEPOT_REVISION"],
     "checkpoint_contract_version": int(os.environ["CHECKPOINT_CONTRACT_VERSION_VALUE"]),
     "workflow_sha": os.environ.get("GITHUB_SHA", "unknown"),
+    "producer_run_id": os.environ.get("GITHUB_RUN_ID", "unknown"),
+    "producer_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "unknown"),
     "runner_os": os.environ.get("RUNNER_OS", "unknown"),
     "runner_image": os.environ.get("ImageOS", "unknown"),
     "runner_image_version": os.environ.get("ImageVersion", "unknown"),

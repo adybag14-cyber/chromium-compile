@@ -125,7 +125,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("CHROMIUM_I686_SWAP_TIMEOUT_SECONDS", common)
         self.assertIn("bounded_sudo_rm_rf /usr/local/lib/android", common)
         self.assertIn('bounded_rm_rf "${CHROMIUM_SRC}"', common)
-        self.assertIn('bounded_rm_rf "${OUT_DIR}"', resume)
+        self.assertIn('bounded_rm_rf "${restore_root}"', resume)
+        self.assertIn('bounded_rm_rf "${backup_out}"', resume)
+        self.assertNotIn('bounded_rm_rf "${OUT_DIR}"', resume)
         self.assertNotIn("sudo rm -rf /usr/local/lib/android", common)
 
     def test_runtime_discovery_and_apt_operations_are_bounded(self):
@@ -232,8 +234,13 @@ class PipelineHardeningTests(unittest.TestCase):
     def test_fallback_checkpoint_is_downloaded_on_demand(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         self.assertNotIn("- name: Try Fallback Checkpoint", action)
+        self.assertNotIn("- name: Try Preferred Checkpoint", action)
+        self.assertIn("Preferred checkpoint provenance accepted; downloading trusted artifact on demand.", action)
         self.assertIn("Preferred checkpoint unavailable or invalid; validating fallback provenance before download.", action)
         self.assertIn("Fallback provenance accepted; downloading checkpoint on demand.", action)
+        self.assertLess(action.index("validate_checkpoint_source_run"), action.index("bounded_gh run download"))
+        self.assertIn("fallback_rc", action)
+        self.assertIn("preferred_rc", action)
         self.assertIn('restore_out_checkpoint "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true', action)
         self.assertIn("Fallback checkpoint download failed; continuing with fresh output/ccache", action)
 
@@ -241,7 +248,8 @@ class PipelineHardeningTests(unittest.TestCase):
         resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
         self.assertIn('if ! bounded_external "${CHROMIUM_I686_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${archive}"', resume)
         self.assertIn('Checkpoint archive SHA-256 verification failed.', resume)
-        self.assertIn('Checkpoint manifest compatibility validation failed.', resume)
+        self.assertIn('Checkpoint manifest compatibility/provenance validation failed.', resume)
+        self.assertIn('Checkpoint archive member/link/resource safety validation failed:', resume)
 
     def test_static_pin_policy_rejects_mutable_refs(self):
         workflow = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
@@ -543,16 +551,22 @@ class PipelineHardeningTests(unittest.TestCase):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
         self.assertIn("validate_checkpoint_source_run()", resume)
+        self.assertIn("CHECKPOINT_PRODUCER_SHA", resume)
+        self.assertIn("producer_run_id", resume)
         self.assertIn("scripts/validate_checkpoint_archive.py", resume)
         self.assertLess(
             resume.index("scripts/validate_checkpoint_archive.py"),
             resume.index("tar -I 'zstd -T0 -d' -xf"),
         )
+        self.assertGreaterEqual(resume.count("scripts/validate_checkpoint_archive.py"), 2)
+        self.assertIn(".checkpoint-restore-", resume)
+        self.assertIn("active output remains untouched", resume)
         self.assertGreaterEqual(action.count("validate_checkpoint_source_run"), 2)
         self.assertIn("preferred-checkpoint-run-id", action)
         self.assertIn("fallback-checkpoint-run-id", action)
         self.assertIn("CHECKPOINT_PROVENANCE_FAILURE_CLASS", action)
         self.assertIn("bash tests/test_checkpoint_provenance.sh", validation)
+        self.assertIn("bash tests/test_checkpoint_restore_atomic.sh", validation)
 
 
 

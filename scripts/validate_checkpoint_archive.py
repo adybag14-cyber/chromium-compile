@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import posixpath
 import subprocess
 import tarfile
@@ -10,6 +12,8 @@ from pathlib import PurePosixPath
 
 ROOT = "Release_x86"
 REQUIRED_REGULAR = {f"{ROOT}/build.ninja", f"{ROOT}/args.gn"}
+DEFAULT_MAX_UNPACKED_GIB = 40
+DEFAULT_MAX_MEMBERS = 2_000_000
 
 
 def _normalise_member(name: str) -> str:
@@ -41,10 +45,28 @@ def _normalise_link(member_name: str, link_name: str, *, symlink: bool) -> str:
     return normal
 
 
-def validate_checkpoint(path: Path) -> None:
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
+def validate_checkpoint(path: Path) -> dict[str, int]:
     seen: set[str] = set()
     regular: set[str] = set()
     links: list[tuple[str, str]] = []
+    if "CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_BYTES" in os.environ:
+        max_unpacked = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_BYTES", DEFAULT_MAX_UNPACKED_GIB * 1024**3)
+    else:
+        max_unpacked = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB", DEFAULT_MAX_UNPACKED_GIB) * 1024**3
+    max_members = _positive_int_env("CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS", DEFAULT_MAX_MEMBERS)
+    unpacked_bytes = 0
+    member_count = 0
     proc = subprocess.Popen(
         ["zstd", "-q", "-d", "-c", str(path)],
         stdout=subprocess.PIPE,
@@ -54,6 +76,19 @@ def validate_checkpoint(path: Path) -> None:
     try:
         with tarfile.open(fileobj=proc.stdout, mode="r|") as archive:
             for member in archive:
+                member_count += 1
+                if member_count > max_members:
+                    raise ValueError(
+                        f"Checkpoint archive exceeds configured member limit {max_members}"
+                    )
+                if member.size < 0:
+                    raise ValueError(f"Checkpoint member has negative size: {member.name!r}")
+                unpacked_bytes += member.size
+                if unpacked_bytes > max_unpacked:
+                    raise ValueError(
+                        "Checkpoint archive declares more than the configured "
+                        f"{max_unpacked // 1024**3} GiB unpacked limit"
+                    )
                 name = _normalise_member(member.name)
                 if name in seen:
                     raise ValueError(f"Duplicate checkpoint archive member: {name}")
@@ -91,14 +126,21 @@ def validate_checkpoint(path: Path) -> None:
     for name, target in links:
         if target not in seen:
             raise ValueError(f"Checkpoint link target is absent from archive: {name!r} -> {target!r}")
+    return {"member_count": member_count, "unpacked_bytes": unpacked_bytes}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive", type=Path)
+    parser.add_argument("--stats-file", type=Path)
     args = parser.parse_args()
-    validate_checkpoint(args.archive)
-    print(f"Checkpoint archive safety validated: {args.archive}")
+    stats = validate_checkpoint(args.archive)
+    if args.stats_file:
+        args.stats_file.write_text(json.dumps(stats, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        f"Checkpoint archive safety validated: {args.archive}; "
+        f"members={stats['member_count']}; unpacked_bytes={stats['unpacked_bytes']}"
+    )
     return 0
 
 
