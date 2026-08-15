@@ -148,6 +148,8 @@ jobs:
           expected_gn="$(python3 scripts/chromium_tool_pins.py --deps "${CHROMIUM_SRC}/DEPS" --field gn_version)"
           install_depot_tools
           test "$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" = "${expected_depot}"
+          test -s "${DEPOT_TOOLS}/python3_bin_reldir.txt"
+          "${DEPOT_TOOLS}/python-bin/python3" -c 'import sys; print(sys.version)'
           install_gn_from_cipd
           "${GN_BINARY}" --version
           test "$(chromium_gn_version)" = "${expected_gn}"
