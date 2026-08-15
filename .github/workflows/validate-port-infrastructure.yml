@@ -48,6 +48,32 @@ permissions:
   contents: read
 
 jobs:
+  resolve_production_runner:
+    name: Resolve tested production i686 runner
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.resolve.outputs.label }}
+    steps:
+      - name: Validate configured explicit LTS runner label
+        id: resolve
+        env:
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${REQUESTED_RUNNER}" in
+            ubuntu-22.04|ubuntu-24.04)
+              echo "label=${REQUESTED_RUNNER}" >> "${GITHUB_OUTPUT}"
+              echo "Validated explicit Chromium i686 production runner: ${REQUESTED_RUNNER}"
+              ;;
+            *)
+              echo "::error::Unsupported CHROMIUM_I686_RUNNER '${REQUESTED_RUNNER}'. Allowed explicit production labels: ubuntu-22.04, ubuntu-24.04. ubuntu-latest is matrix-only."
+              exit 1
+              ;;
+          esac
+
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -395,8 +421,9 @@ jobs:
 
   validate_full_source_preflight:
     name: Full Chromium i686 compatibility proof
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_version != '' }}
-    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+    needs: resolve_production_runner
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_version != '' && needs.resolve_production_runner.result == 'success' }}
+    runs-on: ${{ needs.resolve_production_runner.outputs.label }}
     timeout-minutes: 120
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -439,7 +466,9 @@ jobs:
 
   validate_i386_runtime:
     name: Validate i386 host runtime
-    runs-on: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+    needs: resolve_production_runner
+    if: ${{ needs.resolve_production_runner.result == 'success' }}
+    runs-on: ${{ needs.resolve_production_runner.outputs.label }}
     timeout-minutes: 25
     steps:
       - name: Checkout
@@ -585,6 +614,121 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --title "${title}" \
             --body-file "${body_file}"
+
+  close_upstream_contract_drift:
+    name: Close resolved Chromium source-contract drift
+    needs: validate_upstream_contract
+    if: >-
+      ${{
+        always() &&
+        needs.validate_upstream_contract.result == 'success' &&
+        (
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+        )
+      }}
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Close resolved source-contract issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "[i686-port] Chromium source/tool contract drift" \
+            --close-if-open
+
+  report_runner_configuration:
+    name: Report invalid production runner configuration
+    needs: resolve_production_runner
+    if: >-
+      ${{
+        always() &&
+        needs.resolve_production_runner.result == 'failure' &&
+        (
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+        )
+      }}
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Record invalid runner configuration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body_file="${RUNNER_TEMP}/invalid-i686-runner.md"
+          cat > "${body_file}" <<EOF
+          The Chromium i686 validation workflow rejected the configured production runner before scheduling any heavyweight runner-dependent validation.
+
+          - Requested runner: ${REQUESTED_RUNNER}
+          - Allowed explicit production labels: ubuntu-22.04, ubuntu-24.04
+          - `ubuntu-latest` remains matrix-only.
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "[i686-port] Ubuntu LTS compatibility drift" \
+            --body-file "${body_file}"
+
+  close_lts_drift:
+    name: Close resolved Ubuntu LTS compatibility drift
+    needs: [resolve_production_runner, validate_lts_compatibility]
+    if: >-
+      ${{
+        always() &&
+        needs.resolve_production_runner.result == 'success' &&
+        needs.validate_lts_compatibility.result == 'success' &&
+        (
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+        )
+      }}
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Close resolved LTS compatibility issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "[i686-port] Ubuntu LTS compatibility drift" \
+            --close-if-open
 
   report_lts_drift:
     name: Report Ubuntu LTS compatibility drift
