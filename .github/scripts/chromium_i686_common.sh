@@ -883,12 +883,24 @@ chromium_depot_tools_revision() {
 resolve_latest_version() {
   python3 - <<'PY'
 import json
-import sys
 import urllib.request
+from urllib.parse import urlsplit
 
 url = "https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions"
 try:
     with urllib.request.urlopen(url, timeout=60) as response:
+        effective = response.geturl()
+        parsed = urlsplit(effective)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "versionhistory.googleapis.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            raise RuntimeError(
+                f"version-history request escaped trusted host: {effective!r}"
+            )
         data = json.load(response)
 except Exception as exc:
     raise SystemExit(f"Failed to resolve latest Chromium version: {exc}")
