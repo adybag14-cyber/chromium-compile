@@ -33,6 +33,18 @@ exit 2
 EOF
 chmod +x "${bundle}/chrome-wrapper"
 
+
+REPAIR_CALLS=0
+repair_missing_i386_runtime_for_binary() {
+  REPAIR_CALLS=$((REPAIR_CALLS + 1))
+  if [ "${FAKE_REPAIR_STATUS:-0}" -ne 0 ]; then
+    I386_RUNTIME_REPAIR_FAILURE_CLASS="${FAKE_REPAIR_CLASS:-deterministic_build}"
+    return "${FAKE_REPAIR_STATUS}"
+  fi
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  return 0
+}
+
 bounded_ldd() {
   if [ "${FAKE_LDD_MISSING:-0}" = 1 ]; then
     echo 'libmissing.so => not found'
@@ -43,6 +55,18 @@ bounded_ldd() {
 
 smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null
 [ -z "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" ]
+[ "${REPAIR_CALLS}" -eq 1 ]
+
+FAKE_REPAIR_STATUS=1
+FAKE_REPAIR_CLASS=infrastructure
+export FAKE_REPAIR_STATUS FAKE_REPAIR_CLASS
+set +e
+smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null 2>&1
+repair_failure_status=$?
+set -e
+[ "${repair_failure_status}" -ne 0 ]
+[ "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" = infrastructure ]
+unset FAKE_REPAIR_STATUS FAKE_REPAIR_CLASS
 
 FAKE_LDD_MISSING=1
 export FAKE_LDD_MISSING

@@ -6,6 +6,7 @@ set -euo pipefail
 
 CHECKPOINT_REQUIRES_GN_REFRESH=false
 CHECKPOINT_RESTORE_FAILURE_CLASS=""
+CHECKPOINT_CREATE_FAILURE_CLASS=""
 
 normalize_chromium_resume_inputs() {
   CHROMIUM_PREPARE_FAILURE_CLASS=infrastructure
@@ -731,21 +732,43 @@ restore_out_checkpoint() {
 create_out_checkpoint() {
   local version="${1:?Chromium version is required for checkpoint metadata}"
   local stage="${2:?Checkpoint stage is required}"
+  CHECKPOINT_CREATE_FAILURE_CLASS=deterministic_build
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "::error::Invalid Chromium checkpoint version: ${version}"
+    return 1
+  }
+  [[ "${stage}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "::error::Invalid Chromium checkpoint stage: ${stage}"
+    return 1
+  }
 
   if [ ! -d "${OUT_DIR}" ]; then
     echo "::error::Expected build output directory not found: ${OUT_DIR}"
     return 1
   fi
-  test -s "${OUT_DIR}/build.ninja"
-  test -s "${OUT_DIR}/args.gn"
+  if [ ! -s "${OUT_DIR}/build.ninja" ] || [ ! -s "${OUT_DIR}/args.gn" ]; then
+    echo "::error::Checkpoint output lacks required build.ninja/args.gn graph metadata."
+    return 1
+  fi
 
+  # With a valid Ninja graph present, checkpoint materialization/provenance I/O is
+  # recoverable runner state unless the produced archive itself violates its contract.
+  CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
   if ! ensure_build_disk_space 10; then
     return 1
   fi
 
-  mkdir -p "${CHECKPOINT_DIR}"
-  rm -f "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}" \
-    "${CHECKPOINT_DIR}/checkpoint-archive-stats.json"
+  if ! mkdir -p "${CHECKPOINT_DIR}"; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not create checkpoint output directory."
+    return 1
+  fi
+  if ! rm -f "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}" \
+    "${CHECKPOINT_DIR}/checkpoint-archive-stats.json"; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not clear stale checkpoint outputs."
+    return 1
+  fi
 
   echo "Creating nanosecond-preserving Ninja output checkpoint..."
   du -sh "${OUT_DIR}" || true
@@ -754,36 +777,94 @@ create_out_checkpoint() {
     "${OUT_DIR}/.ninja_log" \
     "${OUT_DIR}/.ninja_deps" 2>/dev/null || true
 
+  local archive_status=0
   bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" tar \
     --format=posix \
     --pax-option='delete=atime,delete=ctime' \
     -C "${CHROMIUM_SRC}/out" \
     -I 'zstd -T0 -1' \
     -cf "${CHECKPOINT_ARCHIVE}" \
-    Release_x86
+    Release_x86 || archive_status=$?
+  if [ "${archive_status}" -ne 0 ]; then
+    CHECKPOINT_CREATE_FAILURE_CLASS="$(classify_prepare_command_status "${archive_status}" infrastructure)"
+    echo "::error::Checkpoint archive creation failed with status ${archive_status}."
+    return 1
+  fi
 
   # Validate producer output with the same streaming archive contract used by consumers.
+  local validator_status=0
   bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
     python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" \
-      "${CHECKPOINT_ARCHIVE}" --stats-file "${CHECKPOINT_DIR}/checkpoint-archive-stats.json"
-  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" zstd -q -t "${CHECKPOINT_ARCHIVE}"
-  (
-    cd "${CHECKPOINT_DIR}"
-    sha256sum "$(basename "${CHECKPOINT_ARCHIVE}")" > "$(basename "${CHECKPOINT_SHA256}")"
-    sha256sum -c "$(basename "${CHECKPOINT_SHA256}")"
-  )
+      "${CHECKPOINT_ARCHIVE}" --stats-file "${CHECKPOINT_DIR}/checkpoint-archive-stats.json" \
+    || validator_status=$?
+  if [ "${validator_status}" -ne 0 ]; then
+    CHECKPOINT_CREATE_FAILURE_CLASS="$(classify_prepare_command_status "${validator_status}" deterministic_build)"
+    echo "::error::Produced checkpoint archive failed structural/resource validation with status ${validator_status}."
+    return 1
+  fi
+  if [ ! -s "${CHECKPOINT_DIR}/checkpoint-archive-stats.json" ]; then
+    echo "::error::Checkpoint validator succeeded without emitting archive stats."
+    return 1
+  fi
+
+  local compression_status=0
+  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+    zstd -q -t "${CHECKPOINT_ARCHIVE}" || compression_status=$?
+  if [ "${compression_status}" -ne 0 ]; then
+    CHECKPOINT_CREATE_FAILURE_CLASS="$(classify_prepare_command_status "${compression_status}" infrastructure)"
+    echo "::error::Produced checkpoint compression stream verification failed with status ${compression_status}."
+    return 1
+  fi
+  if ! (
+    cd "${CHECKPOINT_DIR}" \
+      && sha256sum "$(basename "${CHECKPOINT_ARCHIVE}")" > "$(basename "${CHECKPOINT_SHA256}")" \
+      && sha256sum -c "$(basename "${CHECKPOINT_SHA256}")"
+  ); then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not create/verify checkpoint SHA-256 sidecar."
+    return 1
+  fi
 
   local source_checksum_file="${WORKSPACE}/.chromium-source-cache/chromium-${version}.tar.xz.sha256"
-  test -s "${source_checksum_file}"
+  if [ ! -s "${source_checksum_file}" ]; then
+    echo "::error::Prepared Chromium source checksum is missing during checkpoint creation."
+    return 1
+  fi
   local source_sha clang_revision port_hash args_hash ninja_hash gn_version depot_revision
-  source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"
-  clang_revision="$(cat "${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision")"
-  port_hash="$(compute_port_config_sha256 "${version}")"
-  args_hash="$(sha256sum "${OUT_DIR}/args.gn" | awk '{print $1}')"
-  ninja_hash="$(sha256sum "${OUT_DIR}/build.ninja" | awk '{print $1}')"
-  gn_version="$(chromium_gn_version)"
-  depot_revision="$(chromium_depot_tools_revision)"
+  if ! source_sha="$(awk 'NR == 1 {print $1}' "${source_checksum_file}")"; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not read prepared Chromium source checksum for checkpoint metadata."
+    return 1
+  fi
+  [[ "${source_sha}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "::error::Prepared Chromium source checksum is malformed during checkpoint creation."
+    return 1
+  }
+  local clang_revision_file="${CHROMIUM_SRC}/third_party/llvm-build/Release+Asserts/cr_build_revision"
+  if [ ! -s "${clang_revision_file}" ] || ! clang_revision="$(cat "${clang_revision_file}")"; then
+    echo "::error::Chromium Clang revision metadata is missing during checkpoint creation."
+    return 1
+  fi
+  if ! port_hash="$(compute_port_config_sha256 "${version}")"; then
+    echo "::error::Could not compute checkpoint port configuration hash."
+    return 1
+  fi
+  [[ "${port_hash}" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "::error::Checkpoint port configuration hash is malformed."
+    return 1
+  }
+  if ! args_hash="$(sha256sum "${OUT_DIR}/args.gn" | awk '{print $1}')" \
+      || ! ninja_hash="$(sha256sum "${OUT_DIR}/build.ninja" | awk '{print $1}')"; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not hash checkpoint Ninja graph metadata."
+    return 1
+  fi
+  if ! gn_version="$(chromium_gn_version)" || ! depot_revision="$(chromium_depot_tools_revision)"; then
+    echo "::error::Could not resolve immutable tool pins for checkpoint metadata."
+    return 1
+  fi
 
+  local manifest_status=0
   CHECKPOINT_VERSION="${version}" \
   CHECKPOINT_STAGE="${stage}" \
   CHECKPOINT_SOURCE_SHA="${source_sha}" \
@@ -795,7 +876,7 @@ create_out_checkpoint() {
   CHECKPOINT_DEPOT_REVISION="${depot_revision}" \
   CHECKPOINT_CONTRACT_VERSION_VALUE="${CHECKPOINT_CONTRACT_VERSION}" \
   CHECKPOINT_MANIFEST_PATH="${CHECKPOINT_MANIFEST}" \
-  python3 - <<'PY'
+  python3 - <<'PY' || manifest_status=$?
 import json
 import os
 from datetime import datetime, timezone
@@ -827,7 +908,18 @@ Path(os.environ["CHECKPOINT_MANIFEST_PATH"]).write_text(
     json.dumps(payload, indent=2, sort_keys=True) + "\n"
 )
 PY
+  if [ "${manifest_status}" -ne 0 ]; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Could not write checkpoint manifest (status ${manifest_status})."
+    return 1
+  fi
+  if ! python3 -m json.tool "${CHECKPOINT_MANIFEST}" >/dev/null; then
+    CHECKPOINT_CREATE_FAILURE_CLASS=infrastructure
+    echo "::error::Generated checkpoint manifest is unreadable JSON."
+    return 1
+  fi
 
-  python3 -m json.tool "${CHECKPOINT_MANIFEST}" >/dev/null
-  ls -lh "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}"
+  CHECKPOINT_CREATE_FAILURE_CLASS=""
+  ls -lh "${CHECKPOINT_ARCHIVE}" "${CHECKPOINT_SHA256}" "${CHECKPOINT_MANIFEST}" || true
+  return 0
 }
