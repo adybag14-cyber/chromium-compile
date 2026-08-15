@@ -17,6 +17,7 @@ SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 CHECKPOINT_NAME_RE = re.compile(r"^chromium-i686-out-stage-([1-9][0-9]?)$")
 RUN_TITLE_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]?) - attempt ([0-9]+)$")
+ACTIVE_RUN_VERSION_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)")
 MAX_STAGE = 50
 MAX_ARTIFACTS_PER_STAGE = 1000
 PER_PAGE = 100
@@ -72,7 +73,7 @@ def validate_inputs(repository: str, version: str, default_branch: str, expected
         raise CleanupError(f"invalid expected build SHA: {expected_build_sha!r}")
 
 
-def verify_healthy_release(repository: str, version: str, expected_build_sha: str) -> str:
+def verify_healthy_release(repository: str, version: str, expected_build_sha: str) -> None:
     tag = f"chromium-{version}-linux-i686"
     payload = parse_object(
         run_gh(["release", "view", tag, "--repo", repository, "--json", "isDraft,isPrerelease,assets"]),
@@ -109,7 +110,7 @@ def verify_healthy_release(repository: str, version: str, expected_build_sha: st
         raise CleanupError(
             f"release tag {tag} resolves to {commit}, not validated build {expected_build_sha}; cleanup is forbidden"
         )
-    return commit.lower()
+    return None
 
 
 ACTIVE_RUN_STATES = {"queued", "in_progress", "waiting", "pending", "requested"}
@@ -135,7 +136,7 @@ def ensure_no_active_build_for_version(repository: str, version: str, default_br
         if status not in ACTIVE_RUN_STATES:
             continue
         title = str(run.get("display_title", ""))
-        match = RUN_TITLE_RE.fullmatch(title)
+        match = ACTIVE_RUN_VERSION_RE.match(title)
         if match and match.group(1) == version:
             raise CleanupError(
                 f"Chromium {version} still has an active staged build ({status}); deferring checkpoint cleanup"

@@ -69,7 +69,7 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
 
     def test_healthy_release_resolves_tag_commit(self):
         with mock.patch.object(cleanup, "run_gh", side_effect=[done(release_payload()), done(stdout="b" * 40 + "\n")]):
-            self.assertEqual(cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA), BUILD_SHA)
+            self.assertIsNone(cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA))
 
     def test_release_tag_must_match_validated_build_sha(self):
         with mock.patch.object(cleanup, "run_gh", side_effect=[done(release_payload()), done(stdout="c" * 40 + "\n")]), self.assertRaises(cleanup.CleanupError):
@@ -121,7 +121,7 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             "workflow_runs": [
                 {
                     "status": "in_progress",
-                    "display_title": f"Chromium i686 {VERSION} - stage 4 - attempt 0",
+                    "display_title": f"Chromium i686 {VERSION} · stage 4 · attempt 0",
                 }
             ]
         }
