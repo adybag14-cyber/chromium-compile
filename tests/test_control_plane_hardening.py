@@ -56,6 +56,26 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("scripts/github_workflow_dispatch.py", bootstrap)
         self.assertIn("CHROMIUM_VERSION", bootstrap)
         self.assertNotIn("\n          VERSION:", bootstrap)
+        self.assertIn("contents: read", bootstrap)
+        self.assertNotIn("contents: write", bootstrap)
+        self.assertNotIn("--method PUT", bootstrap)
+        self.assertNotIn("contents/support/bootstrap-status.json", bootstrap)
+        self.assertIn("GITHUB_STEP_SUMMARY", bootstrap)
+
+    def test_write_capable_manual_workflows_require_default_branch_code(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        bootstrap = (ROOT / ".github" / "workflows" / "bootstrap-i686-live.yml").read_text(encoding="utf-8")
+        watcher = (ROOT / ".github" / "workflows" / "watch-chromium-stable.yml").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
+
+        self.assertIn("github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch", publish)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", publish)
+        self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", bootstrap)
+        self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", watcher)
+        self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", preflight)
+        for workflow in (bootstrap, watcher, preflight):
+            self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
+        self.assertIn("needs.detect.result == 'failure' && github.ref_name == github.event.repository.default_branch", watcher)
 
     def test_secondary_reporter_covers_publisher_and_uses_central_issue_helper(self):
         reporter = (ROOT / ".github" / "workflows" / "report-i686-build-failure.yml").read_text(encoding="utf-8")
