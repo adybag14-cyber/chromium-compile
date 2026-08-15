@@ -54,6 +54,24 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("[i686-port] Chromium pipeline requires maintenance", reporter)
         self.assertIn("unparseable version", reporter)
 
+    def test_trusted_maintenance_writers_use_central_helper(self):
+        paths = (
+            ".github/workflows/publish-i686-release.yml",
+            ".github/workflows/validate-port-infrastructure.yml",
+            ".github/workflows/report-i686-build-failure.yml",
+            ".github/workflows/watch-chromium-stable.yml",
+            ".github/workflows/chromium-i686-preflight.yml",
+            ".github/workflows/chromium-i686.yml",
+        )
+        for rel in paths:
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn("scripts/github_maintenance_issue.py", text, rel)
+            self.assertNotIn("gh issue create", text, rel)
+            self.assertNotIn("gh issue comment", text, rel)
+            self.assertNotIn("gh issue close", text, rel)
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertGreaterEqual(validation.count("Checkout maintenance helper"), 2)
+
     def test_watcher_state_queries_are_bounded_and_include_publisher(self):
         watcher = (ROOT / "scripts" / "chromium_stable_watcher.py").read_text(encoding="utf-8")
         self.assertIn('"publish-i686-release.yml"', watcher)

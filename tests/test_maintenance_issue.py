@@ -75,6 +75,19 @@ class MaintenanceIssueTests(unittest.TestCase):
         self.assertEqual(run_gh.call_count, 1)
 
 
+    def test_main_reports_issue_error_cleanly(self):
+        argv = ["github_maintenance_issue.py", "--repository", "owner/repo", "--title", "target", "--body-file", "body.md"]
+        with mock.patch.object(issues, "upsert_issue", side_effect=issues.IssueError("boom")), mock.patch.object(sys, "argv", argv), mock.patch("builtins.print") as output:
+            self.assertEqual(issues.main(), 1)
+        self.assertIn("maintenance issue operation failed: boom", output.call_args.args[0])
+
+    def test_close_if_open_closes_existing_issue(self):
+        with mock.patch.object(issues, "find_issue", return_value=7), mock.patch.object(issues, "run_gh") as run_gh:
+            self.assertEqual(issues.close_issue_if_open("owner/repo", "target"), ("closed", 7))
+        command = run_gh.call_args.args[0]
+        self.assertIn("--reason", command)
+        self.assertIn("completed", command)
+
     def test_close_if_open_is_idempotent(self):
         with mock.patch.object(issues, "find_issue", return_value=None), \
              mock.patch.object(issues, "run_gh") as run_gh:

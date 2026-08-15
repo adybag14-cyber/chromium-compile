@@ -489,7 +489,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("display_title<<%s", publish)
         self.assertIn("if: ${{ failure() }}", publish)
         self.assertIn("steps.artifact.outputs.version || 'unknown'", publish)
-        self.assertIn("not converting publication success into a release failure", publish)
+        self.assertIn("scripts/github_maintenance_issue.py", publish)
+        self.assertIn("Release succeeded but maintenance issue cleanup failed", publish)
+        self.assertIn("if ! python3 scripts/github_maintenance_issue.py", publish)
 
 
     def test_source_identity_is_cross_checked_against_authoritative_tag(self):
