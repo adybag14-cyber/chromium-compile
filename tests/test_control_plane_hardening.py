@@ -47,6 +47,8 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("Prune superseded same-stage recovery checkpoint", workflow)
         self.assertIn("prune_completed_checkpoint_history:", workflow)
         cleanup = workflow[workflow.index("  prune_completed_checkpoint_history:"):workflow.index("  report_terminal_failure:")]
+        self.assertIn("name: Prune superseded completed-build checkpoints\n    continue-on-error: true", cleanup)
+        self.assertIn("timeout-minutes: 3", cleanup)
         self.assertIn("continue-on-error: true", cleanup)
         self.assertIn("actions: write", cleanup)
         self.assertIn("needs.build.outputs.complete == 'true'", cleanup)
