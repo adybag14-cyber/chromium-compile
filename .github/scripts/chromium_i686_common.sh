@@ -87,15 +87,38 @@ ensure_swap() {
   swapon --show
 }
 
+NATIVE_BUILD_PACKAGES=(
+  git python3 python3-pip curl jq xz-utils zstd zip unzip file binutils
+  build-essential pkg-config ninja-build ccache
+  libgtk-3-dev libnss3-dev libasound2-dev libxss-dev libxtst-dev libxrandr-dev
+  libxcomposite-dev libxdamage-dev libxfixes-dev libxrender-dev libxkbcommon-dev
+  libdrm-dev libgbm-dev libpango1.0-dev libcups2-dev libatk1.0-dev
+  libatspi2.0-dev libatk-bridge2.0-dev
+)
+SYSTEM_DEPENDENCY_FAILURE_CLASS=""
+
 install_system_dependencies() {
-  bounded_sudo_apt_get update
-  bounded_sudo_apt_get install -y \
-    git python3 python3-pip curl jq xz-utils zstd zip unzip file binutils \
-    build-essential pkg-config ninja-build ccache \
-    libgtk-3-dev libnss3-dev libasound2-dev libxss-dev libxtst-dev libxrandr-dev \
-    libxcomposite-dev libxdamage-dev libxfixes-dev libxrender-dev libxkbcommon-dev \
-    libdrm-dev libgbm-dev libpango1.0-dev libcups2-dev libatk1.0-dev \
-    libatspi2.0-dev libatk-bridge2.0-dev
+  SYSTEM_DEPENDENCY_FAILURE_CLASS=""
+  if ! bounded_sudo_apt_get update; then
+    SYSTEM_DEPENDENCY_FAILURE_CLASS=infrastructure
+    echo "::error::Native build package index refresh failed or timed out; a later runner/mirror may recover."
+    return 1
+  fi
+
+  # Simulation separates release/package-set drift from a transient mutation failure.
+  # If APT cannot solve this exact set after a successful index refresh, recycling the
+  # same runner image is not useful; the LTS contract/package list needs maintenance.
+  if ! bounded_apt_get_simulate install -y "${NATIVE_BUILD_PACKAGES[@]}"; then
+    SYSTEM_DEPENDENCY_FAILURE_CLASS=deterministic_build
+    echo "::error::Native Chromium build prerequisites are not solvable on this runner release; update the LTS package contract."
+    return 1
+  fi
+
+  if ! bounded_sudo_apt_get install -y "${NATIVE_BUILD_PACKAGES[@]}"; then
+    SYSTEM_DEPENDENCY_FAILURE_CLASS=infrastructure
+    echo "::error::Native build prerequisite installation failed after a successful simulation; treating this as runner/mirror infrastructure."
+    return 1
+  fi
 }
 
 I386_BASELINE_SONAMES=(

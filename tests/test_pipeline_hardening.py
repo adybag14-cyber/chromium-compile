@@ -177,6 +177,19 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("for pass in 1 2 3", common)
         self.assertIn('runtime_repairs}" -lt 2', common)
 
+
+    def test_native_build_dependency_failures_are_classified(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("NATIVE_BUILD_PACKAGES", common)
+        self.assertIn("SYSTEM_DEPENDENCY_FAILURE_CLASS", common)
+        self.assertIn("bounded_apt_get_simulate install -y", common)
+        self.assertIn("Native Chromium build prerequisites are not solvable", common)
+        self.assertIn("id: system_dependencies", action)
+        self.assertIn("steps.system_dependencies.outputs.failure_class", action)
+        self.assertIn("bash tests/test_system_dependencies.sh", validation)
+
     def test_configurable_runner_package_installs_are_bounded(self):
         preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
@@ -444,8 +457,9 @@ class PipelineHardeningTests(unittest.TestCase):
 
     def test_build_hosts_always_install_release_validation_tools(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
-        deps = common[common.index("install_system_dependencies()") : common.index("I386_BASELINE_SONAMES=(")]
+        deps = common[common.index("NATIVE_BUILD_PACKAGES=(") : common.index("I386_BASELINE_SONAMES=(")]
         self.assertIn("file binutils", deps)
+        self.assertIn('bounded_sudo_apt_get install -y "${NATIVE_BUILD_PACKAGES[@]}"', deps)
 
     def test_runtime_bundle_validates_symlink_containment(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
