@@ -25,6 +25,9 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn('--max-retries "${MAX_RETRIES}"', recover)
         self.assertIn("CHROMIUM_RUNNER_RETRIES must not exceed 10", control)
         self.assertIn("CHROMIUM_I686_MAX_STAGES must be between 1 and 50", control)
+        self.assertIn("CHROMIUM_I686_CHECKPOINT_MINUTES", control)
+        self.assertIn("control_fail()", control)
+        self.assertIn("failure_class=deterministic_build", control)
 
     def test_terminal_build_failure_has_same_run_issue_mirror(self):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")

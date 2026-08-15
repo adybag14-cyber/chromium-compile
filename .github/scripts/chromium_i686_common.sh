@@ -50,12 +50,35 @@ bounded_external() {
 # short decimal text before arithmetic so malicious/accidental huge integers
 # cannot overflow Bash's signed integer calculations.
 CHROMIUM_I686_HARD_MAX_RESERVE_GIB=64
+CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES=340
 validate_bounded_reserve_gib() {
   local value="${1:?reserve value is required}"
   local name="${2:?reserve variable name is required}"
   if [[ ! "${value}" =~ ^(0|[1-9][0-9]{0,2})$ ]] \
       || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_RESERVE_GIB}" ]; then
     echo "::error::${name} must be a non-negative integer no greater than ${CHROMIUM_I686_HARD_MAX_RESERVE_GIB} GiB."
+    return 1
+  fi
+}
+
+validate_checkpoint_minutes() {
+  local value="${1:-}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,2}$ ]] \
+      || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES}" ]; then
+    echo "::error::JOB_CHECKPOINT_MINUTES must be an integer from 1 through ${CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES}."
+    return 1
+  fi
+}
+
+validate_job_started_at() {
+  local value="${1:-}"
+  local now="${2:-$(date +%s)}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,11}$ ]] || [[ ! "${now}" =~ ^[1-9][0-9]{0,11}$ ]]; then
+    echo "::error::JOB_STARTED_AT/current epoch metadata is missing or malformed."
+    return 1
+  fi
+  if [ "${value}" -gt "$((now + 300))" ]; then
+    echo "::error::JOB_STARTED_AT is implausibly far in the future; refusing unsafe checkpoint arithmetic."
     return 1
   fi
 }
@@ -1565,10 +1588,21 @@ configure_gn() {
 
 run_build_until_checkpoint() {
   local output_file="${1:-${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}}"
-  local started_at="${JOB_STARTED_AT:-$(date +%s)}"
-  local checkpoint_minutes="${JOB_CHECKPOINT_MINUTES:-330}"
-  local cutoff=$((started_at + checkpoint_minutes * 60))
+  local started_at="${JOB_STARTED_AT:-}"
+  local checkpoint_minutes="${JOB_CHECKPOINT_MINUTES:-340}"
   local now remaining status failure_class pass pass_log_start pass_log
+  now="$(date +%s)"
+  if ! validate_job_started_at "${started_at}" "${now}"; then
+    echo "complete=false" >> "${output_file}"
+    echo "failure_class=infrastructure" >> "${output_file}"
+    return 1
+  fi
+  if ! validate_checkpoint_minutes "${checkpoint_minutes}"; then
+    echo "complete=false" >> "${output_file}"
+    echo "failure_class=deterministic_build" >> "${output_file}"
+    return 1
+  fi
+  local cutoff=$((started_at + checkpoint_minutes * 60))
   local runtime_repairs=0
 
   if ! ensure_build_disk_space 20; then

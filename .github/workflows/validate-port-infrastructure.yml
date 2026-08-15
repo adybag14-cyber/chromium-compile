@@ -93,6 +93,12 @@ jobs:
           set -euo pipefail
           bash tests/test_prepare_failure_classification.sh
 
+      - name: Exercise checkpoint cutoff contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_checkpoint_cutoff.sh
+
       - name: Exercise post-compile artifact integrity contract
         shell: bash
         run: |
