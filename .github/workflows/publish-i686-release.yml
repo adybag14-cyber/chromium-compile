@@ -87,6 +87,7 @@ jobs:
           head_repo="$(jq -r '.head_repository.full_name // ""' <<<"${run_json}")"
           head_sha="$(jq -r '.head_sha // ""' <<<"${run_json}")"
           display_title="$(jq -r '.display_title // ""' <<<"${run_json}")"
+          workflow_path="${workflow_path%%@*}"
 
           test "${status}" = completed || {
             echo "::error::Build run ${REQUESTED_RUN_ID} is not completed."
