@@ -16,6 +16,26 @@ on:
         required: false
         default: ""
         type: string
+      checkpoint_run_id:
+        description: "Optional production Actions run ID whose checkpoint artifact should be recovery-drilled"
+        required: false
+        default: ""
+        type: string
+      checkpoint_version:
+        description: "Chromium version expected in the checkpoint drill"
+        required: false
+        default: ""
+        type: string
+      checkpoint_consumer_stage:
+        description: "Stage that would consume the checkpoint"
+        required: false
+        default: ""
+        type: string
+      checkpoint_artifact_stage:
+        description: "Producer stage encoded in chromium-i686-out-stage-N"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "23 6 * * 1"
 
@@ -160,6 +180,95 @@ jobs:
           install_gn_from_cipd
           "${GN_BINARY}" --version
           test "$(chromium_gn_version)" = "${expected_gn}"
+
+  validate_checkpoint_recovery:
+    name: Validate real checkpoint recovery artifact
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.checkpoint_run_id != '' &&
+        inputs.checkpoint_version != '' &&
+        inputs.checkpoint_consumer_stage != '' &&
+        inputs.checkpoint_artifact_stage != ''
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Provenance-check and validate production checkpoint bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKPOINT_RUN_ID: ${{ inputs.checkpoint_run_id }}
+          CHECKPOINT_VERSION: ${{ inputs.checkpoint_version }}
+          CHECKPOINT_CONSUMER_STAGE: ${{ inputs.checkpoint_consumer_stage }}
+          CHECKPOINT_ARTIFACT_STAGE: ${{ inputs.checkpoint_artifact_stage }}
+          CHECKPOINT_EXPECTED_REF: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${CHECKPOINT_RUN_ID}" =~ ^[0-9]+$ ]]
+          [[ "${CHECKPOINT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${CHECKPOINT_CONSUMER_STAGE}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CHECKPOINT_ARTIFACT_STAGE}" =~ ^[1-9][0-9]*$ ]]
+          command -v gh >/dev/null
+          command -v jq >/dev/null
+          command -v zstd >/dev/null
+
+          source .github/scripts/chromium_i686_common.sh
+          source .github/scripts/chromium_i686_resume.sh
+          artifact_name="chromium-i686-out-stage-${CHECKPOINT_ARTIFACT_STAGE}"
+          validate_checkpoint_source_run \
+            "${CHECKPOINT_RUN_ID}" \
+            "${CHECKPOINT_VERSION}" \
+            "${CHECKPOINT_CONSUMER_STAGE}" \
+            "${artifact_name}"
+          test "${CHECKPOINT_PROVENANCE_STATUS}" = usable
+          trusted_sha="${CHECKPOINT_PRODUCER_SHA}"
+
+          proof_dir="${RUNNER_TEMP}/checkpoint-proof"
+          bounded_rm_rf "${proof_dir}" || true
+          mkdir -p "${proof_dir}"
+          bounded_gh run download "${CHECKPOINT_RUN_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${artifact_name}" \
+            --dir "${proof_dir}"
+
+          archive="${proof_dir}/out-Release_x86.tar.zst"
+          checksum="${proof_dir}/out-Release_x86.tar.zst.sha256"
+          manifest="${proof_dir}/checkpoint-manifest.json"
+          test -s "${archive}"
+          test -s "${checksum}"
+          test -s "${manifest}"
+          (
+            cd "${proof_dir}"
+            sha256sum -c "$(basename "${checksum}")"
+          )
+          python3 scripts/validate_checkpoint_archive.py \
+            "${archive}" --stats-file "${proof_dir}/checkpoint-archive-stats.json"
+          jq -e \
+            --arg version "${CHECKPOINT_VERSION}" \
+            --arg sha "${trusted_sha}" \
+            --argjson stage "${CHECKPOINT_ARTIFACT_STAGE}" \
+            '.schema_version == 1 and
+             .chromium_version == $version and
+             .checkpoint_stage == $stage and
+             .target_os == "linux" and
+             .target_cpu == "x86" and
+             ((.workflow_sha // "") | ascii_downcase) == ($sha | ascii_downcase)' \
+            "${manifest}" >/dev/null
+          jq -e \
+            --arg run_id "${CHECKPOINT_RUN_ID}" \
+            '(.producer_run_id // $run_id | tostring) == $run_id' \
+            "${manifest}" >/dev/null
+          cat "${proof_dir}/checkpoint-archive-stats.json"
+          echo "Production checkpoint recovery drill passed for ${artifact_name} from run ${CHECKPOINT_RUN_ID}."
 
   validate_full_source_preflight:
     name: Full Chromium i686 compatibility proof

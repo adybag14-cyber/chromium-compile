@@ -113,7 +113,7 @@ validate_checkpoint_source_run() {
   local current_stage="${3:?current stage is required}"
   local artifact_name="${4:?checkpoint artifact name is required}"
   local expected_repo="${GITHUB_REPOSITORY:-}"
-  local expected_ref="${GITHUB_REF_NAME:-}"
+  local expected_ref="${CHECKPOINT_EXPECTED_REF:-${GITHUB_REF_NAME:-}}"
   CHECKPOINT_PROVENANCE_FAILURE_CLASS=deterministic_build
   CHECKPOINT_PROVENANCE_STATUS=invalid
   CHECKPOINT_PRODUCER_SHA=""

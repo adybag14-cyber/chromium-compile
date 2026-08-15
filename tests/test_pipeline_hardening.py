@@ -567,6 +567,11 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("CHECKPOINT_PROVENANCE_FAILURE_CLASS", action)
         self.assertIn("bash tests/test_checkpoint_provenance.sh", validation)
         self.assertIn("bash tests/test_checkpoint_restore_atomic.sh", validation)
+        self.assertIn("Validate real checkpoint recovery artifact", validation)
+        self.assertIn("checkpoint_run_id", validation)
+        self.assertIn("CHECKPOINT_EXPECTED_REF", resume)
+        self.assertIn("validate_checkpoint_source_run", validation)
+        self.assertIn("validate_checkpoint_archive.py", validation)
 
 
 
