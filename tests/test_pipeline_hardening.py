@@ -32,6 +32,28 @@ class PipelineHardeningTests(unittest.TestCase):
             for block in blocks:
                 ast.parse(block)
 
+    def test_port_config_hash_tracks_semantics_not_wrapper_control_flow(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("PORT_CONFIG_HASH_SCHEMA=2", common)
+        semantic = common[common.index("compute_port_config_sha256() {"):common.index("compute_legacy_port_config_sha256() {")]
+        legacy = common[common.index("compute_legacy_port_config_sha256() {"):common.index("available_disk_gb() {")]
+        self.assertNotIn("chromium_i686_port.sh", semantic)
+        self.assertIn("chromium_i686_port.sh", legacy)
+        self.assertIn("port_config_semantic_files", semantic)
+        self.assertIn("port_config_hash_schema", resume)
+        self.assertIn("compute_legacy_port_config_sha256", resume)
+        self.assertIn("compute_port_config_sha256", resume)
+        self.assertIn("bash tests/test_port_config_hash.sh", validation)
+        port = (ROOT / ".github" / "scripts" / "chromium_i686_port.sh").read_text(encoding="utf-8")
+        self.assertIn('patches/common/enable_linux_i686.py', port)
+        self.assertIn('--source-root "${source_root}"', port)
+        self.assertIn('--version "${version}"', port)
+        self.assertIn('local patches=("${version_dir}"/*.patch)', port)
+        self.assertIn('git apply --check "${patch_file}"', port)
+        self.assertIn('git apply "${patch_file}"', port)
+
     def test_checkpoint_bundle_has_integrity_metadata(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         self.assertIn("out-Release_x86.tar.zst.sha256", action)
