@@ -290,6 +290,31 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertLess(action.index('prepare_chromium_source'), action.index('install_depot_tools'))
         self.assertLess(preflight.index('prepare_chromium_source'), preflight.index('install_depot_tools'))
 
+    def test_source_archive_stats_are_sha_bound_and_resource_bounded(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
+        validator = (ROOT / "scripts" / "validate_chromium_source_archive.py").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn('mode="r|xz"', validator)
+        self.assertNotIn('mode="r:xz"', validator)
+        self.assertIn("DEFAULT_MAX_MEMBERS", validator)
+        self.assertIn("DEFAULT_MAX_UNPACKED_GIB", validator)
+        self.assertIn("--source-sha256", validator)
+        self.assertIn("--stats-file", validator)
+        self.assertIn("CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB", common)
+        self.assertIn("CHROMIUM_I686_MAX_SOURCE_MEMBERS", common)
+        self.assertIn("CHROMIUM_I686_SOURCE_EXTRACT_RESERVE_GIB", common)
+        self.assertIn("source_archive_stats_are_usable()", common)
+        self.assertIn('member_count > max_members', common)
+        self.assertIn('unpacked_bytes > max_unpacked_bytes', common)
+        self.assertIn("ensure_source_archive_extract_space()", common)
+        self.assertIn("source-archive-stats.json", common)
+        self.assertIn("regenerating bounded stats once", common)
+        self.assertIn("CHROMIUM_SOURCE_FAILURE_CLASS", common)
+        self.assertIn("failure_class=${CHROMIUM_SOURCE_FAILURE_CLASS:-infrastructure}", action)
+        self.assertIn("bash tests/test_source_archive_space.sh", validation)
+        self.assertLess(common.index("ensure_source_archive_extract_space"), common.index('echo "Extracting Chromium'))
+
     def test_source_archive_and_extracted_version_are_validated(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         self.assertIn("validate_chromium_source_tarball()", common)
@@ -448,7 +473,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("Restore ccache", action)
         self.assertNotIn("Save ccache", action)
         self.assertNotIn("chromium-i686-ccache-", action)
-        self.assertIn("key: chromium-src-v2-${{ inputs.version }}", action)
+        self.assertIn("key: chromium-src-v3-${{ inputs.version }}", action)
+        self.assertIn("chromium-src-v2-${{ inputs.version }}", action)
         self.assertIn("chromium-src-${{ inputs.version }}", action)
         self.assertIn("steps.source_cache.outputs.cache-hit != 'true'", action)
         self.assertNotIn("key: chromium-src-${{ inputs.version }}-${{ github.run_id }}", action)
@@ -612,15 +638,16 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn('xz -t "${tarball}"', common)
 
 
-    def test_source_cache_contract_can_migrate_legacy_cache_to_marker_v2(self):
+    def test_source_cache_contract_can_migrate_legacy_cache_to_v3_stats(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
         restore_pos = action.index("Restore Chromium source tarball cache")
         save_pos = action.index("Save Chromium source tarball cache")
         restore = action[restore_pos:save_pos]
         save = action[save_pos:]
-        self.assertIn("key: chromium-src-v2-${{ inputs.version }}", restore)
+        self.assertIn("key: chromium-src-v3-${{ inputs.version }}", restore)
+        self.assertIn("chromium-src-v2-${{ inputs.version }}", restore)
         self.assertIn("chromium-src-${{ inputs.version }}", restore)
-        self.assertIn("key: chromium-src-v2-${{ inputs.version }}", save)
+        self.assertIn("key: chromium-src-v3-${{ inputs.version }}", save)
         self.assertIn("cache-hit != 'true'", save)
 
 
