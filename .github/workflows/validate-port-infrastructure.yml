@@ -112,6 +112,7 @@ jobs:
           bash tests/test_checkpoint_provenance.sh
           bash tests/test_checkpoint_restore_atomic.sh
           bash tests/test_checkpoint_residue_cleanup.sh
+          bash tests/test_port_config_hash.sh
 
       - name: Exercise release runtime smoke contract
         shell: bash

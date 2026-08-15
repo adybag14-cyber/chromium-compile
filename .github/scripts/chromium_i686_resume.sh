@@ -369,6 +369,27 @@ validate_checkpoint_source_run() {
   echo "Verified checkpoint provenance: run ${run_id}, run attempt ${run_attempt}, branch ${head_branch}, head ${CHECKPOINT_PRODUCER_SHA}, stage ${producer_stage}, artifact ${artifact_name}."
 }
 
+checkpoint_port_config_is_compatible() {
+  local manifest="${1:?checkpoint manifest is required}"
+  local expected_version="${2:?expected Chromium version is required}"
+  local current_port_hash manifest_port_hash manifest_port_hash_schema
+  if ! manifest_port_hash="$(jq -er '.port_config_sha256 | strings | select(test("^[0-9a-fA-F]{64}$"))' "${manifest}")" \
+      || ! manifest_port_hash_schema="$(jq -er '(.port_config_hash_schema // 1) | numbers | select(. == 1 or . == 2)' "${manifest}")"; then
+    echo "::error::Checkpoint port configuration hash metadata is missing, malformed, or uses an unsupported schema."
+    return 1
+  fi
+  if [ "${manifest_port_hash_schema}" = "1" ]; then
+    current_port_hash="$(compute_legacy_port_config_sha256 "${expected_version}")"
+    echo "::warning::Legacy checkpoint port hash schema 1 matched exactly; newly emitted checkpoints migrate to semantic schema ${PORT_CONFIG_HASH_SCHEMA}."
+  else
+    current_port_hash="$(compute_port_config_sha256 "${expected_version}")"
+  fi
+  if [ "${current_port_hash,,}" != "${manifest_port_hash,,}" ]; then
+    echo "::error::Checkpoint port configuration differs from the current build-semantic GN/patch configuration (hash schema ${manifest_port_hash_schema})."
+    return 1
+  fi
+}
+
 checkpoint_bundle_is_usable() {
   CHECKPOINT_BUNDLE_FAILURE_CLASS=deterministic_build
   local archive="${1:?checkpoint archive is required}"
@@ -530,11 +551,7 @@ PY
     return 1
   fi
 
-  local current_port_hash manifest_port_hash
-  current_port_hash="$(compute_port_config_sha256 "${expected_version}")"
-  manifest_port_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port_config_sha256"])' "${manifest}")"
-  if [ "${current_port_hash}" != "${manifest_port_hash}" ]; then
-    echo "::error::Checkpoint port configuration differs from the current GN/patch configuration."
+  if ! checkpoint_port_config_is_compatible "${manifest}" "${expected_version}"; then
     return 1
   fi
 
@@ -916,6 +933,7 @@ create_out_checkpoint() {
   CHECKPOINT_STAGE="${stage}" \
   CHECKPOINT_SOURCE_SHA="${source_sha}" \
   CHECKPOINT_CLANG="${clang_revision}" \
+  CHECKPOINT_PORT_HASH_SCHEMA="${PORT_CONFIG_HASH_SCHEMA}" \
   CHECKPOINT_PORT_HASH="${port_hash}" \
   CHECKPOINT_ARGS_HASH="${args_hash}" \
   CHECKPOINT_NINJA_HASH="${ninja_hash}" \
@@ -937,6 +955,7 @@ payload = {
     "target_cpu": "x86",
     "source_tar_sha256": os.environ["CHECKPOINT_SOURCE_SHA"],
     "clang_revision": os.environ["CHECKPOINT_CLANG"],
+    "port_config_hash_schema": int(os.environ["CHECKPOINT_PORT_HASH_SCHEMA"]),
     "port_config_sha256": os.environ["CHECKPOINT_PORT_HASH"],
     "args_gn_sha256": os.environ["CHECKPOINT_ARGS_HASH"],
     "build_ninja_sha256": os.environ["CHECKPOINT_NINJA_HASH"],

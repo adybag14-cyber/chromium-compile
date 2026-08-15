@@ -37,6 +37,11 @@ CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB="${CHROMIUM_I686_MAX_CHECKPOINT_UNPACK
 CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS="${CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS:-2000000}"
 CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB="${CHROMIUM_I686_CHECKPOINT_RESTORE_RESERVE_GIB:-5}"
 CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
+# Port hash schema 2 identifies generated build semantics only: canonical GN args
+# plus semantic patch drivers/files. The orchestration/error-reporting wrapper is
+# deliberately excluded so non-semantic pipeline refactors do not discard Ninja state.
+# Schema-1 compatibility remains in the resume path for one-way checkpoint migration.
+PORT_CONFIG_HASH_SCHEMA=2
 export DEPOT_TOOLS_UPDATE=0
 export CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS
 export CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB CHROMIUM_I686_MAX_RELEASE_MEMBERS
@@ -784,24 +789,45 @@ cc_wrapper="ccache"
 EOF
 }
 
-compute_port_config_sha256() {
+port_config_semantic_files() {
   local version="${1:?version is required}"
   local major="${version%%.*}"
   {
+    find "${GITHUB_WORKSPACE}/patches/common" -maxdepth 1 -type f -print 2>/dev/null || true
+    find "${GITHUB_WORKSPACE}/patches/versions/${major}" -maxdepth 1 -type f -print 2>/dev/null || true
+  } | sort -u
+}
+
+_hash_port_config_files() {
+  {
     chromium_i686_gn_args
     local file relative hash
-    while IFS= read -r file; do
+    for file in "$@"; do
+      [ -n "${file}" ] || continue
       relative="${file#${GITHUB_WORKSPACE}/}"
       hash="$(sha256sum "${file}" | awk '{print $1}')"
       printf '%s  %s\n' "${hash}" "${relative}"
-    done < <(
-      {
-        find "${GITHUB_WORKSPACE}/patches/common" -maxdepth 1 -type f -print 2>/dev/null || true
-        find "${GITHUB_WORKSPACE}/patches/versions/${major}" -maxdepth 1 -type f -print 2>/dev/null || true
-        printf '%s\n' "${GITHUB_WORKSPACE}/.github/scripts/chromium_i686_port.sh"
-      } | sort -u
-    )
+    done
   } | sha256sum | awk '{print $1}'
+}
+
+compute_port_config_sha256() {
+  local version="${1:?version is required}"
+  local -a semantic_files=()
+  mapfile -t semantic_files < <(port_config_semantic_files "${version}")
+  _hash_port_config_files "${semantic_files[@]}"
+}
+
+compute_legacy_port_config_sha256() {
+  local version="${1:?version is required}"
+  local -a legacy_files=()
+  mapfile -t legacy_files < <(
+    {
+      port_config_semantic_files "${version}"
+      printf '%s\n' "${GITHUB_WORKSPACE}/.github/scripts/chromium_i686_port.sh"
+    } | sort -u
+  )
+  _hash_port_config_files "${legacy_files[@]}"
 }
 
 available_disk_gb() {
@@ -2203,6 +2229,7 @@ package_chromium_i686() {
     echo "clang_revision=${clang_revision}"
     echo "gn_version=${gn_version}"
     echo "depot_tools_revision=${depot_revision}"
+    echo "port_config_hash_schema=${PORT_CONFIG_HASH_SCHEMA}"
     echo "port_config_sha256=${port_hash}"
     echo "checkpoint_contract_version=${CHECKPOINT_CONTRACT_VERSION}"
     echo "runner_os=${RUNNER_OS:-unknown}"
