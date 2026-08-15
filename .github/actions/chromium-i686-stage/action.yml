@@ -79,17 +79,6 @@ runs:
           exit 1
         fi
 
-    - name: Try Preferred Checkpoint
-      id: preferred_checkpoint
-      if: ${{ inputs.preferred-checkpoint-artifact != '' }}
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      continue-on-error: true
-      with:
-        name: ${{ inputs.preferred-checkpoint-artifact }}
-        path: ${{ github.workspace }}/resume/preferred
-        run-id: ${{ inputs.preferred-checkpoint-run-id }}
-        github-token: ${{ github.token }}
-
     - name: Restore Chromium source tarball cache
       id: source_cache
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -122,32 +111,78 @@ runs:
 
         checkpoint_restored=false
         resume_archive=""
-        preferred_candidate="${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst"
-        if [ -s "${preferred_candidate}" ]; then
-          if checkpoint_bundle_is_usable "${preferred_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
-            resume_archive="${preferred_candidate}"
+
+        if [ -n "${{ inputs.preferred-checkpoint-artifact }}" ]; then
+          preferred_rc=0
+          validate_checkpoint_source_run \
+            "${{ inputs.preferred-checkpoint-run-id }}" \
+            "${{ inputs.version }}" \
+            "${{ inputs.stage }}" \
+            "${{ inputs.preferred-checkpoint-artifact }}" || preferred_rc=$?
+          if [ "${preferred_rc}" -eq 0 ]; then
+            preferred_sha="${CHECKPOINT_PRODUCER_SHA}"
+            preferred_stage="${CHECKPOINT_PRODUCER_STAGE}"
+            echo "Preferred checkpoint provenance accepted; downloading trusted artifact on demand."
+            mkdir -p "${GITHUB_WORKSPACE}/resume/preferred"
+            if bounded_gh run download "${{ inputs.preferred-checkpoint-run-id }}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --name "${{ inputs.preferred-checkpoint-artifact }}" \
+              --dir "${GITHUB_WORKSPACE}/resume/preferred"; then
+              preferred_candidate="${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst"
+              if [ -s "${preferred_candidate}" ] && checkpoint_bundle_is_usable \
+                  "${preferred_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}" \
+                  "${preferred_sha}" "${preferred_stage}" "${{ inputs.preferred-checkpoint-run-id }}"; then
+                resume_archive="${preferred_candidate}"
+              else
+                echo "::warning::Rejecting unusable preferred checkpoint bundle: ${preferred_candidate}"
+                bounded_rm_rf "${GITHUB_WORKSPACE}/resume/preferred" || true
+              fi
+            else
+              echo "::warning::Preferred checkpoint download failed; trying fallback/fresh output instead of trusting partial bytes."
+              bounded_rm_rf "${GITHUB_WORKSPACE}/resume/preferred" || true
+            fi
+          elif [ "${preferred_rc}" -eq 2 ]; then
+            echo "Preferred checkpoint is unavailable under artifact retention; trying fallback/fresh output."
           else
-            echo "::warning::Rejecting unusable preferred checkpoint bundle: ${preferred_candidate}"
-            rm -rf "${GITHUB_WORKSPACE}/resume/preferred"
+            echo "failure_class=${CHECKPOINT_PROVENANCE_FAILURE_CLASS:-deterministic_build}" >> "${GITHUB_OUTPUT}"
+            exit 1
           fi
         fi
 
         if [ -z "${resume_archive}" ] && [ -n "${{ inputs.fallback-checkpoint-artifact }}" ]; then
-          echo "Preferred checkpoint unavailable or invalid; downloading fallback checkpoint on demand."
-          mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"
-          if bounded_gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --name "${{ inputs.fallback-checkpoint-artifact }}" \
-            --dir "${GITHUB_WORKSPACE}/resume/fallback"; then
-            fallback_candidate="${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"
-            if [ -s "${fallback_candidate}" ] && checkpoint_bundle_is_usable "${fallback_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}"; then
-              resume_archive="${fallback_candidate}"
+          echo "Preferred checkpoint unavailable or invalid; validating fallback provenance before download."
+          fallback_rc=0
+          validate_checkpoint_source_run \
+            "${{ inputs.fallback-checkpoint-run-id }}" \
+            "${{ inputs.version }}" \
+            "${{ inputs.stage }}" \
+            "${{ inputs.fallback-checkpoint-artifact }}" || fallback_rc=$?
+          if [ "${fallback_rc}" -eq 0 ]; then
+            fallback_sha="${CHECKPOINT_PRODUCER_SHA}"
+            fallback_stage="${CHECKPOINT_PRODUCER_STAGE}"
+            echo "Fallback provenance accepted; downloading checkpoint on demand."
+            mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"
+            if bounded_gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --name "${{ inputs.fallback-checkpoint-artifact }}" \
+              --dir "${GITHUB_WORKSPACE}/resume/fallback"; then
+              fallback_candidate="${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"
+              if [ -s "${fallback_candidate}" ] && checkpoint_bundle_is_usable \
+                  "${fallback_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}" \
+                  "${fallback_sha}" "${fallback_stage}" "${{ inputs.fallback-checkpoint-run-id }}"; then
+                resume_archive="${fallback_candidate}"
+              else
+                echo "::warning::Rejecting unusable fallback checkpoint bundle: ${fallback_candidate}"
+              fi
             else
-              echo "::warning::Rejecting unusable fallback checkpoint bundle: ${fallback_candidate}"
+              echo "::warning::Fallback checkpoint download failed; continuing with fresh output/ccache instead of failing the stage."
+              bounded_rm_rf "${GITHUB_WORKSPACE}/resume/fallback" || true
             fi
+          elif [ "${fallback_rc}" -eq 2 ]; then
+            echo "Fallback checkpoint is unavailable under artifact retention; continuing with fresh output/ccache."
           else
-            echo "::warning::Fallback checkpoint download failed; continuing with fresh output/ccache instead of failing the stage."
-            rm -rf "${GITHUB_WORKSPACE}/resume/fallback"
+            echo "failure_class=${CHECKPOINT_PROVENANCE_FAILURE_CLASS:-deterministic_build}" >> "${GITHUB_OUTPUT}"
+            exit 1
           fi
         fi
 
@@ -158,7 +193,7 @@ runs:
         else
           restore_out_checkpoint "" "${{ inputs.version }}" "${{ inputs.stage }}"
         fi
-        rm -rf "${GITHUB_WORKSPACE}/resume"
+        bounded_rm_rf "${GITHUB_WORKSPACE}/resume" || true
 
         log_runner_storage "stage-${{ inputs.stage }}-${{ inputs.attempt }} after source/checkpoint extraction"
         if [ "${checkpoint_restored}" = "true" ] && [ "${CHECKPOINT_REQUIRES_GN_REFRESH}" = "true" ]; then
