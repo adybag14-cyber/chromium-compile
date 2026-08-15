@@ -6,6 +6,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -24,6 +25,8 @@ SOURCE_METADATA_TEMPLATE = (
     "https://storage.googleapis.com/storage/v1/b/chromium-browser-official/o/"
     "chromium-{version}.tar.xz?fields=bucket,name,generation,size,md5Hash,crc32c,etag"
 )
+DEFAULT_MAX_SOURCE_ARCHIVE_GIB = 16
+HARD_MAX_SOURCE_ARCHIVE_GIB = 32
 
 
 def validate_version(version: str) -> str:
@@ -51,6 +54,47 @@ def source_cache_key(version: str, metadata: dict[str, object]) -> str:
 
 def source_metadata_url(version: str) -> str:
     return SOURCE_METADATA_TEMPLATE.format(version=validate_version(version))
+
+
+def _bounded_positive_env(name: str, default: int, hard_max: int) -> int:
+    raw = os.environ.get(name, str(default))
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", raw):
+        raise ValueError(f"{name} must be a short positive integer, got {raw!r}")
+    value = int(raw)
+    if value > hard_max:
+        raise ValueError(f"{name} must not exceed hard maximum {hard_max} GiB")
+    return value
+
+
+def validate_source_metadata(version: str, metadata: dict[str, object]) -> dict[str, object]:
+    version = validate_version(version)
+    expected_url = source_download_url(version)
+    if metadata.get("url") != expected_url:
+        raise ValueError(f"Source metadata URL does not match Chromium {version}: {metadata.get('url')!r}")
+    generation = str(metadata.get("generation", ""))
+    if not GENERATION_RE.fullmatch(generation):
+        raise ValueError(f"Invalid GCS source generation: {generation!r}")
+    length = metadata.get("content_length")
+    if not isinstance(length, int) or isinstance(length, bool) or length <= 0:
+        raise ValueError(f"Invalid GCS source content length: {length!r}")
+    max_gib = _bounded_positive_env(
+        "CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB",
+        DEFAULT_MAX_SOURCE_ARCHIVE_GIB,
+        HARD_MAX_SOURCE_ARCHIVE_GIB,
+    )
+    max_bytes = max_gib * 1024**3
+    if length > max_bytes:
+        raise ValueError(
+            f"Chromium {version} source object is {length} bytes, above configured {max_gib} GiB compressed limit"
+        )
+    md5 = str(metadata.get("md5_base64", ""))
+    try:
+        raw_md5 = base64.b64decode(md5, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid GCS md5 metadata: {md5!r}") from exc
+    if len(raw_md5) != 16:
+        raise ValueError(f"Unexpected GCS md5 length: {len(raw_md5)}")
+    return metadata
 
 
 def validate_effective_https_host(url: str, expected_host: str) -> None:
@@ -123,15 +167,7 @@ def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
         raise ValueError(f"GCS source object lacks bounded numeric generation: {generation!r}")
     if not length.isdigit():
         raise ValueError(f"GCS source object lacks numeric content length: {length!r}")
-    if not md5:
-        raise ValueError("GCS source object lacks md5Hash metadata")
-    try:
-        raw_md5 = base64.b64decode(md5, validate=True)
-    except Exception as exc:
-        raise ValueError(f"Invalid GCS md5 metadata: {md5!r}") from exc
-    if len(raw_md5) != 16:
-        raise ValueError(f"Unexpected GCS md5 length: {len(raw_md5)}")
-    return {
+    metadata = {
         "url": source_download_url(version),
         "generation": generation,
         "content_length": int(length),
@@ -139,6 +175,7 @@ def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
         "crc32c": crc32c,
         "etag": etag,
     }
+    return validate_source_metadata(version, metadata)
 
 
 def verify_file(path: Path, metadata: dict[str, object]) -> dict[str, str]:
@@ -211,6 +248,7 @@ def main() -> int:
     version = validate_version(args.version)
     if args.metadata_in:
         metadata = json.loads(args.metadata_in.read_text(encoding="utf-8"))
+        metadata = validate_source_metadata(version, metadata)
     else:
         metadata = fetch_metadata(version)
     result: dict[str, object] = dict(metadata)

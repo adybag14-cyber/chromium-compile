@@ -310,6 +310,18 @@ class ReleaseArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unpacked-byte limit"):
                 archive_validator.validate_archive(path, max_unpacked_bytes=1)
 
+    def test_release_validator_policy_overrides_have_hard_caps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bundle.tar.xz"
+            names = sorted(runtime.REQUIRED_RUNTIME - {"locales"}) + ["locales/en-US.pak"]
+            self._archive(path, names)
+            with self.assertRaisesRegex(ValueError, "hard maximum"):
+                archive_validator.validate_archive(path, max_members=archive_validator.HARD_MAX_MEMBERS + 1)
+            with self.assertRaisesRegex(ValueError, "hard maximum"):
+                archive_validator.validate_archive(
+                    path, max_unpacked_bytes=archive_validator.HARD_MAX_UNPACKED_GIB * 1024**3 + 1
+                )
+
     def test_release_validator_cli_writes_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

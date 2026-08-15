@@ -120,6 +120,7 @@ jobs:
           bash tests/test_release_runtime_smoke.sh
           bash tests/test_release_archive_space.sh
           bash tests/test_runtime_executable_permissions.sh
+          bash tests/test_resource_policy_ceiling.sh
 
       - name: Reject floating first-party action tags
         shell: bash

@@ -12,6 +12,8 @@ from chromium_linux_runtime import REQUIRED_EXECUTABLE_RUNTIME, REQUIRED_RUNTIME
 
 DEFAULT_MAX_MEMBERS = 250_000
 DEFAULT_MAX_UNPACKED_GIB = 8
+HARD_MAX_MEMBERS = 1_000_000
+HARD_MAX_UNPACKED_GIB = 16
 
 
 def _unsafe(value: str) -> bool:
@@ -19,19 +21,21 @@ def _unsafe(value: str) -> bool:
     return path.is_absolute() or any(part == ".." for part in path.parts)
 
 
-def _positive_limit(value: int, name: str) -> int:
+def _positive_limit(value: int, name: str, hard_max: int) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer")
+    if value > hard_max:
+        raise ValueError(f"{name} must not exceed hard maximum {hard_max}")
     return value
 
 
-def _env_limit(name: str, default: int) -> int:
+def _env_limit(name: str, default: int, hard_max: int) -> int:
     raw = os.environ.get(name, str(default))
     try:
         value = int(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a positive integer, got {raw!r}") from exc
-    return _positive_limit(value, name)
+    return _positive_limit(value, name, hard_max)
 
 
 def validate_archive(
@@ -40,8 +44,8 @@ def validate_archive(
     max_members: int = DEFAULT_MAX_MEMBERS,
     max_unpacked_bytes: int = DEFAULT_MAX_UNPACKED_GIB * 1024**3,
 ) -> dict[str, int]:
-    max_members = _positive_limit(max_members, "max_members")
-    max_unpacked_bytes = _positive_limit(max_unpacked_bytes, "max_unpacked_bytes")
+    max_members = _positive_limit(max_members, "max_members", HARD_MAX_MEMBERS)
+    max_unpacked_bytes = _positive_limit(max_unpacked_bytes, "max_unpacked_bytes", HARD_MAX_UNPACKED_GIB * 1024**3)
     names: set[str] = set()
     nonempty_regular_files: set[str] = set()
     executable_regular_files: set[str] = set()
@@ -114,11 +118,11 @@ def main() -> int:
 
     max_members = args.max_members
     if max_members is None:
-        max_members = _env_limit("CHROMIUM_I686_MAX_RELEASE_MEMBERS", DEFAULT_MAX_MEMBERS)
+        max_members = _env_limit("CHROMIUM_I686_MAX_RELEASE_MEMBERS", DEFAULT_MAX_MEMBERS, HARD_MAX_MEMBERS)
     max_unpacked_bytes = args.max_unpacked_bytes
     if max_unpacked_bytes is None:
         max_gib = _env_limit(
-            "CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB", DEFAULT_MAX_UNPACKED_GIB
+            "CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB", DEFAULT_MAX_UNPACKED_GIB, HARD_MAX_UNPACKED_GIB
         )
         max_unpacked_bytes = max_gib * 1024**3
 

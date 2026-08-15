@@ -119,6 +119,17 @@ class ChromiumSourceArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unpacked-byte limit"):
                 validator.validate_source_archive(path, self.VERSION, max_unpacked_bytes=1)
 
+    def test_source_validator_policy_overrides_have_hard_caps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "source.tar.xz"
+            self._write(path, [self._file(self.ROOT + "/DEPS")])
+            with self.assertRaisesRegex(ValueError, "hard maximum"):
+                validator.validate_source_archive(path, self.VERSION, max_members=validator.HARD_MAX_MEMBERS + 1)
+            with self.assertRaisesRegex(ValueError, "hard maximum"):
+                validator.validate_source_archive(
+                    path, self.VERSION, max_unpacked_bytes=validator.HARD_MAX_UNPACKED_GIB * 1024**3 + 1
+                )
+
     def test_source_validator_cli_writes_sha_bound_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
