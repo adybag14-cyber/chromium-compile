@@ -9,6 +9,23 @@ trap 'rm -rf "${RUNNER_TEMP}"' EXIT
 source "${ROOT}/.github/scripts/chromium_i686_common.sh"
 # Keep an alias to the real mirror-rewrite function before policy mocks replace it.
 eval "$(declare -f normalize_ubuntu_archive_mirrors | sed '1s/normalize_ubuntu_archive_mirrors/real_normalize_ubuntu_archive_mirrors/')"
+eval "$(declare -f _run_sudo_apt_get_with_timeout | sed '1s/_run_sudo_apt_get_with_timeout/real_run_sudo_apt_get_with_timeout/')"
+
+# Fast mirror-failure detection applies only to index refreshes; package installs keep the more tolerant transport policy.
+apt_policy_log="${RUNNER_TEMP}/apt-policy.log"
+timeout() {
+  printf '%s\n' "$*" > "${apt_policy_log}"
+  return 0
+}
+real_run_sudo_apt_get_with_timeout 180 update
+grep -q 'Acquire::Retries=2' "${apt_policy_log}"
+grep -q 'Acquire::http::Timeout=20' "${apt_policy_log}"
+grep -q 'Acquire::https::Timeout=20' "${apt_policy_log}"
+real_run_sudo_apt_get_with_timeout 900 install -y example
+grep -q 'Acquire::Retries=3' "${apt_policy_log}"
+grep -q 'Acquire::http::Timeout=30' "${apt_policy_log}"
+grep -q 'Acquire::https::Timeout=30' "${apt_policy_log}"
+unset -f timeout
 
 # Timeout policy is bounded before any external command is run.
 validate_apt_timeout_seconds 180 CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS 300

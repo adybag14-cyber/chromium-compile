@@ -294,11 +294,18 @@ validate_apt_timeout_seconds() {
 _run_sudo_apt_get_with_timeout() {
   local seconds="${1:?APT timeout seconds are required}"
   shift
+  local command="${1:-}"
+  local retries=3
+  local acquire_timeout=30
+  if [ "${command}" = update ]; then
+    retries=2
+    acquire_timeout=20
+  fi
   timeout -k 30s "${seconds}s" \
     sudo env DEBIAN_FRONTEND=noninteractive apt-get \
-      -o Acquire::Retries=2 \
-      -o Acquire::http::Timeout=20 \
-      -o Acquire::https::Timeout=20 \
+      -o "Acquire::Retries=${retries}" \
+      -o "Acquire::http::Timeout=${acquire_timeout}" \
+      -o "Acquire::https::Timeout=${acquire_timeout}" \
       -o DPkg::Lock::Timeout=60 \
       "$@"
 }
@@ -367,9 +374,9 @@ bounded_apt_get_simulate() {
     "${CHROMIUM_I686_HARD_MAX_APT_TIMEOUT_SECONDS}" || return 1
   timeout -k 15s "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}s" \
     apt-get -s \
-      -o Acquire::Retries=2 \
-      -o Acquire::http::Timeout=20 \
-      -o Acquire::https::Timeout=20 \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
       "$@"
 }
 
