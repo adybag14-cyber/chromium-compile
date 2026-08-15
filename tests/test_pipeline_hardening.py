@@ -706,7 +706,10 @@ class PipelineHardeningTests(unittest.TestCase):
 
     def test_publisher_checkpoint_cleanup_is_post_release_nonblocking_and_least_privilege(self):
         publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
-        cleanup = publish[publish.index("  cleanup_published_checkpoints:"):]
+        cleanup_start = publish.index("  cleanup_published_checkpoints:")
+        next_job = re.search(r"\n  [a-z_]+:\n", publish[cleanup_start + 1:])
+        cleanup_end = cleanup_start + 1 + next_job.start() if next_job else len(publish)
+        cleanup = publish[cleanup_start:cleanup_end]
         self.assertIn("needs: [validate, smoke, publish]", cleanup)
         self.assertIn("needs.publish.result == 'success'", cleanup)
         self.assertIn("continue-on-error: true", cleanup)

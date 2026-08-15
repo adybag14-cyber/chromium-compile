@@ -75,6 +75,44 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
         with mock.patch.object(cleanup, "run_gh", side_effect=[done(release_payload()), done(stdout="c" * 40 + "\n")]), self.assertRaises(cleanup.CleanupError):
             cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA)
 
+    def test_invalid_inputs_fail_closed(self):
+        invalid_cases = [
+            ("owner repo", VERSION, BRANCH, BUILD_SHA),
+            (REPO, "not-a-version", BRANCH, BUILD_SHA),
+            (REPO, VERSION, "../main", BUILD_SHA),
+            (REPO, VERSION, BRANCH, "not-a-sha"),
+        ]
+        for args in invalid_cases:
+            with self.subTest(args=args), self.assertRaises(cleanup.CleanupError):
+                cleanup.validate_inputs(*args)
+
+    def test_artifact_state_non_404_failure_is_fatal(self):
+        with mock.patch.object(cleanup, "run_gh", return_value=done(code=1, stderr="gh: server exploded (HTTP 500)")), self.assertRaises(cleanup.CleanupError):
+            cleanup.artifact_is_missing(REPO, 101)
+
+    def test_checkpoint_metadata_fail_closed_and_unowned_artifact_skips(self):
+        malformed = artifact(101, 201, 2)
+        malformed["expired"] = "false"
+        with mock.patch.object(cleanup, "list_checkpoint_artifacts", return_value=[malformed]), self.assertRaises(cleanup.CleanupError):
+            cleanup.find_version_checkpoints(REPO, VERSION, BRANCH)
+
+        unowned = artifact(102, 202, 2)
+        unowned["workflow_run"] = None
+        with mock.patch.object(cleanup, "list_checkpoint_artifacts", return_value=[unowned]), mock.patch.object(cleanup, "run_gh") as gh:
+            self.assertEqual(cleanup.find_version_checkpoints(REPO, VERSION, BRANCH), [])
+            gh.assert_not_called()
+
+    def test_apply_deletes_each_selected_checkpoint_once(self):
+        items = [
+            cleanup.CheckpointArtifact(101, 201, 2, 111),
+            cleanup.CheckpointArtifact(102, 202, 3, 222),
+        ]
+        with mock.patch.object(cleanup, "verify_healthy_release", return_value=BUILD_SHA),              mock.patch.object(cleanup, "find_version_checkpoints", return_value=items),              mock.patch.object(cleanup, "delete_checkpoint", side_effect=["deleted:101", "deleted:102"]) as delete:
+            results, total = cleanup.cleanup_released_version(REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False)
+        self.assertEqual(delete.call_count, 2)
+        self.assertEqual(results, ["deleted:101", "deleted:102"])
+        self.assertEqual(total, 333)
+
     def test_artifact_pagination_is_bounded(self):
         with mock.patch.object(
             cleanup,

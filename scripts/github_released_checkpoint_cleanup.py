@@ -249,9 +249,11 @@ def cleanup_released_version(
     results: list[str] = []
     for item in candidates:
         if dry_run:
-            results.append(f"dry-run:{item.artifact_id}:run={item.run_id}:stage={item.stage}:bytes={item.size_bytes}")
+            line = f"dry-run:{item.artifact_id}:run={item.run_id}:stage={item.stage}:bytes={item.size_bytes}"
         else:
-            results.append(delete_checkpoint(repository, item))
+            line = delete_checkpoint(repository, item)
+        print(line, flush=True)
+        results.append(line)
     return results, total_bytes
 
 
@@ -273,8 +275,6 @@ def main() -> int:
         )
     except CleanupError as exc:
         parser.error(str(exc))
-    for line in results:
-        print(line)
     print(f"checkpoint_count={len(results)}")
     print(f"checkpoint_bytes={total_bytes}")
     return 0
