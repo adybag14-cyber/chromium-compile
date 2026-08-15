@@ -428,7 +428,7 @@ checkpoint_bundle_is_usable() {
     return 1
   fi
   local archive_validation_status=0
-  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+  bounded_checkpoint_archive \
       python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" \
         "${archive}" --stats-file "${archive_stats}" || archive_validation_status=$?
   if [ "${archive_validation_status}" -ne 0 ]; then
@@ -827,7 +827,7 @@ create_out_checkpoint() {
     "${OUT_DIR}/.ninja_deps" 2>/dev/null || true
 
   local archive_status=0
-  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" tar \
+  bounded_checkpoint_archive tar \
     --format=posix \
     --pax-option='delete=atime,delete=ctime' \
     -C "${CHROMIUM_SRC}/out" \
@@ -857,7 +857,7 @@ create_out_checkpoint() {
 
   # Validate producer output with the same streaming archive contract used by consumers.
   local validator_status=0
-  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+  bounded_checkpoint_archive \
     python3 "${WORKSPACE}/scripts/validate_checkpoint_archive.py" \
       "${CHECKPOINT_ARCHIVE}" --stats-file "${CHECKPOINT_DIR}/checkpoint-archive-stats.json" \
     || validator_status=$?
@@ -872,7 +872,7 @@ create_out_checkpoint() {
   fi
 
   local compression_status=0
-  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" \
+  bounded_checkpoint_archive \
     zstd -q -t "${CHECKPOINT_ARCHIVE}" || compression_status=$?
   if [ "${compression_status}" -ne 0 ]; then
     CHECKPOINT_CREATE_FAILURE_CLASS="$(classify_prepare_command_status "${compression_status}" infrastructure)"

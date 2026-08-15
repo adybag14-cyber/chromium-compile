@@ -24,6 +24,16 @@ CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS="${CHROMIUM_I686_CHECKPOINT_ARC
 CHROMIUM_I686_GH_TIMEOUT_SECONDS="${CHROMIUM_I686_GH_TIMEOUT_SECONDS:-600}"
 CHROMIUM_I686_LDD_TIMEOUT_SECONDS="${CHROMIUM_I686_LDD_TIMEOUT_SECONDS:-15}"
 CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS="${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS:-60}"
+CHROMIUM_I686_HARD_MAX_EXTERNAL_TIMEOUT_SECONDS=3600
+CHROMIUM_I686_HARD_MAX_REMOVE_TIMEOUT_SECONDS=900
+CHROMIUM_I686_HARD_MAX_SYSTEM_CLEANUP_TIMEOUT_SECONDS=600
+CHROMIUM_I686_HARD_MAX_SWAP_TIMEOUT_SECONDS=600
+CHROMIUM_I686_HARD_MAX_GH_TIMEOUT_SECONDS=1200
+CHROMIUM_I686_HARD_MAX_LDD_TIMEOUT_SECONDS=60
+CHROMIUM_I686_HARD_MAX_RUNTIME_SMOKE_TIMEOUT_SECONDS=300
+CHROMIUM_I686_HARD_MAX_DISCOVERY_TIMEOUT_SECONDS=600
+CHROMIUM_I686_HARD_MAX_APT_FILE_SEARCH_TIMEOUT_SECONDS=60
+CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS=1800
 CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB="${CHROMIUM_I686_MAX_RELEASE_ARTIFACT_GIB:-4}"
 CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB="${CHROMIUM_I686_MAX_CHECKPOINT_ARTIFACT_GIB:-8}"
 CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB="${CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB:-16}"
@@ -48,10 +58,37 @@ export CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB CHROMIUM_I686_MAX_RELEASE_MEMBERS
 export CHROMIUM_I686_MAX_SOURCE_UNPACKED_GIB CHROMIUM_I686_MAX_SOURCE_MEMBERS CHROMIUM_I686_MAX_SOURCE_ARCHIVE_GIB
 
 
+validate_timeout_seconds() {
+  local value="${1:?timeout value is required}"
+  local name="${2:?timeout variable name is required}"
+  local hard_max="${3:?timeout hard maximum is required}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,4}$ ]] || [ "${value}" -gt "${hard_max}" ]; then
+    echo "::error::${name} must be a positive integer no greater than ${hard_max} seconds." >&2
+    return 1
+  fi
+}
+
 bounded_external() {
   local seconds="${1:?timeout seconds are required}"
   shift
+  validate_timeout_seconds \
+    "${seconds}" bounded_external_timeout \
+    "${CHROMIUM_I686_HARD_MAX_EXTERNAL_TIMEOUT_SECONDS}" || return 125
   timeout -k 30s "${seconds}s" "$@"
+}
+
+bounded_checkpoint_archive() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" || return 125
+  bounded_external "${CHROMIUM_I686_CHECKPOINT_ARCHIVE_TIMEOUT_SECONDS}" "$@"
+}
+
+bounded_discovery() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}" CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_DISCOVERY_TIMEOUT_SECONDS}" || return 125
+  bounded_external "${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}" "$@"
 }
 
 # Hard ceiling for extraction/restore reserve knobs. Values are validated as
@@ -128,14 +165,23 @@ validate_job_started_at() {
 }
 
 bounded_gh() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_GH_TIMEOUT_SECONDS}" CHROMIUM_I686_GH_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_GH_TIMEOUT_SECONDS}" || return 125
   bounded_external "${CHROMIUM_I686_GH_TIMEOUT_SECONDS}" gh "$@"
 }
 
 bounded_rm_rf() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS}" CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_REMOVE_TIMEOUT_SECONDS}" || return 125
   timeout -k 15s "${CHROMIUM_I686_REMOVE_TIMEOUT_SECONDS}s" rm -rf -- "$@"
 }
 
 bounded_sudo_rm_rf() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS}" CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_SYSTEM_CLEANUP_TIMEOUT_SECONDS}" || return 125
   timeout -k 15s "${CHROMIUM_I686_SYSTEM_CLEANUP_TIMEOUT_SECONDS}s" sudo rm -rf -- "$@"
 }
 
@@ -157,6 +203,9 @@ maximize_runner_disk_space() {
 }
 
 ensure_swap() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_SWAP_TIMEOUT_SECONDS}" CHROMIUM_I686_SWAP_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_SWAP_TIMEOUT_SECONDS}" || return 1
   if swapon --show | grep -q '/swapfile'; then
     echo "Swap already enabled"
     swapon --show
@@ -486,6 +535,9 @@ guess_i386_packages_for_soname() {
 }
 
 ensure_apt_file_i386_metadata() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}" CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_DISCOVERY_TIMEOUT_SECONDS}" || return 1
   local marker="${RUNNER_TEMP:-/tmp}/chromium-i686-apt-file-i386-ready"
   if [ -s "${marker}" ]; then
     return 0
@@ -509,6 +561,9 @@ ensure_apt_file_i386_metadata() {
 }
 
 apt_file_search_i386() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS}" CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_APT_FILE_SEARCH_TIMEOUT_SECONDS}" || return 125
   local path="${1:?path is required}"
   timeout -k 5s "${CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS}s" \
     apt-file --filter-origins Ubuntu -a i386 -l -F search "${path}" 2>/dev/null
@@ -692,6 +747,9 @@ is_i386_host_executable() {
 }
 
 bounded_ldd() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_LDD_TIMEOUT_SECONDS}" CHROMIUM_I686_LDD_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_LDD_TIMEOUT_SECONDS}" || return 125
   timeout -k 3s "${CHROMIUM_I686_LDD_TIMEOUT_SECONDS}s" ldd "$@"
 }
 
@@ -1403,6 +1461,9 @@ validate_chromium_critical_source_identity() {
 }
 
 prepare_chromium_source() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_EXTERNAL_TIMEOUT_SECONDS}" || return 1
   local version="${1:?version is required}"
   local cache_dir="${WORKSPACE}/.chromium-source-cache"
   local tarball="${cache_dir}/chromium-${version}.tar.xz"
@@ -2058,6 +2119,9 @@ classify_runtime_smoke_status() {
 }
 
 smoke_test_i686_runtime_bundle() {
+  validate_timeout_seconds \
+    "${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS}" CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_RUNTIME_SMOKE_TIMEOUT_SECONDS}" || return 1
   local root="${1:?Runtime bundle root is required}"
   local version="${2:?Chromium version is required}"
   CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS=deterministic_build
@@ -2199,7 +2263,7 @@ package_chromium_i686() {
   local runtime_list="${WORKSPACE}/chromium-${version}-linux-i686-runtime-files.txt"
 
   local runtime_status=0
-  bounded_external "${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}" \
+  bounded_discovery \
     python3 "${WORKSPACE}/scripts/chromium_linux_runtime.py" \
       --source-root "${CHROMIUM_SRC}" --out-dir "${OUT_DIR}" --output-list "${runtime_list}" \
       --render-wrapper || runtime_status=$?
