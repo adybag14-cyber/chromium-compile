@@ -9,9 +9,12 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 SOURCE_BUCKET = "chromium-browser-official"
+GCS_METADATA_HOST = "storage.googleapis.com"
+GCS_DOWNLOAD_HOST = "commondatastorage.googleapis.com"
 SOURCE_DOWNLOAD_TEMPLATE = (
     "https://commondatastorage.googleapis.com/chromium-browser-official/"
     "chromium-{version}.tar.xz"
@@ -32,9 +35,27 @@ def source_download_url(version: str) -> str:
     return SOURCE_DOWNLOAD_TEMPLATE.format(version=validate_version(version))
 
 
+def source_metadata_url(version: str) -> str:
+    return SOURCE_METADATA_TEMPLATE.format(version=validate_version(version))
+
+
+def validate_effective_https_host(url: str, expected_host: str) -> None:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != expected_host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port not in (None, 443)
+    ):
+        raise ValueError(
+            f"Refusing redirected source trust endpoint {url!r}; expected https://{expected_host}/"
+        )
+
+
 def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
     version = validate_version(version)
-    metadata_url = SOURCE_METADATA_TEMPLATE.format(version=version)
+    metadata_url = source_metadata_url(version)
     try:
         result = subprocess.run(
             [
@@ -43,10 +64,16 @@ def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
                 "--silent",
                 "--show-error",
                 "--location",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
                 "--connect-timeout",
                 "20",
                 "--max-time",
                 str(timeout),
+                "--write-out",
+                "\n%{url_effective}",
                 metadata_url,
             ],
             check=False,
@@ -61,7 +88,12 @@ def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
         detail = (result.stderr or result.stdout or "curl failed").strip()
         raise ValueError(f"Could not read Chromium {version} GCS metadata: {detail}")
     try:
-        payload = json.loads(result.stdout)
+        payload_text, effective_url = result.stdout.rsplit("\n", 1)
+    except ValueError as exc:
+        raise ValueError(f"GCS metadata response omitted the effective URL for Chromium {version}") from exc
+    validate_effective_https_host(effective_url.strip(), GCS_METADATA_HOST)
+    try:
+        payload = json.loads(payload_text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"GCS returned invalid metadata JSON for Chromium {version}") from exc
     if payload.get("bucket") != SOURCE_BUCKET:

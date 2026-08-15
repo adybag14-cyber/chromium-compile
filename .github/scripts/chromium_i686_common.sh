@@ -883,12 +883,24 @@ chromium_depot_tools_revision() {
 resolve_latest_version() {
   python3 - <<'PY'
 import json
-import sys
 import urllib.request
+from urllib.parse import urlsplit
 
 url = "https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions"
 try:
     with urllib.request.urlopen(url, timeout=60) as response:
+        effective = response.geturl()
+        parsed = urlsplit(effective)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "versionhistory.googleapis.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            raise RuntimeError(
+                f"version-history request escaped trusted host: {effective!r}"
+            )
         data = json.load(response)
 except Exception as exc:
     raise SystemExit(f"Failed to resolve latest Chromium version: {exc}")
@@ -928,9 +940,32 @@ validate_chromium_source_tarball() {
   fi
 }
 
+validate_effective_https_host() {
+  local url="${1:?effective URL is required}"
+  local expected_host="${2:?expected host is required}"
+  EFFECTIVE_URL="${url}" EXPECTED_HOST="${expected_host}" python3 - <<'PY'
+import os
+from urllib.parse import urlsplit
+
+url = os.environ["EFFECTIVE_URL"]
+expected = os.environ["EXPECTED_HOST"]
+parsed = urlsplit(url)
+if (
+    parsed.scheme != "https"
+    or parsed.hostname != expected
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.port not in (None, 443)
+):
+    raise SystemExit(
+        f"Refusing redirected trust endpoint {url!r}; expected https://{expected}/"
+    )
+PY
+}
+
 validate_chromium_critical_source_identity() {
   local version="${1:?version is required}"
-  local rel encoded decoded local_sha remote_sha
+  local rel encoded decoded local_sha remote_sha effective_url
   local -a critical_files=(
     DEPS
     chrome/VERSION
@@ -940,11 +975,17 @@ validate_chromium_critical_source_identity() {
   for rel in "${critical_files[@]}"; do
     encoded="${RUNNER_TEMP:-${WORKSPACE}}/chromium-${version}-${rel//\//_}.b64"
     decoded="${encoded%.b64}.upstream"
-    if ! curl --fail --location --retry 4 --retry-all-errors --retry-delay 5 \
+    if ! effective_url="$(curl --fail --location --retry 4 --retry-all-errors --retry-delay 5 \
+        --proto '=https' --proto-redir '=https' \
         --connect-timeout 20 --max-time 120 \
+        --write-out '%{url_effective}' \
         "https://chromium.googlesource.com/chromium/src/+/refs/tags/${version}/${rel}?format=TEXT" \
-        -o "${encoded}"; then
+        -o "${encoded}")"; then
       echo "::error::Could not fetch authoritative Chromium ${version} ${rel} for critical-source identity validation."
+      return 1
+    fi
+    if ! validate_effective_https_host "${effective_url}" chromium.googlesource.com; then
+      echo "::error::Gitiles critical-source request escaped the trusted Chromium host."
       return 1
     fi
     if ! base64 --decode "${encoded}" > "${decoded}"; then
@@ -972,6 +1013,7 @@ prepare_chromium_source() {
   local marker="${cache_dir}/chromium-${version}.validated.json"
   local trusted_marker=false
   local source_sha=""
+  local effective_source_url=""
   bounded_rm_rf "${CHROMIUM_SRC}"
   mkdir -p "${CHROMIUM_SRC}" "${cache_dir}"
 
@@ -1003,9 +1045,16 @@ prepare_chromium_source() {
   if [ ! -s "${tarball}" ]; then
     echo "Downloading Chromium ${version} source tarball..."
     rm -f "${tarball}.partial" "${metadata}"
-    if ! curl --fail --location --retry 5 --retry-all-errors --retry-delay 10 \
+    if ! effective_source_url="$(curl --fail --location --retry 5 --retry-all-errors --retry-delay 10 \
+        --proto '=https' --proto-redir '=https' \
         --connect-timeout 30 --max-time "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" \
-        "${source_url}" -o "${tarball}.partial"; then
+        --write-out '%{url_effective}' \
+        "${source_url}" -o "${tarball}.partial")"; then
+      rm -f "${tarball}.partial"
+      return 1
+    fi
+    if ! validate_effective_https_host "${effective_source_url}" commondatastorage.googleapis.com; then
+      echo "::error::Chromium source download escaped the trusted GCS download host."
       rm -f "${tarball}.partial"
       return 1
     fi

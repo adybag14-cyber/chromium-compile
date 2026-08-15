@@ -496,10 +496,19 @@ class PipelineHardeningTests(unittest.TestCase):
 
     def test_source_identity_is_cross_checked_against_authoritative_tag(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
         self.assertIn("validate_chromium_critical_source_identity()", common)
         self.assertIn("chromium.googlesource.com/chromium/src/+/refs/tags/${version}", common)
         self.assertIn("chrome/installer/linux/BUILD.gn", common)
         self.assertIn("critical source files against the authoritative Gitiles tag", common)
+        self.assertIn("validate_effective_https_host()", common)
+        self.assertIn("--proto '=https' --proto-redir '=https'", common)
+        self.assertIn("chromium.googlesource.com", common)
+        self.assertIn("commondatastorage.googleapis.com", common)
+        self.assertIn("response.geturl()", common)
+        self.assertIn("version-history request escaped trusted host", common)
+        self.assertIn('validate_effective_https_host "${effective_url}" chromium.googlesource.com', validation)
+        self.assertIn("bash tests/test_source_trust_hosts.sh", validation)
 
     def test_gn_pin_is_reasserted_even_if_binary_already_exists(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")

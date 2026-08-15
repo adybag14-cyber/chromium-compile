@@ -29,13 +29,16 @@ class ChromiumSourceObjectTests(unittest.TestCase):
 
     def test_fetch_metadata_uses_fixed_gcs_endpoint_and_strict_version(self):
         data=b"abc"
-        result=subprocess.CompletedProcess(["curl"],0,json.dumps(self._gcs_payload(data)),"")
+        result=subprocess.CompletedProcess(["curl"],0,json.dumps(self._gcs_payload(data))+"\n"+source_object.source_metadata_url(VERSION),"")
         with mock.patch.object(source_object.subprocess,"run",return_value=result) as run:
             metadata=source_object.fetch_metadata(VERSION)
         args=run.call_args.args[0]
         self.assertEqual(args[0],"curl")
         self.assertIn("https://storage.googleapis.com/storage/v1/b/chromium-browser-official/o/",args[-1])
         self.assertIn(f"chromium-{VERSION}.tar.xz",args[-1])
+        self.assertIn("--proto", args)
+        self.assertIn("--proto-redir", args)
+        self.assertIn("\n%{url_effective}", args)
         self.assertEqual(metadata["content_length"],len(data))
         for bad in ("../etc/passwd","151","151.0.0.1?x=y","https://evil.invalid/"):
             with self.subTest(bad=bad), self.assertRaises(ValueError): source_object.fetch_metadata(bad)
@@ -44,8 +47,28 @@ class ChromiumSourceObjectTests(unittest.TestCase):
         data=b"abc"
         for key,value in (("bucket","other"),("name","other.tar.xz"),("md5Hash","not-base64")):
             payload=self._gcs_payload(data); payload[key]=value
-            result=subprocess.CompletedProcess(["curl"],0,json.dumps(payload),"")
+            result=subprocess.CompletedProcess(["curl"],0,json.dumps(payload)+"\n"+source_object.source_metadata_url(VERSION),"")
             with mock.patch.object(source_object.subprocess,"run",return_value=result), self.subTest(key=key), self.assertRaises(ValueError): source_object.fetch_metadata(VERSION)
+
+    def test_fetch_metadata_rejects_untrusted_effective_host(self):
+        data=b"abc"
+        stdout=json.dumps(self._gcs_payload(data))+"\nhttps://evil.invalid/storage/v1/object"
+        result=subprocess.CompletedProcess(["curl"],0,stdout,"")
+        with mock.patch.object(source_object.subprocess,"run",return_value=result), self.assertRaises(ValueError):
+            source_object.fetch_metadata(VERSION)
+
+    def test_effective_host_validation_rejects_credentials_ports_and_http(self):
+        for url in (
+            "http://storage.googleapis.com/storage/v1/x",
+            "https://evil.invalid/storage/v1/x",
+            "https://user@storage.googleapis.com/storage/v1/x",
+            "https://storage.googleapis.com:444/storage/v1/x",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                source_object.validate_effective_https_host(url, source_object.GCS_METADATA_HOST)
+        source_object.validate_effective_https_host(
+            "https://storage.googleapis.com/storage/v1/x", source_object.GCS_METADATA_HOST
+        )
 
     def test_fetch_metadata_curl_failure_is_closed(self):
         result=subprocess.CompletedProcess(["curl"],22,"","404")
