@@ -538,8 +538,8 @@ capture_ldd_output() {
     status=$?
   fi
   printf -v "${output_name}" '%s' "${output}"
-  I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
-  echo "::error::ldd failed or timed out for generated ELF32 tool ${binary} (status ${status}); refusing an unbounded runtime probe."
+  I386_RUNTIME_REPAIR_FAILURE_CLASS="$(classify_prepare_command_status "${status}" deterministic_build)"
+  echo "::error::ldd failed or timed out for ELF32 executable ${binary} (status ${status}); refusing an unbounded runtime probe."
   return 1
 }
 
