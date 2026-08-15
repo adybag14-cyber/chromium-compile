@@ -29,6 +29,31 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("control_fail()", control)
         self.assertIn("failure_class=deterministic_build", control)
 
+    def test_checkpoint_lineage_retains_two_generations_and_prunes_only_superseded_runs(self):
+        workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
+        self.assertIn("older_checkpoint_run_id:", workflow)
+        self.assertIn('--input "older_checkpoint_run_id=${FALLBACK_RUN_ID}"', workflow)
+        self.assertIn('OLDER_RUN_ID: ${{ inputs.older_checkpoint_run_id }}', workflow)
+        self.assertIn('trusted_older_run_id=""', workflow)
+        self.assertIn('if [ "${PARENT_ACTOR}" = "github-actions[bot]" ]; then', workflow)
+        self.assertIn('--input "older_checkpoint_run_id=${trusted_older_run_id}"', workflow)
+        self.assertIn("Prune superseded checkpoint generations", workflow)
+        self.assertIn("scripts/github_checkpoint_prune.py", workflow)
+        self.assertIn('--protect-run-id "${GITHUB_RUN_ID}"', workflow)
+        self.assertIn("if: ${{ github.actor == 'github-actions[bot]' }}", workflow)
+        self.assertIn('SUPERSEDED_OLDER_RUN_ID: ${{ inputs.older_checkpoint_run_id }}', workflow)
+        self.assertIn('prune_run "${SUPERSEDED_OLDER_RUN_ID}" "$((CURRENT_STAGE - 2))" older', workflow)
+        self.assertNotIn('prune_run "${FALLBACK_RUN_ID}"', workflow)
+        self.assertIn("Prune superseded same-stage recovery checkpoint", workflow)
+        self.assertIn("prune_completed_checkpoint_history:", workflow)
+        cleanup = workflow[workflow.index("  prune_completed_checkpoint_history:"):workflow.index("  report_terminal_failure:")]
+        self.assertIn("name: Prune superseded completed-build checkpoints\n    continue-on-error: true", cleanup)
+        self.assertIn("timeout-minutes: 3", cleanup)
+        self.assertIn("continue-on-error: true", cleanup)
+        self.assertIn("actions: write", cleanup)
+        self.assertIn("needs.build.outputs.complete == 'true'", cleanup)
+        self.assertIn("github.actor == 'github-actions[bot]'", cleanup)
+
     def test_terminal_build_failure_has_same_run_issue_mirror(self):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         self.assertIn("report_terminal_failure:", workflow)

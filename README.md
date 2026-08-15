@@ -187,6 +187,7 @@ stage:                         1
 version:                       exact pinned version
 preferred_checkpoint_run_id:  empty
 fallback_checkpoint_run_id:   empty
+older_checkpoint_run_id:      empty
 retry_count:                   0
 ```
 
@@ -197,6 +198,7 @@ stage:                         failed stage number
 version:                       identical pinned version
 preferred_checkpoint_run_id:  run containing that stage checkpoint
 fallback_checkpoint_run_id:   previous-stage run when available
+older_checkpoint_run_id:      leave empty for a manual recovery; automatic lineage manages this
 retry_count:                   1 or 2
 ```
 
