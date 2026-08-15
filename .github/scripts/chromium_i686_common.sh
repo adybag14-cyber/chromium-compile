@@ -770,6 +770,36 @@ write_stage_summary() {
   } >> "${summary}"
 }
 
+verify_depot_tools_bootstrap() {
+  local marker="${DEPOT_TOOLS}/python3_bin_reldir.txt"
+  if [ ! -s "${marker}" ]; then
+    echo "::error::Pinned depot_tools bootstrap did not create ${marker}."
+    return 1
+  fi
+
+  local python_rel python_dir python_bin
+  python_rel="$(tr -d '\r\n' < "${marker}")"
+  if [ -z "${python_rel}" ] || [[ "${python_rel}" = /* ]] || [[ "${python_rel}" == *".."* ]] || [[ "${python_rel}" == *\\* ]]; then
+    echo "::error::Pinned depot_tools wrote an unsafe Python bootstrap path: ${python_rel:-<empty>}"
+    return 1
+  fi
+  python_dir="${DEPOT_TOOLS}/${python_rel}"
+  python_bin="${python_dir}/python3"
+  if [ ! -x "${python_bin}" ]; then
+    echo "::error::Pinned depot_tools Python bootstrap is incomplete: ${python_bin} is not executable."
+    return 1
+  fi
+
+  # Exercise the exact wrapper autoninja uses, not merely the system Python.
+  if ! bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
+      "${DEPOT_TOOLS}/python-bin/python3" -c \
+      'import pathlib,sys; print(f"depot_tools bootstrap Python: {pathlib.Path(sys.executable).resolve()}")'; then
+    echo "::error::Pinned depot_tools Python wrapper is not executable after bootstrap."
+    return 1
+  fi
+  echo "Pinned depot_tools Python bootstrap marker: ${python_rel}"
+}
+
 install_depot_tools() {
   local deps_file="${CHROMIUM_SRC}/DEPS"
   test -s "${deps_file}"
@@ -785,7 +815,8 @@ install_depot_tools() {
   git -C "${DEPOT_TOOLS}" init -q
   git -C "${DEPOT_TOOLS}" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
   echo "Fetching Chromium-pinned depot_tools revision ${revision}."
-  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}"     git -C "${DEPOT_TOOLS}" fetch --depth=1 origin "${revision}"
+  bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" \
+    git -C "${DEPOT_TOOLS}" fetch --depth=1 origin "${revision}"
   git -C "${DEPOT_TOOLS}" checkout -q --detach FETCH_HEAD
   test "$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" = "${revision}"
 
@@ -795,8 +826,22 @@ install_depot_tools() {
   echo "${DEPOT_TOOLS}/.cipd_bin" >> "${GITHUB_PATH}"
   export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
 
-  # Bootstrap the CIPD client without allowing depot_tools to roll itself.
+  # Bootstrap all tools required by this exact checkout without updating the
+  # repository. `ensure_bootstrap` is depot_tools' supported pinned-checkout path;
+  # unlike update_depot_tools it does not roll the Git revision.
+  if [ ! -x "${DEPOT_TOOLS}/ensure_bootstrap" ]; then
+    echo "::error::Pinned depot_tools revision ${revision} lacks executable ensure_bootstrap."
+    return 1
+  fi
+  echo "Bootstrapping Chromium-pinned depot_tools revision ${revision} without self-update."
+  bounded_external "${CHROMIUM_I686_TOOLCHAIN_TIMEOUT_SECONDS}" \
+    env DEPOT_TOOLS_UPDATE=0 "${DEPOT_TOOLS}/ensure_bootstrap"
+
+  # Keep the lightweight CIPD identity probe, but only after the full bootstrap
+  # that autoninja/python-bin actually requires.
   bounded_external "${CHROMIUM_I686_NETWORK_TIMEOUT_SECONDS}" "${DEPOT_TOOLS}/cipd" version
+  verify_depot_tools_bootstrap
+  test "$(git -C "${DEPOT_TOOLS}" rev-parse HEAD)" = "${revision}"
   echo "Pinned depot_tools revision: $(git -C "${DEPOT_TOOLS}" rev-parse HEAD)"
 }
 
