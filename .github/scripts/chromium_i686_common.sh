@@ -146,8 +146,10 @@ maximize_runner_disk_space() {
   bounded_sudo_rm_rf /usr/local/lib/android || echo "::warning::Timed out removing /usr/local/lib/android; later disk guards will decide whether the runner is usable."
   bounded_sudo_rm_rf /opt/ghc || echo "::warning::Timed out removing /opt/ghc; later disk guards will decide whether the runner is usable."
   bounded_sudo_rm_rf /opt/hostedtoolcache/CodeQL || echo "::warning::Timed out removing CodeQL cache; later disk guards will decide whether the runner is usable."
-  bounded_sudo_apt_get purge -y '^mysql-' '^mongodb-' '^postgresql-' '^dotnet-' '^android-sdk-' || true
-  bounded_sudo_apt_get autoremove -y || true
+  # Keep runner cleanup non-mutating at the package-manager layer. Direct removal of
+  # expendable SDK/tool trees provides the meaningful disk recovery; optional
+  # apt purge/autoremove adds little space while creating dpkg/mirror failure state
+  # before the required Chromium dependency installation.
   timeout -k 10s 60s sudo apt-get clean || true
   ensure_swap
   echo "=== Disk space AFTER cleanup ==="

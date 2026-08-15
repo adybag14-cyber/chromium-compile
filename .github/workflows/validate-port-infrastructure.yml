@@ -111,6 +111,12 @@ jobs:
           set -euo pipefail
           bash tests/test_apt_mirror_resilience.sh
 
+      - name: Exercise non-mutating runner cleanup contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_runner_cleanup_contract.sh
+
       - name: Exercise source archive stats and capacity contract
         shell: bash
         run: |
