@@ -105,6 +105,12 @@ jobs:
           set -euo pipefail
           bash tests/test_i386_runtime_repair.sh
 
+      - name: Exercise APT mirror resilience contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/test_apt_mirror_resilience.sh
+
       - name: Exercise source archive stats and capacity contract
         shell: bash
         run: |
