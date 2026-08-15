@@ -111,6 +111,10 @@ runs:
 
         checkpoint_restored=false
         resume_archive=""
+        resume_producer_sha=""
+        resume_producer_stage=""
+        resume_producer_run_id=""
+        resume_producer_run_attempt=""
 
         if [ -n "${{ inputs.preferred-checkpoint-artifact }}" ]; then
           preferred_rc=0
@@ -122,6 +126,7 @@ runs:
           if [ "${preferred_rc}" -eq 0 ]; then
             preferred_sha="${CHECKPOINT_PRODUCER_SHA}"
             preferred_stage="${CHECKPOINT_PRODUCER_STAGE}"
+            preferred_run_attempt="${CHECKPOINT_PRODUCER_RUN_ATTEMPT}"
             echo "Preferred checkpoint provenance accepted; downloading trusted artifact on demand."
             mkdir -p "${GITHUB_WORKSPACE}/resume/preferred"
             if bounded_gh run download "${{ inputs.preferred-checkpoint-run-id }}" \
@@ -131,8 +136,13 @@ runs:
               preferred_candidate="${GITHUB_WORKSPACE}/resume/preferred/out-Release_x86.tar.zst"
               if [ -s "${preferred_candidate}" ] && checkpoint_bundle_is_usable \
                   "${preferred_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}" \
-                  "${preferred_sha}" "${preferred_stage}" "${{ inputs.preferred-checkpoint-run-id }}"; then
+                  "${preferred_sha}" "${preferred_stage}" "${{ inputs.preferred-checkpoint-run-id }}" \
+                  "${preferred_run_attempt}"; then
                 resume_archive="${preferred_candidate}"
+                resume_producer_sha="${preferred_sha}"
+                resume_producer_stage="${preferred_stage}"
+                resume_producer_run_id="${{ inputs.preferred-checkpoint-run-id }}"
+                resume_producer_run_attempt="${preferred_run_attempt}"
               else
                 echo "::warning::Rejecting unusable preferred checkpoint bundle: ${preferred_candidate}"
                 bounded_rm_rf "${GITHUB_WORKSPACE}/resume/preferred" || true
@@ -160,6 +170,7 @@ runs:
           if [ "${fallback_rc}" -eq 0 ]; then
             fallback_sha="${CHECKPOINT_PRODUCER_SHA}"
             fallback_stage="${CHECKPOINT_PRODUCER_STAGE}"
+            fallback_run_attempt="${CHECKPOINT_PRODUCER_RUN_ATTEMPT}"
             echo "Fallback provenance accepted; downloading checkpoint on demand."
             mkdir -p "${GITHUB_WORKSPACE}/resume/fallback"
             if bounded_gh run download "${{ inputs.fallback-checkpoint-run-id }}" \
@@ -169,8 +180,13 @@ runs:
               fallback_candidate="${GITHUB_WORKSPACE}/resume/fallback/out-Release_x86.tar.zst"
               if [ -s "${fallback_candidate}" ] && checkpoint_bundle_is_usable \
                   "${fallback_candidate}" "${{ inputs.version }}" "${{ inputs.stage }}" \
-                  "${fallback_sha}" "${fallback_stage}" "${{ inputs.fallback-checkpoint-run-id }}"; then
+                  "${fallback_sha}" "${fallback_stage}" "${{ inputs.fallback-checkpoint-run-id }}" \
+                  "${fallback_run_attempt}"; then
                 resume_archive="${fallback_candidate}"
+                resume_producer_sha="${fallback_sha}"
+                resume_producer_stage="${fallback_stage}"
+                resume_producer_run_id="${{ inputs.fallback-checkpoint-run-id }}"
+                resume_producer_run_attempt="${fallback_run_attempt}"
               else
                 echo "::warning::Rejecting unusable fallback checkpoint bundle: ${fallback_candidate}"
               fi
@@ -187,7 +203,10 @@ runs:
         fi
 
         if [ -n "${resume_archive}" ]; then
-          restore_out_checkpoint "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true
+          restore_out_checkpoint \
+            "${resume_archive}" "${{ inputs.version }}" "${{ inputs.stage }}" true \
+            "${resume_producer_sha}" "${resume_producer_stage}" \
+            "${resume_producer_run_id}" "${resume_producer_run_attempt}"
           checkpoint_restored=true
           echo "Checkpoint restored from ${resume_archive}"
         else

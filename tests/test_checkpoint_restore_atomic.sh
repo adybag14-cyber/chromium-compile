@@ -48,6 +48,16 @@ bounded_external() {
   command "$@"
 }
 
+# Caller discipline is not sufficient: the fast path must have matching validation state.
+clear_checkpoint_validation_state
+set +e
+restore_out_checkpoint "${bad_archive}" 151.0.7922.108 3 true >/dev/null 2>&1
+unvalidated_status=$?
+set -e
+[ "${unvalidated_status}" -ne 0 ]
+[ "$(cat "${OUT_DIR}/old.marker")" = "old-state" ]
+
+mark_checkpoint_bundle_validated "${bad_archive}" 151.0.7922.108 3
 set +e
 restore_out_checkpoint "${bad_archive}" 151.0.7922.108 3 true >/dev/null 2>&1
 status=$?
@@ -57,6 +67,7 @@ set -e
 [ "$(cat "${OUT_DIR}/build.ninja")" = "old-ninja" ]
 
 EXTRACT_MODE=success
+mark_checkpoint_bundle_validated "${good_archive}" 151.0.7922.108 3
 restore_out_checkpoint "${good_archive}" 151.0.7922.108 3 true >/dev/null
 [ ! -e "${OUT_DIR}/old.marker" ]
 [ "$(cat "${OUT_DIR}/build.ninja")" = "new-ninja" ]
