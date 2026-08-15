@@ -443,6 +443,10 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("--headless", common)
         self.assertIn("--no-sandbox", common)
         self.assertIn("--disable-background-networking", common)
+        self.assertIn("gpu_runtime_objects=(libEGL.so libGLESv2.so)", common)
+        self.assertIn("libvk_swiftshader.so", common)
+        self.assertIn("Avoid broad shared-object scanning", common)
+        self.assertIn("Required packaged GPU runtime object is missing", common)
         self.assertIn('--dump-dom "file://${smoke_html}"', common)
         package = common[common.index("package_chromium_i686()"):]
         self.assertLess(package.index("validate_i686_runtime_bundle"), package.index("smoke_test_i686_runtime_bundle"))
@@ -701,6 +705,22 @@ class PipelineHardeningTests(unittest.TestCase):
         deps = common[common.index("NATIVE_BUILD_PACKAGES=(") : common.index("I386_BASELINE_SONAMES=(")]
         self.assertIn("file binutils", deps)
         self.assertIn('bounded_sudo_apt_get install -y "${NATIVE_BUILD_PACKAGES[@]}"', deps)
+
+    def test_required_runtime_executable_modes_are_preserved(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        runtime_source = (ROOT / "scripts" / "chromium_linux_runtime.py").read_text(encoding="utf-8")
+        archive = (ROOT / "scripts" / "validate_release_archive.py").read_text(encoding="utf-8")
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        self.assertIn("REQUIRED_EXECUTABLE_RUNTIME", runtime_source)
+        self.assertIn("REQUIRED_EXECUTABLE_RUNTIME", archive)
+        self.assertIn("member.mode & 0o111", archive)
+        self.assertIn("lack execute permission", archive)
+        self.assertIn("required_executables=(", common)
+        self.assertIn("Required runtime executable is missing execute permission", common)
+        for name in ("chrome", "chrome-wrapper", "chrome_crashpad_handler", "chrome_management_service", "chrome_sandbox"):
+            self.assertIn(name, runtime_source)
+            self.assertIn(name, common)
+        self.assertIn("bash tests/test_runtime_executable_permissions.sh", validation)
 
     def test_runtime_bundle_validates_symlink_containment(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")

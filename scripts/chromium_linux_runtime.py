@@ -18,6 +18,13 @@ REQUIRED_RUNTIME = {
     "resources.pak",
     "locales",
 }
+REQUIRED_EXECUTABLE_RUNTIME = {
+    "chrome",
+    "chrome-wrapper",
+    "chrome_crashpad_handler",
+    "chrome_management_service",
+    "chrome_sandbox",
+}
 EXTRA_IF_PRESENT = {
     "chrome_100_percent.pak",
     "chrome_200_percent.pak",

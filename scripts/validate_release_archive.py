@@ -8,7 +8,7 @@ import os
 import tarfile
 from pathlib import Path, PurePosixPath
 
-from chromium_linux_runtime import REQUIRED_RUNTIME
+from chromium_linux_runtime import REQUIRED_EXECUTABLE_RUNTIME, REQUIRED_RUNTIME
 
 DEFAULT_MAX_MEMBERS = 250_000
 DEFAULT_MAX_UNPACKED_GIB = 8
@@ -44,6 +44,7 @@ def validate_archive(
     max_unpacked_bytes = _positive_limit(max_unpacked_bytes, "max_unpacked_bytes")
     names: set[str] = set()
     nonempty_regular_files: set[str] = set()
+    executable_regular_files: set[str] = set()
     member_count = 0
     unpacked_bytes = 0
 
@@ -82,6 +83,8 @@ def validate_archive(
                 unpacked_bytes += member.size
                 if member.size > 0:
                     nonempty_regular_files.add(normalized)
+                    if member.mode & 0o111:
+                        executable_regular_files.add(normalized)
 
     missing: list[str] = []
     for required in sorted(REQUIRED_RUNTIME):
@@ -92,6 +95,12 @@ def validate_archive(
             missing.append(required)
     if missing:
         raise ValueError("Release archive is missing required runtime paths: " + ", ".join(missing))
+    non_executable = sorted(REQUIRED_EXECUTABLE_RUNTIME - executable_regular_files)
+    if non_executable:
+        raise ValueError(
+            "Release archive required runtime executables lack execute permission: "
+            + ", ".join(non_executable)
+        )
     return {"member_count": member_count, "unpacked_bytes": unpacked_bytes}
 
 
