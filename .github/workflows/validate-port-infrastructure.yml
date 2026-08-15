@@ -73,6 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/test_i386_runtime_repair.sh
+          bash tests/test_system_dependencies.sh
 
       - name: Exercise checkpoint provenance contract
         shell: bash
