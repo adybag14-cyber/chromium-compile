@@ -975,6 +975,7 @@ symbol_level=0
 blink_symbol_level=0
 enable_nacl=false
 is_official_build=false
+dcheck_always_on=false
 use_thin_lto=false
 use_reclient=false
 generate_location_tags=false

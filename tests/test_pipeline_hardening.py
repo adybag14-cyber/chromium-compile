@@ -32,6 +32,13 @@ class PipelineHardeningTests(unittest.TestCase):
             for block in blocks:
                 ast.parse(block)
 
+    def test_release_build_disables_nonofficial_dchecks(self):
+        common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
+        gn_args = common[common.index("chromium_i686_gn_args() {"):common.index("port_config_semantic_files() {")]
+        self.assertIn("is_debug=false", gn_args)
+        self.assertIn("is_official_build=false", gn_args)
+        self.assertIn("dcheck_always_on=false", gn_args)
+        self.assertLess(gn_args.index("is_official_build=false"), gn_args.index("dcheck_always_on=false"))
     def test_port_config_hash_tracks_semantics_not_wrapper_control_flow(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         resume = (ROOT / ".github" / "scripts" / "chromium_i686_resume.sh").read_text(encoding="utf-8")
