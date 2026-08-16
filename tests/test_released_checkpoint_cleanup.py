@@ -163,7 +163,11 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
 
     def test_release_workflow_proof_allows_resumed_release_object_with_current_assets(self):
-        identity = release_identity(published_at="2026-08-16T09:00:00Z")
+        identity = release_identity(
+            published_at="2026-08-16T09:00:00Z",
+            asset_created_at="2026-08-16T09:30:00Z",
+            asset_updated_at="2026-08-16T09:31:00Z",
+        )
         with mock.patch.object(
             cleanup,
             "run_gh",
@@ -189,6 +193,18 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             side_effect=[done(release_workflow_run_payload()), done(release_workflow_jobs_payload())],
         ), self.assertRaises(cleanup.CleanupError):
             cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", replaced)
+
+    def test_release_workflow_proof_rejects_failed_publish_step(self):
+        identity = release_identity()
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            side_effect=[
+                done(release_workflow_run_payload()),
+                done(release_workflow_jobs_payload(publish_step_conclusion="failure")),
+            ],
+        ), self.assertRaisesRegex(cleanup.CleanupError, "publication step did not complete successfully"):
+            cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
 
     def test_release_archive_bytes_cross_bind_package_checksum_and_manifest(self):
         package_name = f"chromium-{VERSION}-linux-i686.tar.xz"
@@ -237,10 +253,13 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             manifest_name: manifest_bytes,
         }
 
+        download_outputs = []
+
         def fake_gh(args, **kwargs):
             if args[:2] == ["release", "download"]:
                 remote_name = args[args.index("--pattern") + 1]
                 output = pathlib.Path(args[args.index("--output") + 1])
+                download_outputs.append((remote_name, output, kwargs.get("timeout")))
                 output.write_bytes(asset_bytes[remote_name])
                 return done()
             raise AssertionError(args)
@@ -250,6 +269,22 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
              mock.patch.object(cleanup, "run_release_archive_validator") as validator:
             cleanup.verify_release_archive_bytes(REPO, VERSION, BUILD_SHA, identity)
         validator.assert_called_once()
+        self.assertEqual(
+            [output.name for _, output, _ in download_outputs],
+            ["release-package.tar.xz", "release-package.sha256", "release-manifest.txt"],
+        )
+        self.assertEqual(len({output.parent for _, output, _ in download_outputs}), 1)
+        self.assertTrue(all(output.name != remote for remote, output, _ in download_outputs))
+        self.assertEqual([timeout for _, _, timeout in download_outputs], [600, 120, 120])
+
+    def test_release_byte_proof_fails_before_download_when_temp_space_is_insufficient(self):
+        identity = release_identity()
+        with mock.patch.object(cleanup, "read_release_identity", return_value=identity), \
+             mock.patch.object(cleanup.shutil, "disk_usage", return_value=mock.Mock(free=1)), \
+             mock.patch.object(cleanup, "run_gh") as gh, \
+             self.assertRaisesRegex(cleanup.CleanupError, "insufficient temporary-disk space"):
+            cleanup.verify_release_archive_bytes(REPO, VERSION, BUILD_SHA, identity)
+        gh.assert_not_called()
 
     def test_archive_completeness_failure_precedes_legacy_manifest_parsing(self):
         package_name = f"chromium-{VERSION}-linux-i686.tar.xz"
@@ -334,7 +369,7 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
     def test_publisher_cleanup_exports_exact_proof_inputs(self):
         workflow = (ROOT / ".github/workflows/publish-i686-release.yml").read_text(encoding="utf-8")
         section = workflow.split("  cleanup_published_checkpoints:\n", 1)[1]
-        self.assertIn("timeout-minutes: 30", section)
+        self.assertIn("timeout-minutes: 40", section)
         self.assertIn("VALIDATED_BUILD_SHA: ${{ needs.validate.outputs.head_sha }}", section)
         self.assertIn("RELEASE_WORKFLOW_RUN_ID: ${{ github.run_id }}", section)
         self.assertIn('--release-workflow-run-id "${RELEASE_WORKFLOW_RUN_ID}"', section)

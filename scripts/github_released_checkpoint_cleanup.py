@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -270,7 +271,19 @@ def verify_release_archive_bytes(
             (checksum_name, checksum),
             (manifest_name, manifest),
         )
+        required_download_bytes = sum(by_name[name].size_bytes for name, _ in downloads)
+        free_download_bytes = shutil.disk_usage(root).free
+        if free_download_bytes < required_download_bytes:
+            raise CleanupError(
+                "insufficient temporary-disk space for immutable release proof: "
+                f"need {required_download_bytes} bytes, have {free_download_bytes} bytes"
+            )
+
+        downloaded_digests: dict[str, str] = {}
         for remote_name, local_path in downloads:
+            # The package is the only large asset. Sidecars should fail quickly rather
+            # than consume the same ten-minute budget as a multi-GiB archive.
+            download_timeout = 600 if remote_name == package_name else 120
             run_gh(
                 [
                     "release",
@@ -283,7 +296,7 @@ def verify_release_archive_bytes(
                     "--output",
                     str(local_path),
                 ],
-                timeout=600,
+                timeout=download_timeout,
             )
             if not local_path.is_file() or local_path.is_symlink():
                 raise CleanupError(
@@ -302,9 +315,10 @@ def verify_release_archive_bytes(
                 raise CleanupError(
                     f"release asset {remote_name} does not match its GitHub SHA-256 digest"
                 )
+            downloaded_digests[remote_name] = actual_digest.lower()
 
         run_release_archive_validator(package)
-        package_sha = _sha256_file(package)
+        package_sha = downloaded_digests[package_name]
         try:
             checksum_text = checksum.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError) as exc:
@@ -420,14 +434,17 @@ def verify_release_workflow_proof(
     step_completed = parse_github_timestamp(publish_step.get("completed_at"), "publish step completed_at")
     if step_completed < step_started:
         raise CleanupError("publish step completion precedes its start")
-    # A transactional retry may resume a release object created by an earlier failed run.
-    # The current assets must still be created/last-updated by this exact successful publish step.
+    # A transactional retry may resume a release object and immutable assets created
+    # by an earlier failed attempt. Current bytes are independently re-downloaded and
+    # cross-bound to the tag, GitHub digests, checksum, manifest, and build SHA, so the
+    # temporal requirement is that no current asset was modified after this successful
+    # publication step completed.
     if identity.published_at > step_completed:
         raise CleanupError("current release publishedAt postdates the supplied successful publish step")
     for asset in identity.assets:
-        if not (step_started <= asset.created_at <= asset.updated_at <= step_completed):
+        if not (asset.created_at <= asset.updated_at <= step_completed):
             raise CleanupError(
-                f"release asset {asset.name} creation/update timestamps are not bound to the supplied publish step"
+                f"release asset {asset.name} creation/update timestamps postdate or contradict the supplied publish proof"
             )
 
 
@@ -443,13 +460,9 @@ def prepare_release_cleanup_proof(
     validate_inputs(repository, version, default_branch, expected_build_sha)
     identity = read_release_identity(repository, version, expected_build_sha)
     verify_release_archive_bytes(repository, version, expected_build_sha, identity)
-    if require_runtime_proof:
-        if not release_workflow_run_id:
-            raise CleanupError("--apply requires a trusted release workflow run ID with successful validate/smoke/publish jobs")
-        verify_release_workflow_proof(
-            repository, version, default_branch, release_workflow_run_id, identity
-        )
-    elif release_workflow_run_id:
+    if require_runtime_proof and not release_workflow_run_id:
+        raise CleanupError("--apply requires a trusted release workflow run ID with successful validate/smoke/publish jobs")
+    if release_workflow_run_id:
         verify_release_workflow_proof(
             repository, version, default_branch, release_workflow_run_id, identity
         )
@@ -622,6 +635,28 @@ def revalidate_release_identity(
         raise CleanupError("release identity changed after immutable-byte proof; cleanup is forbidden")
 
 
+def guard_cleanup_phase(
+    repository: str,
+    version: str,
+    default_branch: str,
+    expected_build_sha: str,
+    *,
+    dry_run: bool,
+    release_identity: ReleaseIdentity | None,
+    phase: str,
+) -> None:
+    validate_inputs(repository, version, default_branch, expected_build_sha)
+    if release_identity is None:
+        if not dry_run:
+            raise CleanupError(
+                f"destructive {phase} cleanup requires a verified immutable release proof"
+            )
+        verify_healthy_release(repository, version, expected_build_sha)
+    else:
+        revalidate_release_identity(repository, version, expected_build_sha, release_identity)
+    ensure_no_active_build_for_version(repository, version, default_branch)
+
+
 def cleanup_released_version(
     repository: str,
     version: str,
@@ -631,20 +666,28 @@ def cleanup_released_version(
     dry_run: bool,
     release_identity: ReleaseIdentity | None = None,
 ) -> tuple[list[str], int]:
-    validate_inputs(repository, version, default_branch, expected_build_sha)
-    if release_identity is None:
-        if not dry_run:
-            raise CleanupError("destructive checkpoint cleanup requires a verified immutable release proof")
-        verify_healthy_release(repository, version, expected_build_sha)
-    else:
-        revalidate_release_identity(repository, version, expected_build_sha, release_identity)
-    ensure_no_active_build_for_version(repository, version, default_branch)
+    guard_cleanup_phase(
+        repository,
+        version,
+        default_branch,
+        expected_build_sha,
+        dry_run=dry_run,
+        release_identity=release_identity,
+        phase="checkpoint",
+    )
     candidates = find_version_checkpoints(repository, version, default_branch)
     total_bytes = sum(item.size_bytes for item in candidates)
     if not dry_run:
         assert release_identity is not None
-        revalidate_release_identity(repository, version, expected_build_sha, release_identity)
-        ensure_no_active_build_for_version(repository, version, default_branch)
+        guard_cleanup_phase(
+            repository,
+            version,
+            default_branch,
+            expected_build_sha,
+            dry_run=False,
+            release_identity=release_identity,
+            phase="checkpoint",
+        )
     results: list[str] = []
     for item in candidates:
         if dry_run:
@@ -755,20 +798,28 @@ def cleanup_released_source_caches(
 ) -> tuple[list[str], int]:
     # Revalidate independently from checkpoint deletion so a same-version build that
     # starts between the two phases protects its source cache.
-    validate_inputs(repository, version, default_branch, expected_build_sha)
-    if release_identity is None:
-        if not dry_run:
-            raise CleanupError("destructive source-cache cleanup requires a verified immutable release proof")
-        verify_healthy_release(repository, version, expected_build_sha)
-    else:
-        revalidate_release_identity(repository, version, expected_build_sha, release_identity)
-    ensure_no_active_build_for_version(repository, version, default_branch)
+    guard_cleanup_phase(
+        repository,
+        version,
+        default_branch,
+        expected_build_sha,
+        dry_run=dry_run,
+        release_identity=release_identity,
+        phase="source-cache",
+    )
     caches = list_source_caches(repository, version, default_branch)
     total_bytes = sum(item.size_bytes for item in caches)
     if not dry_run:
         assert release_identity is not None
-        revalidate_release_identity(repository, version, expected_build_sha, release_identity)
-        ensure_no_active_build_for_version(repository, version, default_branch)
+        guard_cleanup_phase(
+            repository,
+            version,
+            default_branch,
+            expected_build_sha,
+            dry_run=False,
+            release_identity=release_identity,
+            phase="source-cache",
+        )
     results: list[str] = []
     for item in caches:
         if dry_run:
