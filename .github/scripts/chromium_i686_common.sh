@@ -2250,7 +2250,7 @@ smoke_test_i686_runtime_bundle() {
   mkdir -p "${smoke_home}" "${smoke_profile}"
   printf '%s\n' '<!doctype html><meta charset="utf-8"><main id="probe">chromium-i686-runtime-smoke</main>' > "${smoke_html}"
 
-  local version_output version_status=0
+  local version_output normalized_version_output version_status=0
   version_output="$(bounded_external "${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS}" \
     env HOME="${smoke_home}" XDG_CONFIG_HOME="${smoke_home}/.config" XDG_CACHE_HOME="${smoke_home}/.cache" \
       "${launcher}" --version 2>&1)" || version_status=$?
@@ -2261,7 +2261,11 @@ smoke_test_i686_runtime_bundle() {
     echo "::error::Packaged chrome-wrapper --version failed with status ${version_status}."
     return 1
   fi
-  if ! grep -Fxq "Chromium ${version}" <<<"${version_output}"; then
+  # Chromium may append insignificant horizontal/line-ending whitespace to its
+  # version banner. Normalize only trailing whitespace per line, then compare the
+  # entire output so extra diagnostics or a different version still fail closed.
+  normalized_version_output="$(printf '%s' "${version_output}" | LC_ALL=C sed 's/[[:space:]]*$//')"
+  if [ "${normalized_version_output}" != "Chromium ${version}" ]; then
     bounded_rm_rf "${smoke_root}" || true
     echo "::error::Packaged chrome-wrapper reported an unexpected Chromium version: ${version_output}"
     return 1

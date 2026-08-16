@@ -19,7 +19,10 @@ cat > "${bundle}/chrome-wrapper" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = "--version" ]; then
-  echo "Chromium ${FAKE_CHROMIUM_VERSION:-151.0.7922.75}"
+  printf 'Chromium %s%s\n' "${FAKE_CHROMIUM_VERSION:-151.0.7922.75}" "${FAKE_CHROMIUM_VERSION_SUFFIX:-}"
+  if [ -n "${FAKE_CHROMIUM_VERSION_EXTRA_LINE:-}" ]; then
+    printf '%s\n' "${FAKE_CHROMIUM_VERSION_EXTRA_LINE}"
+  fi
   exit 0
 fi
 if printf '%s\n' "$@" | grep -qx -- '--dump-dom'; then
@@ -58,6 +61,25 @@ bounded_ldd() {
 smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null
 [ -z "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" ]
 [ "${REPAIR_CALLS}" -eq 3 ]
+
+# Chromium 151 currently emits a trailing space in its version banner. Trailing
+# whitespace is insignificant, but the normalized full output must still match.
+FAKE_CHROMIUM_VERSION_SUFFIX=$' \t'
+export FAKE_CHROMIUM_VERSION_SUFFIX
+smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null
+[ -z "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" ]
+unset FAKE_CHROMIUM_VERSION_SUFFIX
+
+# Extra output must not be hidden by normalization; compare the entire banner.
+FAKE_CHROMIUM_VERSION_EXTRA_LINE='unexpected diagnostic'
+export FAKE_CHROMIUM_VERSION_EXTRA_LINE
+set +e
+smoke_test_i686_runtime_bundle "${bundle}" 151.0.7922.75 >/dev/null 2>&1
+extra_line_status=$?
+set -e
+[ "${extra_line_status}" -ne 0 ]
+[ "${CHROMIUM_RUNTIME_SMOKE_FAILURE_CLASS}" = deterministic_build ]
+unset FAKE_CHROMIUM_VERSION_EXTRA_LINE
 
 mv "${bundle}/libEGL.so" "${bundle}/libEGL.so.missing"
 set +e
