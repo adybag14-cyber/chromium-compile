@@ -240,6 +240,22 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('VERSION="151.0.7922.108"', validation)
         self.assertIn('test "${VERSION}" = "${version_sentinel}"', validation)
 
+    def test_ubuntu_24_is_default_production_runner(self):
+        default_expr = "vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04'"
+        legacy_default = "vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04'"
+        for rel in (
+            ".github/workflows/chromium-i686.yml",
+            ".github/workflows/chromium-i686-preflight.yml",
+            ".github/workflows/validate-port-infrastructure.yml",
+        ):
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn(default_expr, text, rel)
+            self.assertNotIn(legacy_default, text, rel)
+        self.assertIn("CHROMIUM_I686_RUNNER=ubuntu-24.04", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("CHROMIUM_I686_RUNNER=ubuntu-24.04", (ROOT / "docs" / "MAINTENANCE.md").read_text(encoding="utf-8"))
+        self.assertIn("fail-closed default is `ubuntu-24.04`", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("production defaults to `ubuntu-24.04`", (ROOT / "docs" / "MAINTENANCE.md").read_text(encoding="utf-8"))
+
     def test_production_runner_label_is_resolved_before_heavyweight_scheduling(self):
         build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")

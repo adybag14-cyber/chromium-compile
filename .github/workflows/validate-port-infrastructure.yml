@@ -59,7 +59,7 @@ jobs:
       - name: Validate configured explicit LTS runner label
         id: resolve
         env:
-          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -723,7 +723,7 @@ jobs:
       - name: Record invalid runner configuration
         env:
           GH_TOKEN: ${{ github.token }}
-          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04' }}
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04' }}
         shell: bash
         run: |
           set -euo pipefail
