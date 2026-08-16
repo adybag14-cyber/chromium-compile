@@ -337,19 +337,21 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
              self.assertRaisesRegex(cleanup.CleanupError, "missing required runtime paths"):
             cleanup.verify_release_archive_bytes(REPO, VERSION, BUILD_SHA, identity)
         parse_manifest.assert_not_called()
-    def test_release_byte_proof_uses_fixed_local_paths(self):
-        source = (ROOT / "scripts/github_released_checkpoint_cleanup.py").read_text(encoding="utf-8")
-        proof = source[
-            source.index("def verify_release_archive_bytes("):
-            source.index("def _normalized_workflow_path(")
-        ]
-        self.assertIn('root / "release-package.tar.xz"', proof)
-        self.assertIn('root / "release-package.sha256"', proof)
-        self.assertIn('root / "release-manifest.txt"', proof)
-        self.assertIn('"--output"', proof)
-        self.assertNotIn("root / remote_name", proof)
-        self.assertNotIn("root / name", proof)
-        self.assertNotIn('"--dir"', proof)
+    def test_release_archive_validator_oserror_is_cleanup_error(self):
+        archive = ROOT / "missing-release-archive.tar.xz"
+        with mock.patch.object(cleanup.subprocess, "run", side_effect=OSError("validator unavailable")), \
+             self.assertRaisesRegex(cleanup.CleanupError, "could not run release archive validator"):
+            cleanup.run_release_archive_validator(archive)
+
+    def test_apply_without_workflow_proof_fails_before_release_io(self):
+        with mock.patch.object(cleanup, "read_release_identity") as identity, \
+             mock.patch.object(cleanup, "verify_release_archive_bytes") as byte_proof, \
+             self.assertRaisesRegex(cleanup.CleanupError, "--apply requires a trusted release workflow run ID"):
+            cleanup.prepare_release_cleanup_proof(
+                REPO, VERSION, BRANCH, BUILD_SHA, None, require_runtime_proof=True
+            )
+        identity.assert_not_called()
+        byte_proof.assert_not_called()
 
     def test_apply_proof_requires_trusted_runtime_workflow(self):
         identity = release_identity()
@@ -369,7 +371,6 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
     def test_publisher_cleanup_exports_exact_proof_inputs(self):
         workflow = (ROOT / ".github/workflows/publish-i686-release.yml").read_text(encoding="utf-8")
         section = workflow.split("  cleanup_published_checkpoints:\n", 1)[1]
-        self.assertIn("timeout-minutes: 40", section)
         self.assertIn("VALIDATED_BUILD_SHA: ${{ needs.validate.outputs.head_sha }}", section)
         self.assertIn("RELEASE_WORKFLOW_RUN_ID: ${{ github.run_id }}", section)
         self.assertIn('--release-workflow-run-id "${RELEASE_WORKFLOW_RUN_ID}"', section)

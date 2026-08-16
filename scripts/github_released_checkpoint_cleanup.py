@@ -239,6 +239,8 @@ def run_release_archive_validator(archive: Path) -> None:
         )
     except subprocess.TimeoutExpired as exc:
         raise CleanupError("release archive safety validation timed out after 600s") from exc
+    except OSError as exc:
+        raise CleanupError(f"could not run release archive validator: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "release archive validator failed").strip()
         raise CleanupError(f"release archive safety/completeness validation failed: {detail}")
@@ -458,10 +460,10 @@ def prepare_release_cleanup_proof(
     require_runtime_proof: bool,
 ) -> ReleaseIdentity:
     validate_inputs(repository, version, default_branch, expected_build_sha)
-    identity = read_release_identity(repository, version, expected_build_sha)
-    verify_release_archive_bytes(repository, version, expected_build_sha, identity)
     if require_runtime_proof and not release_workflow_run_id:
         raise CleanupError("--apply requires a trusted release workflow run ID with successful validate/smoke/publish jobs")
+    identity = read_release_identity(repository, version, expected_build_sha)
+    verify_release_archive_bytes(repository, version, expected_build_sha, identity)
     if release_workflow_run_id:
         verify_release_workflow_proof(
             repository, version, default_branch, release_workflow_run_id, identity
