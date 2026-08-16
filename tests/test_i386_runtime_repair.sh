@@ -5,6 +5,9 @@ export GITHUB_WORKSPACE="$(pwd)"
 export RUNNER_TEMP="$(mktemp -d)"
 trap 'rm -rf "${RUNNER_TEMP}"' EXIT
 source .github/scripts/chromium_i686_common.sh
+# Preserve the real metadata helper so the contract can inject a timeout before
+# replacing it with the no-network stub used by provider-resolution tests.
+eval "$(declare -f ensure_apt_file_i386_metadata | sed '1s/ensure_apt_file_i386_metadata/real_ensure_apt_file_i386_metadata/')"
 
 fail() {
   echo "runtime repair contract failure: $*" >&2
@@ -34,8 +37,70 @@ detect_runner_platform >/dev/null
 unset CHROMIUM_I686_OS_RELEASE_FILE
 unset -f dpkg-architecture
 
+# A failed apt-file install simulation is deterministic only when APT can prove
+# there is no candidate. Repository/metadata ambiguity must stay infrastructure.
+(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = apt-file ]; then return 1; fi
+    builtin command "$@"
+  }
+  bounded_apt_get_simulate() { return 100; }
+  apt_package_candidate_status() { return 1; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if real_ensure_apt_file_i386_metadata >/dev/null 2>&1; then
+    fail "missing apt-file candidate unexpectedly succeeded"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] \
+    || fail "confirmed missing apt-file candidate was not deterministic"
+)
+(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = apt-file ]; then return 1; fi
+    builtin command "$@"
+  }
+  bounded_apt_get_simulate() { return 100; }
+  apt_package_candidate_status() { return 0; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if real_ensure_apt_file_i386_metadata >/dev/null 2>&1; then
+    fail "failed apt-file simulation with candidate unexpectedly succeeded"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = infrastructure ] \
+    || fail "apt-file simulation/repository failure with candidate was not infrastructure"
+)
+(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = apt-file ]; then return 1; fi
+    builtin command "$@"
+  }
+  bounded_apt_get_simulate() { return 100; }
+  apt_package_candidate_status() { return 2; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if real_ensure_apt_file_i386_metadata >/dev/null 2>&1; then
+    fail "failed apt-file simulation with unverifiable candidate unexpectedly succeeded"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = infrastructure ] \
+    || fail "apt-file simulation plus candidate-query failure was not infrastructure"
+)
+
+# A bounded apt-file metadata refresh timeout is transient runner/repository
+# infrastructure, not a deterministic Chromium build failure.
+(
+  apt-file() { return 0; }
+  timeout() { return 124; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if real_ensure_apt_file_i386_metadata >/dev/null 2>&1; then
+    fail "timed-out apt-file metadata refresh unexpectedly succeeded"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = infrastructure ] \
+    || fail "apt-file metadata timeout was not infrastructure"
+)
+
 # Avoid network access. Each test controls apt-file/apt-cache behavior explicitly.
-ensure_apt_file_i386_metadata() { return 0; }
+APT_FILE_METADATA_CALLS=0
+ensure_apt_file_i386_metadata() {
+  APT_FILE_METADATA_CALLS=$((APT_FILE_METADATA_CALLS + 1))
+  return 0
+}
 
 apt_file_search_i386() {
   case "$*" in
@@ -50,7 +115,7 @@ apt_file_search_i386() {
 apt-cache() {
   [ "${1:-}" = policy ] || return 2
   case "${2:-}" in
-    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386|libstuck:i386|libglib2.0-0t64:i386)
+    libqt5widgets5:i386|libunique:i386|libalpha:i386|libbeta:i386|libstuck:i386|libglib2.0-0t64:i386|libatk1.0-0:i386|libatk-bridge2.0-0:i386|libatspi2.0-0:i386|libcups2:i386|libcairo2:i386|libpango-1.0-0:i386|libxcomposite1:i386|libxdamage1:i386|libxfixes3:i386|libxrandr2:i386|libxtst6:i386)
       printf '%s\n' "${2}:" '  Candidate: 1.0' ;;
     libunavailable:i386)
       printf '%s\n' "${2}:" '  Candidate: (none)' ;;
@@ -62,6 +127,29 @@ apt-cache() {
 resolve_i386_package_for_soname libQt5Widgets.so.5
 [ "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386 ] || fail "derived provider was not selected"
 
+# Chromium's standard packaged desktop runtime must resolve from bounded package
+# metadata without paying the large apt-file Contents refresh penalty.
+standard_runtime_mappings=(
+  'libatk-1.0.so.0=libatk1.0-0:i386'
+  'libatk-bridge-2.0.so.0=libatk-bridge2.0-0:i386'
+  'libatspi.so.0=libatspi2.0-0:i386'
+  'libcups.so.2=libcups2:i386'
+  'libcairo.so.2=libcairo2:i386'
+  'libpango-1.0.so.0=libpango-1.0-0:i386'
+  'libXcomposite.so.1=libxcomposite1:i386'
+  'libXdamage.so.1=libxdamage1:i386'
+  'libXfixes.so.3=libxfixes3:i386'
+  'libXrandr.so.2=libxrandr2:i386'
+  'libXtst.so.6=libxtst6:i386'
+)
+for mapping in "${standard_runtime_mappings[@]}"; do
+  soname="${mapping%%=*}"
+  expected="${mapping#*=}"
+  before="${APT_FILE_METADATA_CALLS}"
+  resolve_i386_package_for_soname "${soname}"
+  [ "${I386_RESOLVED_PACKAGE}" = "${expected}" ] || fail "preferred provider mismatch for ${soname}"
+  [ "${APT_FILE_METADATA_CALLS}" -eq "${before}" ] || fail "standard runtime mapping ${soname} fell into apt-file metadata"
+done
 
 # Ubuntu 24.04-style time64 package renames must be discovered from a stale preferred mapping
 # The host running this contract test must not satisfy the stale package through its own dpkg database.

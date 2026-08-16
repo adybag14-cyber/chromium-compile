@@ -566,6 +566,22 @@ jobs:
           version_sentinel="${VERSION}"
           install_i386_runtime_libraries
           test "${VERSION}" = "${version_sentinel}"
+
+          # These are direct DT_NEEDED dependencies observed on the packaged Chromium
+          # browser. Every supported LTS image must resolve them from normal package
+          # metadata; apt-file Contents is reserved for genuinely unknown future SONAMEs.
+          ensure_apt_file_i386_metadata() {
+            echo "::error::Standard Chromium runtime mapping unexpectedly required apt-file metadata: $*"
+            return 1
+          }
+          for soname in \
+            libatk-1.0.so.0 libatk-bridge-2.0.so.0 libatspi.so.0 libcups.so.2 \
+            libcairo.so.2 libpango-1.0.so.0 libXcomposite.so.1 libXdamage.so.1 \
+            libXfixes.so.3 libXrandr.so.2 libXtst.so.6; do
+            resolve_i386_package_for_soname "${soname}"
+            test -n "${I386_RESOLVED_PACKAGE}"
+          done
+
           bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils
 
           cat > "${RUNNER_TEMP}/lts-i386-canary.c" <<'EOF'

@@ -309,6 +309,20 @@ declare -A I386_SONAME_PACKAGES=(
   [libxkbcommon.so.0]=libxkbcommon0:i386
   [libudev.so.1]=libudev1:i386
   [libasound.so.2]=libasound2:i386
+  # Direct Chromium desktop runtime dependencies observed in the packaged browser.
+  # Keep these preferred mappings release-local via i386_package_variants so t64
+  # transitions can still be discovered without downloading apt-file Contents data.
+  [libatk-1.0.so.0]=libatk1.0-0:i386
+  [libatk-bridge-2.0.so.0]=libatk-bridge2.0-0:i386
+  [libatspi.so.0]=libatspi2.0-0:i386
+  [libcups.so.2]=libcups2:i386
+  [libcairo.so.2]=libcairo2:i386
+  [libpango-1.0.so.0]=libpango-1.0-0:i386
+  [libXcomposite.so.1]=libxcomposite1:i386
+  [libXdamage.so.1]=libxdamage1:i386
+  [libXfixes.so.3]=libxfixes3:i386
+  [libXrandr.so.2]=libxrandr2:i386
+  [libXtst.so.6]=libxtst6:i386
   # Qt is intentionally lazy: shared target shims are not host executables.
   # These remain preferred mappings if a future generated host tool genuinely needs Qt5.
   [libQt5Core.so.5]=libqt5core5a:i386
@@ -464,10 +478,26 @@ detect_runner_platform() {
   fi
 }
 
-i386_package_has_candidate() {
+apt_package_candidate_status() {
   local package="${1:?package is required}"
-  apt-cache policy "${package}" 2>/dev/null \
-    | awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}'
+  local output status=0
+  if output="$(apt-cache policy "${package}" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "${status}" -ne 0 ]; then
+    echo "::warning::Could not query APT candidate state for ${package} (status ${status}); repository metadata may be unavailable." >&2
+    return 2
+  fi
+  if awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}' <<<"${output}"; then
+    return 0
+  fi
+  return 1
+}
+
+i386_package_has_candidate() {
+  apt_package_candidate_status "${1:?package is required}" >/dev/null 2>&1
 }
 
 i386_package_variants() {
@@ -545,16 +575,37 @@ ensure_apt_file_i386_metadata() {
 
   echo "Preparing bounded apt-file metadata fallback for automatic i386 SONAME resolution."
   if ! command -v apt-file >/dev/null 2>&1; then
+    local simulation_status=0 candidate_status=0
+    if bounded_apt_get_simulate install -y --no-install-recommends apt-file >/dev/null 2>&1; then
+      simulation_status=0
+    else
+      simulation_status=$?
+    fi
+    if [ "${simulation_status}" -ne 0 ]; then
+      if apt_package_candidate_status apt-file >/dev/null 2>&1; then
+        candidate_status=0
+      else
+        candidate_status=$?
+      fi
+      if [ "${candidate_status}" -eq 1 ]; then
+        I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+        echo "::error::apt-file fallback tooling has no installable candidate on this runner; add a SONAME mapping or update the resolver."
+      else
+        I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+        echo "::error::apt-file installation simulation failed while its candidate state was present or unverifiable; repository/metadata infrastructure may recover on a fresh runner."
+      fi
+      return 1
+    fi
     if ! bounded_sudo_apt_get install -y --no-install-recommends apt-file; then
-      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
-      echo "::error::apt-file fallback tooling is unavailable on this runner; add a SONAME mapping or update the resolver."
+      I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+      echo "::error::apt-file fallback tooling was installable but installation failed; a fresh runner may recover."
       return 1
     fi
   fi
   if ! timeout -k 20s "${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}s" \
       sudo apt-file -o APT::Architecture=i386 -o APT::Architectures::=i386 update; then
-    I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
-    echo "::error::apt-file metadata fallback exceeded ${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}s or failed; refusing to burn a fresh runner retry."
+    I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+    echo "::error::apt-file metadata fallback exceeded ${CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS}s or failed; a fresh runner may recover from repository/network metadata failure."
     return 1
   fi
   printf 'ready\n' > "${marker}"
