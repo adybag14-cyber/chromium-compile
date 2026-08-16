@@ -138,6 +138,14 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
         self.assertGreaterEqual(validation.count("Checkout maintenance helper"), 2)
 
+    def test_secondary_reporter_ignores_skipped_workflows(self):
+        reporter = (ROOT / ".github" / "workflows" / "report-i686-build-failure.yml").read_text(encoding="utf-8")
+        report_job = reporter[reporter.index("  report:"):]
+        self.assertIn("github.event.workflow_run.conclusion != 'success'", report_job)
+        self.assertIn("github.event.workflow_run.conclusion != 'skipped'", report_job)
+        # Keep real non-success runs reportable; only the non-failure skipped path is filtered.
+        self.assertNotIn("github.event.workflow_run.conclusion == 'failure'", report_job)
+
     def test_watcher_state_queries_are_bounded_and_include_publisher(self):
         watcher = (ROOT / "scripts" / "chromium_stable_watcher.py").read_text(encoding="utf-8")
         self.assertIn('"publish-i686-release.yml"', watcher)
