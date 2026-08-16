@@ -283,6 +283,34 @@ class WorkflowDispatchTests(unittest.TestCase):
                 )
             )
 
+    def test_parent_scoped_dedupe_fails_closed_on_malformed_timestamp(self):
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        run = {
+            "displayTitle": "Expected title",
+            "headBranch": "main",
+            "status": "completed",
+            "createdAt": "not-a-timestamp",
+        }
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=[run]):
+            with self.assertRaisesRegex(dispatch.DispatchError, "invalid createdAt metadata"):
+                dispatch.exact_exists_since(
+                    "owner/repo", "workflow.yml", "Expected title", "main", parent_started
+                )
+
+    def test_parent_scoped_dedupe_fails_closed_on_naive_timestamp(self):
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        run = {
+            "displayTitle": "Expected title",
+            "headBranch": "main",
+            "status": "completed",
+            "createdAt": "2026-08-14T12:00:01",
+        }
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=[run]):
+            with self.assertRaisesRegex(dispatch.DispatchError, "timezone-naive createdAt"):
+                dispatch.exact_exists_since(
+                    "owner/repo", "workflow.yml", "Expected title", "main", parent_started
+                )
+
     def test_historical_same_title_does_not_block_fresh_build_lineage(self):
         parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
         old_run = {

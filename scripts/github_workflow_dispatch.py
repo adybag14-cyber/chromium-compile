@@ -320,8 +320,15 @@ def exact_exists_since(
         raw = str(run.get("createdAt", ""))
         try:
             created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise DispatchError(
+                f"Workflow run for {expected_title!r} returned invalid createdAt metadata: {raw!r}"
+            ) from exc
+        if created.tzinfo is None:
+            raise DispatchError(
+                f"Workflow run for {expected_title!r} returned timezone-naive createdAt metadata: {raw!r}"
+            )
+        created = created.astimezone(timezone.utc)
         if created >= threshold:
             return True
     return False
