@@ -24,18 +24,20 @@ class NinjaStallWatchdogTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(watchdog.WatchdogError):
                 watchdog.validate_compiler_stall_seconds(invalid)
 
-    def test_compiler_command_is_fixed_except_for_bounded_timeout(self):
+    def test_compiler_command_has_no_runtime_derived_arguments(self):
         self.assertEqual(
-            watchdog.compiler_command(123),
+            watchdog.compiler_command(),
             [
-                "timeout", "-k", "120s", "123s", "autoninja", "-C",
-                "out/Release_x86", "-j3", "chrome",
+                "autoninja", "-C", "out/Release_x86", "-j3", "chrome",
                 "chrome/installer/linux:installer_deps",
             ],
         )
+
+    def test_compiler_timeout_policy_is_bounded_separately_from_command(self):
+        self.assertEqual(watchdog.validate_compiler_timeout_seconds(123), 123)
         for invalid in (0, -1, watchdog.MAX_COMPILER_TIMEOUT_SECONDS + 1, True):
             with self.subTest(invalid=invalid), self.assertRaises(watchdog.WatchdogError):
-                watchdog.compiler_command(invalid)
+                watchdog.validate_compiler_timeout_seconds(invalid)
 
     def test_progress_fingerprint_rejects_non_regular_paths(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -103,6 +105,25 @@ class NinjaStallWatchdogTests(unittest.TestCase):
             )
             self.assertEqual(result, watchdog.STALL_EXIT_CODE)
             self.assertFalse(marker.exists())
+
+    def test_absolute_timeout_returns_124_without_stall_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            marker = root / "stall.marker"
+            started = time.monotonic()
+            result = watchdog.run_with_watchdog(
+                [sys.executable, "-c", "import time; time.sleep(20)"],
+                progress_log=root / ".ninja_log",
+                stall_seconds=5,
+                poll_seconds=5,
+                kill_grace_seconds=1,
+                stall_marker=marker,
+                timeout_seconds=1,
+                timeout_kill_grace_seconds=1,
+            )
+            self.assertEqual(result, watchdog.TIMEOUT_EXIT_CODE)
+            self.assertFalse(marker.exists())
+            self.assertLess(time.monotonic() - started, 5)
 
     def test_real_progress_prevents_false_stall(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+TIMEOUT_EXIT_CODE = 124
 WATCHDOG_ERROR_EXIT_CODE = 85
 STALL_EXIT_CODE = 86
 MIN_COMPILER_STALL_SECONDS = 30 * 60
@@ -98,7 +99,7 @@ def validate_compiler_stall_seconds(stall_seconds: int) -> int:
     return stall_seconds
 
 
-def compiler_command(timeout_seconds: int) -> list[str]:
+def validate_compiler_timeout_seconds(timeout_seconds: int) -> int:
     if (
         not isinstance(timeout_seconds, int)
         or isinstance(timeout_seconds, bool)
@@ -107,11 +108,11 @@ def compiler_command(timeout_seconds: int) -> list[str]:
         raise WatchdogError(
             f"timeout_seconds must be an integer from 1 through {MAX_COMPILER_TIMEOUT_SECONDS}"
         )
+    return timeout_seconds
+
+
+def compiler_command() -> list[str]:
     return [
-        "timeout",
-        "-k",
-        "120s",
-        f"{timeout_seconds}s",
         "autoninja",
         "-C",
         "out/Release_x86",
@@ -143,6 +144,8 @@ def run_with_watchdog(
     poll_seconds: int,
     kill_grace_seconds: int,
     stall_marker: Path,
+    timeout_seconds: int | None = None,
+    timeout_kill_grace_seconds: int = 120,
 ) -> int:
     if not command:
         raise WatchdogError("a child command is required")
@@ -150,10 +153,13 @@ def run_with_watchdog(
         (stall_seconds, "stall_seconds", 1, 24 * 60 * 60),
         (poll_seconds, "poll_seconds", 1, 60),
         (kill_grace_seconds, "kill_grace_seconds", 1, 120),
+        (timeout_kill_grace_seconds, "timeout_kill_grace_seconds", 1, 180),
     ):
         if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
             raise WatchdogError(f"{name} must be an integer from {minimum} through {maximum}")
 
+    if timeout_seconds is not None:
+        timeout_seconds = validate_compiler_timeout_seconds(timeout_seconds)
     clear_marker(stall_marker, "Ninja stall")
 
     popen_kwargs: dict[str, object] = {}
@@ -165,7 +171,9 @@ def run_with_watchdog(
         raise WatchdogError(f"could not start compiler command: {exc}") from exc
 
     last_fingerprint = progress_fingerprint(progress_log)
-    last_progress = time.monotonic()
+    started = time.monotonic()
+    last_progress = started
+    absolute_deadline = started + timeout_seconds if timeout_seconds is not None else None
     forwarded_signal: int | None = None
 
     def forward(signum: int, _frame: object) -> None:
@@ -193,7 +201,18 @@ def run_with_watchdog(
             if current != last_fingerprint:
                 last_fingerprint = current
                 last_progress = now
-            elif now - last_progress >= stall_seconds:
+
+            if absolute_deadline is not None and now >= absolute_deadline:
+                print(
+                    "::warning::Compiler slice reached its absolute checkpoint deadline; "
+                    "terminating the compiler process tree so state can be preserved.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                terminate_child(proc, timeout_kill_grace_seconds)
+                return TIMEOUT_EXIT_CODE
+
+            if now - last_progress >= stall_seconds:
                 write_stall_marker(stall_marker)
                 print(
                     f"::warning::Ninja durable progress log did not change for {stall_seconds} seconds; "
@@ -204,7 +223,11 @@ def run_with_watchdog(
                 terminate_child(proc, kill_grace_seconds)
                 return STALL_EXIT_CODE
 
-            time.sleep(poll_seconds)
+            sleep_seconds = float(poll_seconds)
+            if absolute_deadline is not None:
+                sleep_seconds = min(sleep_seconds, max(0.05, absolute_deadline - now))
+            sleep_seconds = min(sleep_seconds, max(0.05, stall_seconds - (now - last_progress)))
+            time.sleep(sleep_seconds)
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
@@ -219,7 +242,8 @@ def main() -> int:
     args = parser.parse_args()
     try:
         stall_seconds = validate_compiler_stall_seconds(args.stall_seconds)
-        command = compiler_command(args.timeout_seconds)
+        timeout_seconds = validate_compiler_timeout_seconds(args.timeout_seconds)
+        command = compiler_command()
     except WatchdogError as exc:
         parser.error(str(exc))
 
@@ -232,6 +256,8 @@ def main() -> int:
             poll_seconds=15,
             kill_grace_seconds=30,
             stall_marker=DEFAULT_STALL_MARKER,
+            timeout_seconds=timeout_seconds,
+            timeout_kill_grace_seconds=120,
         )
     except WatchdogError as exc:
         detail = f"Ninja stall watchdog internal failure: {exc}"
