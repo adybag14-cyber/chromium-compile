@@ -26,6 +26,10 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 if printf '%s\n' "$@" | grep -qx -- '--dump-dom'; then
+  if ! printf '%s\n' "$@" | grep -qx -- '--incognito'; then
+    echo 'runtime smoke must isolate persistent profile storage with --incognito' >&2
+    exit 22
+  fi
   if [ "${FAKE_HEADLESS_STATUS:-0}" -ne 0 ]; then
     exit "${FAKE_HEADLESS_STATUS}"
   fi

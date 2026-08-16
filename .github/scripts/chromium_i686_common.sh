@@ -2271,6 +2271,10 @@ smoke_test_i686_runtime_bundle() {
     return 1
   fi
 
+  # Keep the launch deep enough to exercise a real local DOM render, but make the
+  # disposable profile non-persistent. Chromium 151 can DCHECK in Service Worker
+  # database recovery on ephemeral CI filesystems when headless is given an explicit
+  # user-data-dir without Incognito; Incognito keeps that storage in memory.
   local dom_output dom_status=0
   dom_output="$(bounded_external "${CHROMIUM_I686_RUNTIME_SMOKE_TIMEOUT_SECONDS}" \
     env HOME="${smoke_home}" XDG_CONFIG_HOME="${smoke_home}/.config" XDG_CACHE_HOME="${smoke_home}/.cache" \
@@ -2283,6 +2287,7 @@ smoke_test_i686_runtime_bundle() {
         --disable-component-update \
         --no-first-run \
         --no-default-browser-check \
+        --incognito \
         --user-data-dir="${smoke_profile}" \
         --dump-dom "file://${smoke_html}" 2>&1)" || dom_status=$?
   printf '%s\n' "${dom_output}"
