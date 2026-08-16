@@ -231,15 +231,17 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             f"chromium-{VERSION}-linux-i686", BUILD_SHA, created, assets
         )
 
+        asset_bytes = {
+            package_name: package_bytes,
+            checksum_name: checksum_bytes,
+            manifest_name: manifest_bytes,
+        }
+
         def fake_gh(args, **kwargs):
             if args[:2] == ["release", "download"]:
-                root = pathlib.Path(args[args.index("--dir") + 1])
-                for name, data in [
-                    (package_name, package_bytes),
-                    (checksum_name, checksum_bytes),
-                    (manifest_name, manifest_bytes),
-                ]:
-                    (root / name).write_bytes(data)
+                remote_name = args[args.index("--pattern") + 1]
+                output = pathlib.Path(args[args.index("--output") + 1])
+                output.write_bytes(asset_bytes[remote_name])
                 return done()
             raise AssertionError(args)
 
@@ -275,15 +277,17 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             f"chromium-{VERSION}-linux-i686", BUILD_SHA, created, assets
         )
 
+        asset_bytes = {
+            package_name: package_bytes,
+            checksum_name: checksum_bytes,
+            manifest_name: manifest_bytes,
+        }
+
         def fake_gh(args, **kwargs):
             if args[:2] == ["release", "download"]:
-                root = pathlib.Path(args[args.index("--dir") + 1])
-                for name, data in [
-                    (package_name, package_bytes),
-                    (checksum_name, checksum_bytes),
-                    (manifest_name, manifest_bytes),
-                ]:
-                    (root / name).write_bytes(data)
+                remote_name = args[args.index("--pattern") + 1]
+                output = pathlib.Path(args[args.index("--output") + 1])
+                output.write_bytes(asset_bytes[remote_name])
                 return done()
             raise AssertionError(args)
 
@@ -298,6 +302,20 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
              self.assertRaisesRegex(cleanup.CleanupError, "missing required runtime paths"):
             cleanup.verify_release_archive_bytes(REPO, VERSION, BUILD_SHA, identity)
         parse_manifest.assert_not_called()
+    def test_release_byte_proof_uses_fixed_local_paths(self):
+        source = (ROOT / "scripts/github_released_checkpoint_cleanup.py").read_text(encoding="utf-8")
+        proof = source[
+            source.index("def verify_release_archive_bytes("):
+            source.index("def _normalized_workflow_path(")
+        ]
+        self.assertIn('root / "release-package.tar.xz"', proof)
+        self.assertIn('root / "release-package.sha256"', proof)
+        self.assertIn('root / "release-manifest.txt"', proof)
+        self.assertIn('"--output"', proof)
+        self.assertNotIn("root / remote_name", proof)
+        self.assertNotIn("root / name", proof)
+        self.assertNotIn('"--dir"', proof)
+
     def test_apply_proof_requires_trusted_runtime_workflow(self):
         identity = release_identity()
         with mock.patch.object(cleanup, "read_release_identity", return_value=identity), \

@@ -259,31 +259,54 @@ def verify_release_archive_bytes(
 
     with tempfile.TemporaryDirectory(prefix="chromium-release-cleanup-proof-") as temp:
         root = Path(temp)
-        args = ["release", "download", identity.tag, "--repo", repository, "--dir", str(root)]
-        for name in (package_name, checksum_name, manifest_name):
-            args.extend(["--pattern", name])
-        run_gh(args, timeout=600)
-
-        for name in (package_name, checksum_name, manifest_name):
-            path = root / name
-            if not path.is_file() or path.is_symlink():
-                raise CleanupError(f"release download did not materialize a regular {name} asset")
-            actual_size = path.stat().st_size
-            asset = by_name[name]
+        # Never derive a local filesystem path from release metadata or CLI input.
+        # The three remotely validated asset names are downloaded one-at-a-time into
+        # fixed internal filenames; remote names remain data used only by the GitHub CLI.
+        package = root / "release-package.tar.xz"
+        checksum = root / "release-package.sha256"
+        manifest = root / "release-manifest.txt"
+        downloads = (
+            (package_name, package),
+            (checksum_name, checksum),
+            (manifest_name, manifest),
+        )
+        for remote_name, local_path in downloads:
+            run_gh(
+                [
+                    "release",
+                    "download",
+                    identity.tag,
+                    "--repo",
+                    repository,
+                    "--pattern",
+                    remote_name,
+                    "--output",
+                    str(local_path),
+                ],
+                timeout=600,
+            )
+            if not local_path.is_file() or local_path.is_symlink():
+                raise CleanupError(
+                    f"release download did not materialize a regular {remote_name} asset"
+                )
+            actual_size = local_path.stat().st_size
+            asset = by_name[remote_name]
             if actual_size != asset.size_bytes:
                 raise CleanupError(
-                    f"release asset {name} size changed: metadata={asset.size_bytes}, downloaded={actual_size}"
+                    f"release asset {remote_name} size changed: "
+                    f"metadata={asset.size_bytes}, downloaded={actual_size}"
                 )
-            actual_digest = _sha256_file(path)
+            actual_digest = _sha256_file(local_path)
             expected_digest = asset.digest.removeprefix("sha256:")
             if actual_digest.lower() != expected_digest.lower():
-                raise CleanupError(f"release asset {name} does not match its GitHub SHA-256 digest")
+                raise CleanupError(
+                    f"release asset {remote_name} does not match its GitHub SHA-256 digest"
+                )
 
-        package = root / package_name
         run_release_archive_validator(package)
         package_sha = _sha256_file(package)
         try:
-            checksum_text = (root / checksum_name).read_text(encoding="utf-8").strip()
+            checksum_text = checksum.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError) as exc:
             raise CleanupError(f"could not read release checksum sidecar: {exc}") from exc
         checksum_match = CHECKSUM_LINE_RE.fullmatch(checksum_text)
@@ -294,7 +317,7 @@ def verify_release_archive_bytes(
 
 
 
-        fields = _parse_release_manifest(root / manifest_name)
+        fields = _parse_release_manifest(manifest)
         required_fields = {
             "manifest_schema": "2",
             "version": version,
