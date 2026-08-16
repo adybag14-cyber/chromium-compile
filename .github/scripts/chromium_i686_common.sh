@@ -1956,7 +1956,7 @@ run_build_until_checkpoint() {
   local output_file="${1:-${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}}"
   local started_at="${JOB_STARTED_AT:-}"
   local checkpoint_minutes="${JOB_CHECKPOINT_MINUTES:-340}"
-  local now remaining status failure_class pass pass_log_start pass_log stall_marker
+  local now remaining status failure_class pass pass_log_start pass_log stall_marker watchdog_error_marker
   local prior_no_progress_streak="${CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK:-0}"
   local ninja_stall_minutes="${CHROMIUM_I686_NINJA_STALL_MINUTES:-90}"
   local ninja_log_entries_before no_progress_streak
@@ -2033,7 +2033,8 @@ run_build_until_checkpoint() {
     set +o pipefail
     compiler_started=true
     stall_marker="${CHROMIUM_SRC}/.ninja-stall-watchdog.marker"
-    rm -f -- "${stall_marker}"
+    watchdog_error_marker="${CHROMIUM_SRC}/.ninja-stall-watchdog.error"
+    rm -f -- "${stall_marker}" "${watchdog_error_marker}"
     python3 "${WORKSPACE}/scripts/ninja_stall_watchdog.py" \
       --stall-seconds "$((ninja_stall_minutes * 60))" \
       --timeout-seconds "${remaining}" \
@@ -2043,8 +2044,17 @@ run_build_until_checkpoint() {
     set -e
     tail -c "+$((pass_log_start + 1))" "${BUILD_LOG}" > "${pass_log}"
 
+    if [ -s "${stall_marker}" ] && [ -s "${watchdog_error_marker}" ]; then
+      rm -f -- "${stall_marker}" "${watchdog_error_marker}"
+      echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
+      echo "complete=false" >> "${output_file}"
+      echo "failure_class=infrastructure" >> "${output_file}"
+      echo "::error::Ninja watchdog produced conflicting stall/error markers; treating this as runner/control infrastructure failure."
+      return 85
+    fi
+
     if [ -s "${stall_marker}" ]; then
-      rm -f -- "${stall_marker}"
+      rm -f -- "${stall_marker}" "${watchdog_error_marker}"
       echo "::warning::Ninja made no durable progress for ${ninja_stall_minutes} minutes; preserving work and rotating this compiler slice to a fresh runner."
       no_progress_streak="$(record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}")"
       echo "complete=false" >> "${output_file}"
@@ -2058,7 +2068,18 @@ run_build_until_checkpoint() {
       ccache -s || true
       return 0
     fi
-    rm -f -- "${stall_marker}"
+
+    if [ -s "${watchdog_error_marker}" ]; then
+      local watchdog_detail
+      watchdog_detail="$(head -n 1 "${watchdog_error_marker}" 2>/dev/null || true)"
+      rm -f -- "${stall_marker}" "${watchdog_error_marker}"
+      echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
+      echo "complete=false" >> "${output_file}"
+      echo "failure_class=infrastructure" >> "${output_file}"
+      echo "::error::${watchdog_detail:-Ninja stall watchdog failed internally}; rotating to a fresh runner without incrementing the compiler no-progress streak."
+      return 85
+    fi
+    rm -f -- "${stall_marker}" "${watchdog_error_marker}"
 
     if [ "${status}" -eq 0 ]; then
       echo "Build finished at $(date)"

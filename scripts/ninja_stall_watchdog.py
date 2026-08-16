@@ -12,12 +12,14 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+WATCHDOG_ERROR_EXIT_CODE = 85
 STALL_EXIT_CODE = 86
 MIN_COMPILER_STALL_SECONDS = 30 * 60
 MAX_COMPILER_STALL_SECONDS = 180 * 60
 MAX_COMPILER_TIMEOUT_SECONDS = 340 * 60
 DEFAULT_PROGRESS_LOG = Path("out/Release_x86/.ninja_log")
 DEFAULT_STALL_MARKER = Path(".ninja-stall-watchdog.marker")
+DEFAULT_ERROR_MARKER = Path(".ninja-stall-watchdog.error")
 
 
 class WatchdogError(RuntimeError):
@@ -119,6 +121,20 @@ def compiler_command(timeout_seconds: int) -> list[str]:
     ]
 
 
+def clear_marker(path: Path, label: str) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise WatchdogError(f"could not clear stale {label} marker {path}: {exc}") from exc
+
+
+def write_error_marker(path: Path, detail: str) -> None:
+    try:
+        path.write_text(detail.rstrip() + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise WatchdogError(f"could not write Ninja watchdog error marker {path}: {exc}") from exc
+
+
 def run_with_watchdog(
     command: Sequence[str],
     *,
@@ -138,10 +154,7 @@ def run_with_watchdog(
         if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
             raise WatchdogError(f"{name} must be an integer from {minimum} through {maximum}")
 
-    try:
-        stall_marker.unlink(missing_ok=True)
-    except OSError as exc:
-        raise WatchdogError(f"could not clear stale Ninja stall marker {stall_marker}: {exc}") from exc
+    clear_marker(stall_marker, "Ninja stall")
 
     popen_kwargs: dict[str, object] = {}
     if os.name == "posix":
@@ -205,17 +218,30 @@ def main() -> int:
     parser.add_argument("--timeout-seconds", required=True, type=int)
     args = parser.parse_args()
     try:
+        stall_seconds = validate_compiler_stall_seconds(args.stall_seconds)
+        command = compiler_command(args.timeout_seconds)
+    except WatchdogError as exc:
+        parser.error(str(exc))
+
+    try:
+        clear_marker(DEFAULT_ERROR_MARKER, "Ninja watchdog error")
         return run_with_watchdog(
-            compiler_command(args.timeout_seconds),
+            command,
             progress_log=DEFAULT_PROGRESS_LOG,
-            stall_seconds=validate_compiler_stall_seconds(args.stall_seconds),
+            stall_seconds=stall_seconds,
             poll_seconds=15,
             kill_grace_seconds=30,
             stall_marker=DEFAULT_STALL_MARKER,
         )
     except WatchdogError as exc:
-        parser.error(str(exc))
-    return 2
+        detail = f"Ninja stall watchdog internal failure: {exc}"
+        try:
+            write_error_marker(DEFAULT_ERROR_MARKER, detail)
+        except WatchdogError as marker_exc:
+            print(f"::error::{detail}; additionally {marker_exc}", file=sys.stderr, flush=True)
+            return WATCHDOG_ERROR_EXIT_CODE
+        print(f"::error::{detail}", file=sys.stderr, flush=True)
+        return WATCHDOG_ERROR_EXIT_CODE
 
 
 if __name__ == "__main__":

@@ -47,6 +47,15 @@ class NinjaStallWatchdogTests(unittest.TestCase):
             with self.assertRaises(watchdog.WatchdogError):
                 watchdog.progress_fingerprint(root)
 
+    def test_error_marker_helpers_are_fixed_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            marker = root / "watchdog.error"
+            watchdog.write_error_marker(marker, "failure detail")
+            self.assertEqual(marker.read_text(encoding="utf-8"), "failure detail\n")
+            watchdog.clear_marker(marker, "test")
+            self.assertFalse(marker.exists())
+
     def test_child_exit_code_is_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)

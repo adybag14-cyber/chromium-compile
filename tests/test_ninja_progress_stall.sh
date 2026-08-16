@@ -89,13 +89,23 @@ mkdir -p "${WORKSPACE}" "${OUT_DIR}"
 ensure_build_disk_space() { return 0; }
 df() { :; }
 ccache() { :; }
+WATCHDOG_STUB_MODE=stall
 python3() {
   case " $* " in
     *" --stall-seconds "*" --timeout-seconds "*) ;;
     *) return 2 ;;
   esac
-  printf 'stalled\n' > "${CHROMIUM_SRC}/.ninja-stall-watchdog.marker"
-  return 86
+  case "${WATCHDOG_STUB_MODE}" in
+    stall)
+      printf 'stalled\n' > "${CHROMIUM_SRC}/.ninja-stall-watchdog.marker"
+      return 86
+      ;;
+    error)
+      printf 'Ninja stall watchdog internal failure: simulated I/O error\n' > "${CHROMIUM_SRC}/.ninja-stall-watchdog.error"
+      return 85
+      ;;
+    *) return 2 ;;
+  esac
 }
 
 first_stall="${RUNNER_TEMP}/first-stall-output"
@@ -118,5 +128,19 @@ fi
 grep -qx 'complete=false' "${second_stall}"
 grep -qx 'no_progress_streak=2' "${second_stall}"
 grep -qx 'failure_class=deterministic_build' "${second_stall}"
+
+WATCHDOG_STUB_MODE=error
+watchdog_error_output="${RUNNER_TEMP}/watchdog-error-output"
+: > "${watchdog_error_output}"
+CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK=1
+if run_build_until_checkpoint "${watchdog_error_output}" >/dev/null 2>&1; then
+  watchdog_error_status=0
+else
+  watchdog_error_status=$?
+fi
+[ "${watchdog_error_status}" -eq 85 ]
+grep -qx 'complete=false' "${watchdog_error_output}"
+grep -qx 'no_progress_streak=1' "${watchdog_error_output}"
+grep -qx 'failure_class=infrastructure' "${watchdog_error_output}"
 
 echo "Ninja progress stall contract tests passed"
