@@ -397,8 +397,10 @@ def verify_release_workflow_proof(
     step_completed = parse_github_timestamp(publish_step.get("completed_at"), "publish step completed_at")
     if step_completed < step_started:
         raise CleanupError("publish step completion precedes its start")
-    if not (step_started <= identity.published_at <= step_completed):
-        raise CleanupError("current release publishedAt is not bound to the supplied successful publish step")
+    # A transactional retry may resume a release object created by an earlier failed run.
+    # The current assets must still be created/last-updated by this exact successful publish step.
+    if identity.published_at > step_completed:
+        raise CleanupError("current release publishedAt postdates the supplied successful publish step")
     for asset in identity.assets:
         if not (step_started <= asset.created_at <= asset.updated_at <= step_completed):
             raise CleanupError(

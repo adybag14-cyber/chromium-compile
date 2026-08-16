@@ -162,6 +162,14 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
         ):
             cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
 
+    def test_release_workflow_proof_allows_resumed_release_object_with_current_assets(self):
+        identity = release_identity(published_at="2026-08-16T09:00:00Z")
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            side_effect=[done(release_workflow_run_payload()), done(release_workflow_jobs_payload())],
+        ):
+            cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
     def test_release_workflow_proof_rejects_failed_smoke_and_replaced_assets(self):
         identity = release_identity()
         with mock.patch.object(
