@@ -14,6 +14,16 @@ mkdir -p "${OUT_DIR}"
 [ "$(compute_no_progress_streak 1 10 10)" = 2 ]
 [ "$(compute_no_progress_streak 2 10 9)" = 2 ]
 [ "$(compute_no_progress_streak 1 10 11)" = 0 ]
+for value in 30 90 180; do
+  validate_ninja_stall_minutes "${value}" >/dev/null
+done
+for bad in 0 1 29 181 999 abc -1; do
+  if validate_ninja_stall_minutes "${bad}" >/dev/null 2>&1; then
+    echo "expected invalid Ninja stall policy ${bad} to fail" >&2
+    exit 1
+  fi
+done
+
 for bad in -1 3 abc 999999999999999999; do
   if validate_no_progress_streak "${bad}" >/dev/null 2>&1; then
     echo "expected invalid no-progress streak ${bad} to fail" >&2
@@ -64,5 +74,49 @@ run_build_until_checkpoint "${prep_output}" >/dev/null
 grep -qx 'complete=false' "${prep_output}"
 grep -qx 'no_progress_streak=1' "${prep_output}"
 grep -qx 'failure_class=' "${prep_output}"
+
+# An intra-slice stall should checkpoint/rotate early, while a second consecutive
+# no-progress stall becomes deterministic. Stub only the watchdog process; the
+# run_build_until_checkpoint control flow remains real.
+JOB_STARTED_AT="$(date +%s)"
+JOB_CHECKPOINT_MINUTES=30
+CHROMIUM_I686_NINJA_STALL_MINUTES=30
+WORKSPACE="${RUNNER_TEMP}/stall-workspace"
+CHROMIUM_SRC="${RUNNER_TEMP}/stall-source"
+OUT_DIR="${CHROMIUM_SRC}/out/Release_x86"
+BUILD_LOG="${RUNNER_TEMP}/stall-build.log"
+mkdir -p "${WORKSPACE}" "${OUT_DIR}"
+ensure_build_disk_space() { return 0; }
+df() { :; }
+ccache() { :; }
+python3() {
+  case " $* " in
+    *" --stall-seconds "*" --timeout-seconds "*) ;;
+    *) return 2 ;;
+  esac
+  printf 'stalled\n' > "${CHROMIUM_SRC}/.ninja-stall-watchdog.marker"
+  return 86
+}
+
+first_stall="${RUNNER_TEMP}/first-stall-output"
+: > "${first_stall}"
+CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK=0
+run_build_until_checkpoint "${first_stall}" >/dev/null
+grep -qx 'complete=false' "${first_stall}"
+grep -qx 'no_progress_streak=1' "${first_stall}"
+grep -qx 'failure_class=' "${first_stall}"
+
+second_stall="${RUNNER_TEMP}/second-stall-output"
+: > "${second_stall}"
+CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK=1
+if run_build_until_checkpoint "${second_stall}" >/dev/null 2>&1; then
+  second_status=0
+else
+  second_status=$?
+fi
+[ "${second_status}" -ne 0 ]
+grep -qx 'complete=false' "${second_stall}"
+grep -qx 'no_progress_streak=2' "${second_stall}"
+grep -qx 'failure_class=deterministic_build' "${second_stall}"
 
 echo "Ninja progress stall contract tests passed"

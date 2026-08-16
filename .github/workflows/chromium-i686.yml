@@ -49,6 +49,7 @@ concurrency:
 
 env:
   JOB_CHECKPOINT_MINUTES: ${{ vars.CHROMIUM_I686_CHECKPOINT_MINUTES || '340' }}
+  CHROMIUM_I686_NINJA_STALL_MINUTES: ${{ vars.CHROMIUM_I686_NINJA_STALL_MINUTES || '90' }}
   CHECKPOINT_RETENTION_DAYS: "14"
   CCACHE_MAX_SIZE: 8G
   MAX_RUNNER_RETRIES: ${{ vars.CHROMIUM_RUNNER_RETRIES || '2' }}
@@ -167,6 +168,7 @@ jobs:
           version="${REQUESTED_VERSION:-}"
           max_stage="${MAX_COMPILER_STAGES}"
           checkpoint_minutes="${JOB_CHECKPOINT_MINUTES}"
+          ninja_stall_minutes="${CHROMIUM_I686_NINJA_STALL_MINUTES}"
 
           control_fail() {
             echo "failure_class=deterministic_build" >> "${GITHUB_OUTPUT}"
@@ -213,6 +215,11 @@ jobs:
           if [ "${checkpoint_minutes}" -gt 340 ]; then
             control_fail "CHROMIUM_I686_CHECKPOINT_MINUTES must not exceed 340 so a 20-minute checkpoint/artifact reserve remains inside the 360-minute job timeout"
           fi
+          [[ "${ninja_stall_minutes}" =~ ^[1-9][0-9]{1,2}$ ]] \
+            || control_fail "CHROMIUM_I686_NINJA_STALL_MINUTES must be an integer from 30 through 180"
+          if [ "${ninja_stall_minutes}" -lt 30 ] || [ "${ninja_stall_minutes}" -gt 180 ]; then
+            control_fail "CHROMIUM_I686_NINJA_STALL_MINUTES must be between 30 and 180 minutes"
+          fi
 
           echo "stage=${stage}" >> "${GITHUB_OUTPUT}"
           echo "max_stage=${max_stage}" >> "${GITHUB_OUTPUT}"
@@ -220,7 +227,7 @@ jobs:
           echo "retry_count=${retry_count}" >> "${GITHUB_OUTPUT}"
           echo "max_retries=${MAX_RUNNER_RETRIES}" >> "${GITHUB_OUTPUT}"
           echo "failure_class=" >> "${GITHUB_OUTPUT}"
-          echo "Stage: ${stage}/${max_stage}; Chromium: ${version}; runner attempt: ${retry_count}; checkpoint cutoff: ${checkpoint_minutes} minutes"
+          echo "Stage: ${stage}/${max_stage}; Chromium: ${version}; runner attempt: ${retry_count}; checkpoint cutoff: ${checkpoint_minutes} minutes; Ninja stall watchdog: ${ninja_stall_minutes} minutes"
 
       - name: Resolve checkpoint sources
         id: checkpoint

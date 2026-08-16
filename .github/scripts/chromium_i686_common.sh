@@ -53,6 +53,9 @@ CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
 # Schema-1 compatibility remains in the resume path for one-way checkpoint migration.
 PORT_CONFIG_HASH_SCHEMA=2
 CHROMIUM_I686_MAX_NO_PROGRESS_STREAK=2
+CHROMIUM_I686_NINJA_STALL_MINUTES="${CHROMIUM_I686_NINJA_STALL_MINUTES:-90}"
+CHROMIUM_I686_HARD_MIN_NINJA_STALL_MINUTES=30
+CHROMIUM_I686_HARD_MAX_NINJA_STALL_MINUTES=180
 export DEPOT_TOOLS_UPDATE=0
 export CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS
 export CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB CHROMIUM_I686_MAX_RELEASE_MEMBERS
@@ -148,6 +151,16 @@ validate_checkpoint_minutes() {
   if [[ ! "${value}" =~ ^[1-9][0-9]{0,2}$ ]] \
       || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES}" ]; then
     echo "::error::JOB_CHECKPOINT_MINUTES must be an integer from 1 through ${CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES}."
+    return 1
+  fi
+}
+
+validate_ninja_stall_minutes() {
+  local value="${1:-}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,2}$ ]] \
+      || [ "${value}" -lt "${CHROMIUM_I686_HARD_MIN_NINJA_STALL_MINUTES}" ] \
+      || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_NINJA_STALL_MINUTES}" ]; then
+    echo "::error::CHROMIUM_I686_NINJA_STALL_MINUTES must be an integer from ${CHROMIUM_I686_HARD_MIN_NINJA_STALL_MINUTES} through ${CHROMIUM_I686_HARD_MAX_NINJA_STALL_MINUTES}."
     return 1
   fi
 }
@@ -1943,8 +1956,9 @@ run_build_until_checkpoint() {
   local output_file="${1:-${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}}"
   local started_at="${JOB_STARTED_AT:-}"
   local checkpoint_minutes="${JOB_CHECKPOINT_MINUTES:-340}"
-  local now remaining status failure_class pass pass_log_start pass_log
+  local now remaining status failure_class pass pass_log_start pass_log stall_marker
   local prior_no_progress_streak="${CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK:-0}"
+  local ninja_stall_minutes="${CHROMIUM_I686_NINJA_STALL_MINUTES:-90}"
   local ninja_log_entries_before no_progress_streak
   local compiler_started=false
   now="$(date +%s)"
@@ -1963,6 +1977,12 @@ run_build_until_checkpoint() {
     echo "complete=false" >> "${output_file}"
     echo "failure_class=deterministic_build" >> "${output_file}"
     echo "no_progress_streak=0" >> "${output_file}"
+    return 1
+  fi
+  if ! validate_ninja_stall_minutes "${ninja_stall_minutes}"; then
+    echo "complete=false" >> "${output_file}"
+    echo "failure_class=deterministic_build" >> "${output_file}"
+    echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
     return 1
   fi
   local cutoff=$((started_at + checkpoint_minutes * 60))
@@ -2011,13 +2031,34 @@ run_build_until_checkpoint() {
     pass_log="${WORKSPACE}/build-stage-pass-${pass}.log"
     set +e
     set +o pipefail
-    local -a build_targets=(chrome "chrome/installer/linux:installer_deps")
     compiler_started=true
-    timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j3 "${build_targets[@]}" 2>&1 | tee -a "${BUILD_LOG}"
+    stall_marker="${CHROMIUM_SRC}/.ninja-stall-watchdog.marker"
+    rm -f -- "${stall_marker}"
+    python3 "${WORKSPACE}/scripts/ninja_stall_watchdog.py" \
+      --stall-seconds "$((ninja_stall_minutes * 60))" \
+      --timeout-seconds "${remaining}" \
+      2>&1 | tee -a "${BUILD_LOG}"
     status=${PIPESTATUS[0]}
     set -o pipefail
     set -e
     tail -c "+$((pass_log_start + 1))" "${BUILD_LOG}" > "${pass_log}"
+
+    if [ -s "${stall_marker}" ]; then
+      rm -f -- "${stall_marker}"
+      echo "::warning::Ninja made no durable progress for ${ninja_stall_minutes} minutes; preserving work and rotating this compiler slice to a fresh runner."
+      no_progress_streak="$(record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}")"
+      echo "complete=false" >> "${output_file}"
+      if [ "${no_progress_streak}" -ge "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" ]; then
+        echo "failure_class=deterministic_build" >> "${output_file}"
+        echo "::error::Two consecutive compiler slices made no durable Ninja progress; latest checkpoint will be preserved for diagnosis."
+        return 1
+      fi
+      echo "failure_class=" >> "${output_file}"
+      df -h
+      ccache -s || true
+      return 0
+    fi
+    rm -f -- "${stall_marker}"
 
     if [ "${status}" -eq 0 ]; then
       echo "Build finished at $(date)"
