@@ -1946,6 +1946,7 @@ run_build_until_checkpoint() {
   local now remaining status failure_class pass pass_log_start pass_log
   local prior_no_progress_streak="${CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK:-0}"
   local ninja_log_entries_before no_progress_streak
+  local compiler_started=false
   now="$(date +%s)"
   if ! validate_job_started_at "${started_at}" "${now}"; then
     echo "complete=false" >> "${output_file}"
@@ -1985,8 +1986,14 @@ run_build_until_checkpoint() {
     remaining=$((cutoff - now))
     if [ "${remaining}" -le 300 ]; then
       echo "::warning::Less than five minutes remain before checkpoint cutoff; saving state for the next job."
-      no_progress_streak="$(record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}")"
       echo "complete=false" >> "${output_file}"
+      if [ "${compiler_started}" != true ]; then
+        echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
+        echo "failure_class=" >> "${output_file}"
+        echo "Compiler never started in this slice; preserving prior no-progress streak ${prior_no_progress_streak}/${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}."
+        return 0
+      fi
+      no_progress_streak="$(record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}")"
       if [ "${no_progress_streak}" -ge "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" ]; then
         echo "failure_class=deterministic_build" >> "${output_file}"
         echo "::error::Two consecutive compiler slices made no durable Ninja progress; refusing to burn another staged runner."
@@ -2005,6 +2012,7 @@ run_build_until_checkpoint() {
     set +e
     set +o pipefail
     local -a build_targets=(chrome "chrome/installer/linux:installer_deps")
+    compiler_started=true
     timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j3 "${build_targets[@]}" 2>&1 | tee -a "${BUILD_LOG}"
     status=${PIPESTATUS[0]}
     set -o pipefail

@@ -42,4 +42,27 @@ streak="$(record_ninja_progress_streak "${output}" 1 "${current}")"
 [ "${streak}" = 0 ]
 grep -qx 'no_progress_streak=0' "${output}"
 
+# Setup-only slices must not count as compiler stalls. Simulate arriving at the
+# five-minute reserve before autoninja is entered and preserve the prior streak.
+CHROMIUM_SRC="${RUNNER_TEMP}/chromium-source"
+OUT_DIR="${CHROMIUM_SRC}/out/Release_x86"
+BUILD_LOG="${RUNNER_TEMP}/build-stage.log"
+mkdir -p "${OUT_DIR}"
+: > "${BUILD_LOG}"
+ensure_build_disk_space() { return 0; }
+autoninja() {
+  echo "autoninja must not run in setup-only slice" >&2
+  return 99
+}
+JOB_CHECKPOINT_MINUTES=340
+now="$(date +%s)"
+JOB_STARTED_AT=$((now - JOB_CHECKPOINT_MINUTES * 60 + 299))
+CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK=1
+prep_output="${RUNNER_TEMP}/prep-only-outputs"
+: > "${prep_output}"
+run_build_until_checkpoint "${prep_output}" >/dev/null
+grep -qx 'complete=false' "${prep_output}"
+grep -qx 'no_progress_streak=1' "${prep_output}"
+grep -qx 'failure_class=' "${prep_output}"
+
 echo "Ninja progress stall contract tests passed"
