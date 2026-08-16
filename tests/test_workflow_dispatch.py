@@ -33,7 +33,7 @@ class WorkflowDispatchTests(unittest.TestCase):
             dispatch.list_recent_runs("owner/repo", "workflow.yml", attempts=1)
         args = run_gh.call_args.args[0]
         self.assertIn(str(dispatch.RUN_LOOKUP_LIMIT), args)
-        self.assertIn("databaseId,displayTitle,headBranch,status,conclusion,createdAt", args)
+        self.assertIn("databaseId,displayTitle,headBranch,headSha,status,conclusion,createdAt", args)
         self.assertGreaterEqual(dispatch.RUN_LOOKUP_LIMIT, 1000)
 
     def test_saturated_run_lookup_without_exact_title_fails_closed(self):
@@ -210,6 +210,137 @@ class WorkflowDispatchTests(unittest.TestCase):
                 ["stage=2"],
                 dedupe_completed=True,
             )
+
+    def test_lineage_sha_filters_same_title_same_branch_runs(self):
+        expected_sha = "a" * 40
+        runs = [
+            {
+                "displayTitle": "Expected title",
+                "headBranch": "main",
+                "headSha": "b" * 40,
+                "status": "in_progress",
+                "createdAt": "2026-08-14T12:00:00Z",
+            }
+        ]
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
+            self.assertFalse(
+                dispatch.exact_active_exists(
+                    "owner/repo", "workflow.yml", "Expected title", "main", expected_sha
+                )
+            )
+
+    def test_moved_ref_is_rejected_before_dispatch_write(self):
+        expected_sha = "a" * 40
+        with mock.patch.object(dispatch, "exact_active_exists", return_value=False), \
+             mock.patch.object(dispatch, "resolve_ref_sha", return_value="b" * 40), \
+             mock.patch.object(dispatch, "run_gh") as run_gh:
+            with self.assertRaisesRegex(dispatch.DispatchError, "refusing workflow dispatch"):
+                dispatch.dispatch_once(
+                    "owner/repo",
+                    "workflow.yml",
+                    "main",
+                    "Expected title",
+                    ["stage=2"],
+                    expected_head_sha=expected_sha,
+                )
+        run_gh.assert_not_called()
+
+    def test_successful_pinned_dispatch_confirms_materialized_head(self):
+        expected_sha = "a" * 40
+        with mock.patch.object(dispatch, "exact_active_exists", return_value=False), \
+             mock.patch.object(dispatch, "resolve_ref_sha", return_value=expected_sha), \
+             mock.patch.object(
+                 dispatch,
+                 "run_gh",
+                 return_value=subprocess.CompletedProcess(["gh"], 0, "", ""),
+             ) as run_gh, \
+             mock.patch.object(dispatch, "confirm_expected_dispatch_head", return_value=True) as confirm:
+            result = dispatch.dispatch_once(
+                "owner/repo",
+                "workflow.yml",
+                "main",
+                "Expected title",
+                ["stage=2"],
+                expected_head_sha=expected_sha.upper(),
+            )
+        self.assertEqual(result, "accepted-confirmed")
+        self.assertEqual(run_gh.call_count, 1)
+        self.assertEqual(confirm.call_args.args[4], expected_sha)
+
+    def test_post_dispatch_matching_run_with_malformed_timestamp_fails_closed(self):
+        expected_sha = "a" * 40
+        runs = [
+            {
+                "displayTitle": "Expected title",
+                "headBranch": "main",
+                "headSha": expected_sha,
+                "status": "queued",
+                "createdAt": "not-a-timestamp",
+            }
+        ]
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
+            with self.assertRaisesRegex(dispatch.DispatchError, "invalid createdAt metadata"):
+                dispatch.recent_dispatch_head_state(
+                    "owner/repo",
+                    "workflow.yml",
+                    "Expected title",
+                    "main",
+                    expected_sha,
+                    datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc),
+                )
+
+    def test_post_dispatch_head_mismatch_fails_without_second_write(self):
+        expected_sha = "a" * 40
+        with mock.patch.object(dispatch, "exact_active_exists", return_value=False), \
+             mock.patch.object(dispatch, "resolve_ref_sha", return_value=expected_sha), \
+             mock.patch.object(
+                 dispatch,
+                 "run_gh",
+                 return_value=subprocess.CompletedProcess(["gh"], 0, "", ""),
+             ) as run_gh, \
+             mock.patch.object(dispatch, "recent_dispatch_head_state", return_value="mismatch"), \
+             mock.patch.object(dispatch.time, "sleep"):
+            with self.assertRaisesRegex(dispatch.DispatchError, "different head SHA"):
+                dispatch.dispatch_once(
+                    "owner/repo",
+                    "workflow.yml",
+                    "main",
+                    "Expected title",
+                    ["stage=2"],
+                    expected_head_sha=expected_sha,
+                )
+        self.assertEqual(run_gh.call_count, 1)
+
+    def test_uncertain_pinned_dispatch_confirms_without_write_retry(self):
+        expected_sha = "a" * 40
+        with mock.patch.object(dispatch, "exact_active_exists", return_value=False), \
+             mock.patch.object(dispatch, "resolve_ref_sha", return_value=expected_sha), \
+             mock.patch.object(dispatch, "run_gh", side_effect=dispatch.DispatchError("timeout")) as run_gh, \
+             mock.patch.object(dispatch, "confirm_expected_dispatch_head", return_value=True):
+            result = dispatch.dispatch_once(
+                "owner/repo",
+                "workflow.yml",
+                "main",
+                "Expected title",
+                ["stage=2"],
+                expected_head_sha=expected_sha,
+            )
+        self.assertEqual(result, "accepted-after-client-error")
+        self.assertEqual(run_gh.call_count, 1)
+
+    def test_invalid_expected_head_sha_fails_before_network(self):
+        with mock.patch.object(dispatch, "run_gh") as run_gh:
+            with self.assertRaises(ValueError):
+                dispatch.dispatch_once(
+                    "owner/repo",
+                    "workflow.yml",
+                    "main",
+                    "Expected title",
+                    ["stage=2"],
+                    expected_head_sha="not-a-sha",
+                )
+        run_gh.assert_not_called()
+
 
 
 if __name__ == "__main__":

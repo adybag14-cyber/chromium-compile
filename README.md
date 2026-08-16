@@ -188,6 +188,7 @@ Fresh build:
 ```text
 stage:                         1
 version:                       exact pinned version
+lineage_sha:                   empty for a new manual lineage
 preferred_checkpoint_run_id:  empty
 fallback_checkpoint_run_id:   empty
 older_checkpoint_run_id:      empty
@@ -199,13 +200,14 @@ Same-stage recovery:
 ```text
 stage:                         failed stage number
 version:                       identical pinned version
+lineage_sha:                   empty for a new manual recovery lineage
 preferred_checkpoint_run_id:  run containing that stage checkpoint
 fallback_checkpoint_run_id:   previous-stage run when available
 older_checkpoint_run_id:      leave empty for a manual recovery; automatic lineage manages this
 retry_count:                   1 or 2
 ```
 
-Stages automatically dispatch their successor until the build completes or reaches the configured limit.
+Stages automatically dispatch their successor until the build completes or reaches the configured limit. An automatic lineage carries the workflow commit SHA from preflight through every continuation and fresh-runner recovery. Before dispatch, the exactly-once helper confirms that the default branch still resolves to that SHA; after dispatch it confirms the materialized run reports the same `headSha`. Each stage independently rejects a mismatched `lineage_sha`, and write-capable continuation/pruning/reporting helpers are checked out from `${{ github.sha }}` rather than a moving branch tip. If the default branch changes during a long compile, the current checkpoint is preserved and automatic continuation fails closed instead of mixing workflow generations. A maintainer may then review the change and start a new manual lineage with `lineage_sha` empty; normal checkpoint compatibility/provenance checks still decide whether older compiled state is reusable.
 
 ## Release validation
 

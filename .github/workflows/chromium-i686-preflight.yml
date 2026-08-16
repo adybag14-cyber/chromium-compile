@@ -170,6 +170,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHROMIUM_VERSION: ${{ inputs.version }}
+          LINEAGE_SHA: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
@@ -180,8 +181,10 @@ jobs:
             --workflow chromium-i686.yml \
             --ref "${DEFAULT_BRANCH}" \
             --expected-title "${expected_title}" \
+            --expected-head-sha "${LINEAGE_SHA}" \
             --input "stage=1" \
             --input "version=${CHROMIUM_VERSION}" \
+            --input "lineage_sha=${LINEAGE_SHA}" \
             --input "preferred_checkpoint_run_id=" \
             --input "fallback_checkpoint_run_id=" \
             --input "retry_count=0"
