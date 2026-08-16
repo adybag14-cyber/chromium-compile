@@ -60,31 +60,9 @@ jobs:
   resolve_runner:
     name: Resolve tested i686 runner
     permissions: {}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      label: ${{ steps.resolve.outputs.label }}
-      valid: ${{ steps.resolve.outputs.valid }}
-    steps:
-      - name: Validate configured hosted runner label
-        id: resolve
-        env:
-          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${REQUESTED_RUNNER}" in
-            ubuntu-22.04|ubuntu-24.04)
-              echo "label=${REQUESTED_RUNNER}" >> "${GITHUB_OUTPUT}"
-              echo "valid=true" >> "${GITHUB_OUTPUT}"
-              echo "Validated Chromium i686 runner label: ${REQUESTED_RUNNER}"
-              ;;
-            *)
-              echo "label=" >> "${GITHUB_OUTPUT}"
-              echo "valid=false" >> "${GITHUB_OUTPUT}"
-              echo "::error::Unsupported CHROMIUM_I686_RUNNER '${REQUESTED_RUNNER}'. Allowed explicit production labels: ubuntu-22.04, ubuntu-24.04."
-              ;;
-          esac
+    uses: ./.github/workflows/resolve-i686-production-runner.yml
+    with:
+      requested_runner: ${{ vars.CHROMIUM_I686_RUNNER }}
 
   report_runner_configuration:
     name: Report invalid i686 runner configuration
@@ -105,7 +83,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CHROMIUM_VERSION: ${{ inputs.version }}
-          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04' }}
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER }}
         shell: bash
         run: |
           set -euo pipefail
