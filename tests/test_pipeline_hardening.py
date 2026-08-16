@@ -506,10 +506,22 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('control_fail "validation_checkpoint_ref requires preferred_checkpoint_run_id"', workflow)
         self.assertIn('if [ "${CURRENT_REF}" = "${DEFAULT_BRANCH}" ]; then', workflow)
         self.assertIn('if [ "${REQUESTED_CHECKPOINT_REF}" != "${DEFAULT_BRANCH}" ]; then', workflow)
-        # Cross-branch validation must never relax any of the write-capable default-branch gates.
-        for job in ("continue_pipeline:", "recover_bad_runner:", "report_terminal_failure:"):
-            self.assertIn(job, workflow)
-        self.assertGreaterEqual(workflow.count("github.ref_name == github.event.repository.default_branch"), 4)
+        # Cross-branch validation must never relax any individual write-capable default-branch gate.
+        def job_block(job_name: str) -> str:
+            marker = f"  {job_name}:\n"
+            start = workflow.index(marker)
+            remainder = workflow[start + len(marker):]
+            next_job = re.search(r"(?m)^  [A-Za-z0-9_]+:\s*$", remainder)
+            end = len(workflow) if next_job is None else start + len(marker) + next_job.start()
+            return workflow[start:end]
+
+        for job in ("continue_pipeline", "recover_bad_runner", "report_terminal_failure"):
+            block = job_block(job)
+            self.assertIn(
+                "github.ref_name == github.event.repository.default_branch",
+                block,
+                f"{job} lost its default-branch write guard",
+            )
 
     def test_fallback_checkpoint_is_downloaded_on_demand(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")
