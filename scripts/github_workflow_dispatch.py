@@ -53,24 +53,50 @@ def run_gh(args: Sequence[str], *, timeout: int = 90) -> subprocess.CompletedPro
         raise DispatchError(f"{' '.join(command)} failed: {detail}") from exc
 
 
-def list_recent_runs(repository: str, workflow: str, *, attempts: int = 3) -> list[dict[str, object]]:
+def _created_filter_value(created_after: datetime) -> str:
+    if created_after.tzinfo is None:
+        raise ValueError("created_after must be timezone-aware")
+    utc = created_after.astimezone(timezone.utc).replace(microsecond=0)
+    return ">=" + utc.isoformat().replace("+00:00", "Z")
+
+
+def list_recent_runs(
+    repository: str,
+    workflow: str,
+    *,
+    attempts: int = 3,
+    branch: str | None = None,
+    commit: str | None = None,
+    created_after: datetime | None = None,
+) -> list[dict[str, object]]:
+    if commit is not None:
+        commit = normalize_expected_sha(commit)
     last: DispatchError | None = None
     for attempt in range(1, attempts + 1):
         try:
-            result = run_gh(
+            command = [
+                "run",
+                "list",
+                "--repo",
+                repository,
+                "--workflow",
+                workflow,
+            ]
+            if branch is not None:
+                command.append(f"--branch={branch}")
+            if commit is not None:
+                command.append(f"--commit={commit}")
+            if created_after is not None:
+                command.append(f"--created={_created_filter_value(created_after)}")
+            command.extend(
                 [
-                    "run",
-                    "list",
-                    "--repo",
-                    repository,
-                    "--workflow",
-                    workflow,
                     "--limit",
                     str(RUN_LOOKUP_LIMIT),
                     "--json",
                     "databaseId,displayTitle,headBranch,headSha,status,conclusion,createdAt",
                 ]
             )
+            result = run_gh(command)
             payload = json.loads(result.stdout or "[]")
             if not isinstance(payload, list):
                 raise DispatchError("gh run list returned non-list JSON")
@@ -127,8 +153,15 @@ def _exact_runs_or_fail_closed(
     expected_title: str,
     expected_ref: str,
     expected_head_sha: str | None = None,
+    created_after: datetime | None = None,
 ) -> list[dict[str, object]]:
-    runs = list_recent_runs(repository, workflow)
+    runs = list_recent_runs(
+        repository,
+        workflow,
+        branch=expected_ref,
+        commit=expected_head_sha,
+        created_after=created_after,
+    )
     matches = [
         run
         for run in runs
@@ -156,7 +189,11 @@ def recent_dispatch_head_state(
     not_before: datetime,
 ) -> str:
     threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=30)
-    runs = list_recent_runs(repository, workflow)
+    # Do not commit-filter this post-dispatch view: a same-title/ref run at the
+    # wrong SHA is the race condition this function must detect.
+    runs = list_recent_runs(
+        repository, workflow, branch=expected_ref, created_after=threshold
+    )
     title_ref_matches = [
         run
         for run in runs
@@ -273,7 +310,12 @@ def exact_exists_since(
 ) -> bool:
     threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=grace_seconds)
     for run in _exact_runs_or_fail_closed(
-        repository, workflow, expected_title, expected_ref, expected_head_sha
+        repository,
+        workflow,
+        expected_title,
+        expected_ref,
+        expected_head_sha,
+        created_after=threshold,
     ):
         raw = str(run.get("createdAt", ""))
         try:
