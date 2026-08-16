@@ -82,6 +82,17 @@ class PipelineHardeningTests(unittest.TestCase):
             "libxkbcommon.so.0",
             "libudev.so.1",
             "libasound.so.2",
+            "libatk-1.0.so.0",
+            "libatk-bridge-2.0.so.0",
+            "libatspi.so.0",
+            "libcups.so.2",
+            "libcairo.so.2",
+            "libpango-1.0.so.0",
+            "libXcomposite.so.1",
+            "libXdamage.so.1",
+            "libXfixes.so.3",
+            "libXrandr.so.2",
+            "libXtst.so.6",
             "libQt5Core.so.5",
             "libQt5Gui.so.5",
             "libQt5Widgets.so.5",
@@ -184,7 +195,7 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("CHROMIUM_I686_DISCOVERY_TIMEOUT_SECONDS", common)
         self.assertIn("CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS", common)
         self.assertIn("timeout -k 20s", common)
-        self.assertIn("refusing to burn a fresh runner retry", common)
+        self.assertIn("a fresh runner may recover from repository/network metadata failure", common)
         self.assertIn("classify_apt_file_search_status()", common)
         self.assertIn("resolver syntax/tooling requires maintenance", common)
         self.assertIn("apt-file search failed or timed out", common)
@@ -321,6 +332,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("bounded_sudo_apt_get install -y file binutils", preflight)
         self.assertIn("bounded_sudo_apt_get install -y --no-install-recommends gcc-multilib file binutils", validation)
         self.assertIn('ldd_output="$(ldd "${RUNNER_TEMP}/lts-i386-canary")"', validation)
+        self.assertIn("Standard Chromium runtime mapping unexpectedly required apt-file metadata", validation)
+        self.assertIn("libatk-bridge-2.0.so.0", validation)
+        self.assertIn("libpango-1.0.so.0", validation)
 
     def test_post_compile_artifact_boundaries_are_fail_closed(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
