@@ -37,6 +37,51 @@ detect_runner_platform >/dev/null
 unset CHROMIUM_I686_OS_RELEASE_FILE
 unset -f dpkg-architecture
 
+# A failed apt-file install simulation is deterministic only when APT can prove
+# there is no candidate. Repository/metadata ambiguity must stay infrastructure.
+(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = apt-file ]; then return 1; fi
+    builtin command "$@"
+  }
+  bounded_apt_get_simulate() { return 100; }
+  apt_package_candidate_status() { return 1; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if real_ensure_apt_file_i386_metadata >/dev/null 2>&1; then
+    fail "missing apt-file candidate unexpectedly succeeded"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = deterministic_build ] \
+    || fail "confirmed missing apt-file candidate was not deterministic"
+)
+(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = apt-file ]; then return 1; fi
+    builtin command "$@"
+  }
+  bounded_apt_get_simulate() { return 100; }
+  apt_package_candidate_status() { return 0; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if real_ensure_apt_file_i386_metadata >/dev/null 2>&1; then
+    fail "failed apt-file simulation with candidate unexpectedly succeeded"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = infrastructure ] \
+    || fail "apt-file simulation/repository failure with candidate was not infrastructure"
+)
+(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = apt-file ]; then return 1; fi
+    builtin command "$@"
+  }
+  bounded_apt_get_simulate() { return 100; }
+  apt_package_candidate_status() { return 2; }
+  I386_RUNTIME_REPAIR_FAILURE_CLASS=""
+  if real_ensure_apt_file_i386_metadata >/dev/null 2>&1; then
+    fail "failed apt-file simulation with unverifiable candidate unexpectedly succeeded"
+  fi
+  [ "${I386_RUNTIME_REPAIR_FAILURE_CLASS}" = infrastructure ] \
+    || fail "apt-file simulation plus candidate-query failure was not infrastructure"
+)
+
 # A bounded apt-file metadata refresh timeout is transient runner/repository
 # infrastructure, not a deterministic Chromium build failure.
 (

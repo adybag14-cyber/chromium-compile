@@ -196,6 +196,8 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("CHROMIUM_I686_APT_FILE_SEARCH_TIMEOUT_SECONDS", common)
         self.assertIn("timeout -k 20s", common)
         self.assertIn("a fresh runner may recover from repository/network metadata failure", common)
+        self.assertIn("apt_package_candidate_status()", common)
+        self.assertIn("repository/metadata infrastructure may recover on a fresh runner", common)
         self.assertIn("classify_apt_file_search_status()", common)
         self.assertIn("resolver syntax/tooling requires maintenance", common)
         self.assertIn("apt-file search failed or timed out", common)

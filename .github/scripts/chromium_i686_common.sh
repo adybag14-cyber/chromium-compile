@@ -478,10 +478,26 @@ detect_runner_platform() {
   fi
 }
 
-i386_package_has_candidate() {
+apt_package_candidate_status() {
   local package="${1:?package is required}"
-  apt-cache policy "${package}" 2>/dev/null \
-    | awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}'
+  local output status=0
+  if output="$(apt-cache policy "${package}" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "${status}" -ne 0 ]; then
+    echo "::warning::Could not query APT candidate state for ${package} (status ${status}); repository metadata may be unavailable." >&2
+    return 2
+  fi
+  if awk '/Candidate:/ && $2 != "(none)" {found=1} END {exit !found}' <<<"${output}"; then
+    return 0
+  fi
+  return 1
+}
+
+i386_package_has_candidate() {
+  apt_package_candidate_status "${1:?package is required}" >/dev/null 2>&1
 }
 
 i386_package_variants() {
@@ -559,9 +575,25 @@ ensure_apt_file_i386_metadata() {
 
   echo "Preparing bounded apt-file metadata fallback for automatic i386 SONAME resolution."
   if ! command -v apt-file >/dev/null 2>&1; then
-    if ! bounded_apt_get_simulate install -y --no-install-recommends apt-file >/dev/null 2>&1; then
-      I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
-      echo "::error::apt-file fallback tooling has no installable candidate on this runner; add a SONAME mapping or update the resolver."
+    local simulation_status=0 candidate_status=0
+    if bounded_apt_get_simulate install -y --no-install-recommends apt-file >/dev/null 2>&1; then
+      simulation_status=0
+    else
+      simulation_status=$?
+    fi
+    if [ "${simulation_status}" -ne 0 ]; then
+      if apt_package_candidate_status apt-file >/dev/null 2>&1; then
+        candidate_status=0
+      else
+        candidate_status=$?
+      fi
+      if [ "${candidate_status}" -eq 1 ]; then
+        I386_RUNTIME_REPAIR_FAILURE_CLASS=deterministic_build
+        echo "::error::apt-file fallback tooling has no installable candidate on this runner; add a SONAME mapping or update the resolver."
+      else
+        I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
+        echo "::error::apt-file installation simulation failed while its candidate state was present or unverifiable; repository/metadata infrastructure may recover on a fresh runner."
+      fi
       return 1
     fi
     if ! bounded_sudo_apt_get install -y --no-install-recommends apt-file; then
