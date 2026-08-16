@@ -23,6 +23,11 @@ on:
         required: false
         default: ""
         type: string
+      validation_checkpoint_ref:
+        description: "Validation-only source branch for trusted checkpoints; non-default runs may name only the default branch"
+        required: false
+        default: ""
+        type: string
       older_checkpoint_run_id:
         description: "Run containing the older retained checkpoint generation; automatic lineage only"
         required: false
@@ -137,6 +142,7 @@ jobs:
       failure_class: ${{ steps.compiler.outputs.failure_class || steps.control.outputs.failure_class }}
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CHECKPOINT_EXPECTED_REF: ${{ inputs.validation_checkpoint_ref || github.ref_name }}
     steps:
       - name: Checkout workflow helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,6 +155,10 @@ jobs:
           REQUESTED_STAGE: ${{ inputs.stage }}
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_RETRY_COUNT: ${{ inputs.retry_count }}
+          REQUESTED_CHECKPOINT_REF: ${{ inputs.validation_checkpoint_ref }}
+          PREFERRED_RUN_ID: ${{ inputs.preferred_checkpoint_run_id }}
+          CURRENT_REF: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
           set -euo pipefail
@@ -185,6 +195,18 @@ jobs:
             || control_fail "retry_count must be an integer from 0 through 10"
           if [ "${retry_count}" -gt "${MAX_RUNNER_RETRIES}" ]; then
             control_fail "retry_count must be between 0 and ${MAX_RUNNER_RETRIES}"
+          fi
+          if [ -n "${REQUESTED_CHECKPOINT_REF:-}" ]; then
+            if [ "${CURRENT_REF}" = "${DEFAULT_BRANCH}" ]; then
+              control_fail "validation_checkpoint_ref is forbidden on the default branch"
+            fi
+            if [ "${REQUESTED_CHECKPOINT_REF}" != "${DEFAULT_BRANCH}" ]; then
+              control_fail "validation_checkpoint_ref may name only the repository default branch"
+            fi
+            if [ -z "${PREFERRED_RUN_ID:-}" ]; then
+              control_fail "validation_checkpoint_ref requires preferred_checkpoint_run_id"
+            fi
+            echo "Validation-only checkpoint provenance override: ${CURRENT_REF} may read trusted checkpoints from ${REQUESTED_CHECKPOINT_REF}; production mutations remain default-branch gated."
           fi
           [[ "${checkpoint_minutes}" =~ ^[1-9][0-9]{0,2}$ ]] \
             || control_fail "CHROMIUM_I686_CHECKPOINT_MINUTES must be an integer from 1 through 340"
