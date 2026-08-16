@@ -296,6 +296,23 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("ubuntu-22.04|ubuntu-24.04", resolver)
         self.assertNotIn("ubuntu-26.04", resolver)
 
+    def test_selected_runner_i386_canary_accepts_release_local_qt_package_names(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        job_start = validation.index("  validate_i386_runtime:\n")
+        matrix_start = validation.index("  validate_lts_compatibility:\n", job_start)
+        job = validation[job_start:matrix_start]
+        self.assertIn('qt_widgets_package="${I386_RESOLVED_PACKAGE}"', job)
+        self.assertIn('bounded_sudo_apt_get install -y --no-install-recommends "${qt_widgets_package}"', job)
+        self.assertIn('*:i386)', job)
+        for pinned in (
+            'test "${I386_RESOLVED_PACKAGE}" = libqt5core5a:i386',
+            'test "${I386_RESOLVED_PACKAGE}" = libqt5gui5:i386',
+            'test "${I386_RESOLVED_PACKAGE}" = libqt5widgets5:i386',
+            'test "${I386_RESOLVED_PACKAGE}" = libqt5network5:i386',
+            'bounded_sudo_apt_get install -y --no-install-recommends libqt5widgets5:i386',
+        ):
+            self.assertNotIn(pinned, job)
+
     def test_validation_heavy_jobs_use_resolved_explicit_lts_runner(self):
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
         self.assertIn("  resolve_production_runner:\n", validation)
@@ -478,11 +495,11 @@ class PipelineHardeningTests(unittest.TestCase):
     def test_linux_ci_exercises_generic_soname_discovery(self):
         workflow = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
         self.assertIn("resolve_i386_package_for_soname libQt5Core.so.5", workflow)
-        self.assertIn("libqt5core5a:i386", workflow)
         self.assertIn("resolve_i386_package_for_soname libQt5Widgets.so.5", workflow)
-        self.assertIn("libqt5widgets5:i386", workflow)
         self.assertIn("resolve_i386_package_for_soname libQt5Network.so.5", workflow)
-        self.assertIn("libqt5network5:i386", workflow)
+        self.assertIn('qt_core_package="${I386_RESOLVED_PACKAGE}"', workflow)
+        self.assertIn('qt_widgets_package="${I386_RESOLVED_PACKAGE}"', workflow)
+        self.assertIn('test ! -e "${RUNNER_TEMP}/chromium-i686-apt-file-i386-ready"', workflow)
 
     def test_external_numeric_inputs_are_bounded_before_shell_arithmetic(self):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
