@@ -36,6 +36,120 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.assertIn("databaseId,displayTitle,headBranch,headSha,status,conclusion,createdAt", args)
         self.assertGreaterEqual(dispatch.RUN_LOOKUP_LIMIT, 1000)
 
+    def test_run_lookup_pushes_branch_commit_and_time_filters_to_github(self):
+        expected_sha = "a" * 40
+        created_after = datetime(2026, 8, 14, 12, 0, 0, 987654, tzinfo=timezone.utc)
+        with mock.patch.object(
+            dispatch,
+            "run_gh",
+            return_value=subprocess.CompletedProcess(["gh"], 0, "[]", ""),
+        ) as run_gh:
+            dispatch.list_recent_runs(
+                "owner/repo",
+                "workflow.yml",
+                attempts=1,
+                branch="feature/slash",
+                commit=expected_sha.upper(),
+                created_after=created_after,
+            )
+        args = run_gh.call_args.args[0]
+        self.assertIn("--branch=feature/slash", args)
+        self.assertIn(f"--commit={expected_sha}", args)
+        self.assertIn("--created=>=2026-08-14T12:00:00Z", args)
+
+    def test_run_lookup_rejects_timezone_naive_created_filter_before_github(self):
+        with mock.patch.object(dispatch, "run_gh") as run_gh, self.assertRaisesRegex(
+            ValueError, "timezone-aware"
+        ):
+            dispatch.list_recent_runs(
+                "owner/repo",
+                "workflow.yml",
+                attempts=1,
+                created_after=datetime(2026, 8, 14, 12, 0),
+            )
+        run_gh.assert_not_called()
+
+    def test_exact_lineage_lookup_scopes_to_branch_and_commit(self):
+        expected_sha = "a" * 40
+        run = {
+            "displayTitle": "Expected title",
+            "headBranch": "main",
+            "headSha": expected_sha,
+            "status": "in_progress",
+            "createdAt": "2026-08-14T12:00:00Z",
+        }
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=[run]) as listing:
+            self.assertTrue(
+                dispatch.exact_active_exists(
+                    "owner/repo",
+                    "workflow.yml",
+                    "Expected title",
+                    "main",
+                    expected_head_sha=expected_sha,
+                )
+            )
+        self.assertEqual(listing.call_args.kwargs["branch"], "main")
+        self.assertEqual(listing.call_args.kwargs["commit"], expected_sha)
+        self.assertIsNone(listing.call_args.kwargs["created_after"])
+
+    def test_recent_dispatch_confirmation_keeps_wrong_sha_visible(self):
+        expected_sha = "a" * 40
+        started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        wrong = {
+            "displayTitle": "Expected title",
+            "headBranch": "main",
+            "headSha": "b" * 40,
+            "status": "queued",
+            "createdAt": "2026-08-14T12:00:01Z",
+        }
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=[wrong]) as listing:
+            self.assertEqual(
+                dispatch.recent_dispatch_head_state(
+                    "owner/repo",
+                    "workflow.yml",
+                    "Expected title",
+                    "main",
+                    expected_sha,
+                    started,
+                ),
+                "mismatch",
+            )
+        self.assertEqual(listing.call_args.kwargs["branch"], "main")
+        self.assertNotIn("commit", listing.call_args.kwargs)
+        self.assertEqual(
+            listing.call_args.kwargs["created_after"],
+            datetime(2026, 8, 14, 11, 59, 30, tzinfo=timezone.utc),
+        )
+
+    def test_parent_scoped_dedupe_pushes_created_filter_server_side(self):
+        expected_sha = "a" * 40
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        run = {
+            "displayTitle": "Expected title",
+            "headBranch": "main",
+            "headSha": expected_sha,
+            "status": "completed",
+            "createdAt": "2026-08-14T12:00:01Z",
+        }
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=[run]) as listing:
+            self.assertTrue(
+                dispatch.exact_exists_since(
+                    "owner/repo",
+                    "workflow.yml",
+                    "Expected title",
+                    "main",
+                    parent_started,
+                    grace_seconds=30,
+                    expected_head_sha=expected_sha,
+                )
+            )
+        self.assertEqual(listing.call_args.kwargs["branch"], "main")
+        self.assertEqual(listing.call_args.kwargs["commit"], expected_sha)
+        self.assertEqual(
+            listing.call_args.kwargs["created_after"],
+            datetime(2026, 8, 14, 11, 59, 30, tzinfo=timezone.utc),
+        )
+
     def test_saturated_run_lookup_without_exact_title_fails_closed(self):
         runs = [
             {"displayTitle": f"other-{i}", "status": "completed", "createdAt": "2026-01-01T00:00:00Z"}
@@ -172,6 +286,34 @@ class WorkflowDispatchTests(unittest.TestCase):
                     "owner/repo", "workflow.yml", "Expected title", "main", parent_started
                 )
             )
+
+    def test_parent_scoped_dedupe_fails_closed_on_malformed_timestamp(self):
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        run = {
+            "displayTitle": "Expected title",
+            "headBranch": "main",
+            "status": "completed",
+            "createdAt": "not-a-timestamp",
+        }
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=[run]):
+            with self.assertRaisesRegex(dispatch.DispatchError, "invalid createdAt metadata"):
+                dispatch.exact_exists_since(
+                    "owner/repo", "workflow.yml", "Expected title", "main", parent_started
+                )
+
+    def test_parent_scoped_dedupe_fails_closed_on_naive_timestamp(self):
+        parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        run = {
+            "displayTitle": "Expected title",
+            "headBranch": "main",
+            "status": "completed",
+            "createdAt": "2026-08-14T12:00:01",
+        }
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=[run]):
+            with self.assertRaisesRegex(dispatch.DispatchError, "timezone-naive createdAt"):
+                dispatch.exact_exists_since(
+                    "owner/repo", "workflow.yml", "Expected title", "main", parent_started
+                )
 
     def test_historical_same_title_does_not_block_fresh_build_lineage(self):
         parent_started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
