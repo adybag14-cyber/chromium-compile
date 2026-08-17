@@ -61,7 +61,7 @@ jobs:
       - name: Checkout trusted release helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Install release validation tools
@@ -282,7 +282,7 @@ jobs:
       - name: Checkout trusted release helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Install target runtime smoke dependencies
@@ -355,7 +355,7 @@ jobs:
       - name: Checkout trusted maintenance helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Report read-only release validation failure
@@ -407,7 +407,7 @@ jobs:
       - name: Checkout trusted release helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Install publication validation tools
@@ -668,7 +668,7 @@ jobs:
       - name: Checkout trusted checkpoint cleanup helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Prune checkpoints made obsolete by the healthy immutable release

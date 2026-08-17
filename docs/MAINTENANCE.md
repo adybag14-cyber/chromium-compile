@@ -129,6 +129,7 @@ Maintenance issue creation should use `scripts/github_maintenance_issue.py`. Exa
 
 `bootstrap-i686-live.yml` is now manual-only. It first checks the immutable Chromium 150 release tag and will not dispatch a released baseline. It exists only as historical/bootstrap recovery tooling, not as part of normal stable-version automation. Bootstrap no longer has repository-content write permission or commits status files; it reports status only in the workflow summary, and all production write-capable manual workflows require trusted default-branch workflow code.
  Both bootstrap and the six-hour stable watcher pin their helper checkout to `github.workflow_sha` and pass that SHA to the exactly-once dispatcher; if the default branch moves before dispatch, the starter run fails closed instead of launching preflight from a different workflow generation.
+ Publisher and maintenance/reporting jobs likewise pin explicit helper checkouts to `github.workflow_sha`, so read-only validation and write-capable release/issue/cleanup phases within one workflow run use one immutable helper-code generation even if the default branch advances meanwhile.
 
 ### Linux sandbox executable policy
 
