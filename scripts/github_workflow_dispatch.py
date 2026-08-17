@@ -12,7 +12,8 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
-ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
+ACTIVE_STATUSES = ("in_progress", "queued", "waiting", "pending", "requested")
+ACTIVE = frozenset(ACTIVE_STATUSES)
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -68,6 +69,7 @@ def list_recent_runs(
     branch: str | None = None,
     commit: str | None = None,
     created_after: datetime | None = None,
+    status: str | None = None,
 ) -> list[dict[str, object]]:
     if commit is not None:
         commit = normalize_expected_sha(commit)
@@ -88,6 +90,8 @@ def list_recent_runs(
                 command.append(f"--commit={commit}")
             if created_after is not None:
                 command.append(f"--created={_created_filter_value(created_after)}")
+            if status is not None:
+                command.append(f"--status={status}")
             command.extend(
                 [
                     "--limit",
@@ -154,6 +158,7 @@ def _exact_runs_or_fail_closed(
     expected_ref: str,
     expected_head_sha: str | None = None,
     created_after: datetime | None = None,
+    status: str | None = None,
 ) -> list[dict[str, object]]:
     runs = list_recent_runs(
         repository,
@@ -161,6 +166,7 @@ def _exact_runs_or_fail_closed(
         branch=expected_ref,
         commit=expected_head_sha,
         created_after=created_after,
+        status=status,
     )
     matches = [
         run
@@ -171,6 +177,7 @@ def _exact_runs_or_fail_closed(
             expected_head_sha is None
             or str(run.get("headSha", "")).lower() == expected_head_sha.lower()
         )
+        and (status is None or str(run.get("status", "")) == status)
     ]
     if not matches and len(runs) >= RUN_LOOKUP_LIMIT:
         raise DispatchError(
@@ -275,12 +282,19 @@ def exact_active_exists(
     *,
     expected_head_sha: str | None = None,
 ) -> bool:
-    return any(
-        str(run.get("status", "")) in ACTIVE
-        for run in _exact_runs_or_fail_closed(
-            repository, workflow, expected_title, expected_ref, expected_head_sha
-        )
-    )
+    # Query only incomplete states. Historical completed runs cannot consume the
+    # bounded lookup budget even if one workflow commit remains deployed for years.
+    for status in ACTIVE_STATUSES:
+        if _exact_runs_or_fail_closed(
+            repository,
+            workflow,
+            expected_title,
+            expected_ref,
+            expected_head_sha,
+            status=status,
+        ):
+            return True
+    return False
 
 
 def exact_any_exists(
