@@ -106,7 +106,7 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
 
         self.assertIn("github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch", publish)
-        self.assertIn("ref: ${{ github.event.repository.default_branch }}", publish)
+        self.assertIn("ref: ${{ github.workflow_sha }}", publish)
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", bootstrap)
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", watcher)
         self.assertIn("github.ref_name == github.event.repository.default_branch && needs.resolve_runner.outputs.valid == 'true'", preflight)
@@ -120,6 +120,21 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("chromium-i686-release-nonprod-{0}", publish)
         self.assertIn("chromium-i686-stable-watcher-nonprod-{0}", watcher)
         self.assertIn("chromium-i686-bootstrap-nonprod-{0}", bootstrap)
+
+    def test_control_plane_helper_checkouts_do_not_reresolve_default_branch(self):
+        workflow_dir = ROOT / ".github" / "workflows"
+        covered = {
+            "chromium-i686-preflight.yml": 1,
+            "publish-i686-release.yml": 5,
+            "report-i686-build-failure.yml": 1,
+            "validate-port-infrastructure.yml": 3,
+        }
+        moving_ref = "ref: ${{ github.event.repository.default_branch }}"
+        immutable_ref = "ref: ${{ github.workflow_sha }}"
+        for name, minimum_count in covered.items():
+            text = (workflow_dir / name).read_text(encoding="utf-8")
+            self.assertNotIn(moving_ref, text, name)
+            self.assertGreaterEqual(text.count(immutable_ref), minimum_count, name)
 
     def test_secondary_reporter_covers_publisher_and_uses_central_issue_helper(self):
         reporter = (ROOT / ".github" / "workflows" / "report-i686-build-failure.yml").read_text(encoding="utf-8")

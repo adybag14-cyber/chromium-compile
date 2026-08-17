@@ -350,7 +350,7 @@ class PipelineHardeningTests(unittest.TestCase):
         reporter = validation[validation.index("  report_runner_configuration:\n"):validation.index("  report_lts_drift:\n")]
         self.assertIn("issues: write", reporter)
         self.assertIn("github.ref_name == github.event.repository.default_branch", reporter)
-        self.assertIn("ref: ${{ github.event.repository.default_branch }}", reporter)
+        self.assertIn("ref: ${{ github.workflow_sha }}", reporter)
 
     def test_validation_drift_issues_close_after_healthy_recovery(self):
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
@@ -981,7 +981,12 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("contents: write", cleanup)
         self.assertIn("scripts/github_released_checkpoint_cleanup.py", cleanup)
         self.assertIn("--apply", cleanup)
-        self.assertIn("ref: ${{ github.event.repository.default_branch }}", cleanup)
+        self.assertIn("ref: ${{ github.workflow_sha }}", cleanup)
+
+    def test_publisher_helper_checkouts_are_bound_to_workflow_commit(self):
+        publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
+        self.assertNotIn("ref: ${{ github.event.repository.default_branch }}", publish)
+        self.assertGreaterEqual(publish.count("ref: ${{ github.workflow_sha }}"), 5)
 
     def test_publisher_is_transactional_and_runtime_smokes_target_i386(self):
         publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
