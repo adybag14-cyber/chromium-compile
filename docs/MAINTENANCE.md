@@ -38,7 +38,7 @@ CHROMIUM_ALLOW_LEGACY_CHECKPOINT_VERSION=<exact-version>
 3. Existing release tags, active runs and open maintenance issues are treated as recorded states.
 4. The oldest unseen version is sent to compatibility preflight.
 5. Preflight applies strict common and major-version patches, installs the i386 sysroot and generates the GN/Ninja graph.
-6. A successful preflight dispatches the resumable staged build.
+6. A successful preflight dispatches the resumable staged build. The preflight commit becomes the automatic compiler lineage SHA: every successor/recovery is dispatched only if the default branch still resolves to that same commit, and the dispatcher confirms the new run materialized at the expected `headSha`.
 7. The final artifact is checksum-verified and inspected with `file` and `readelf`.
 8. A separate trusted workflow creates the unofficial GitHub Release.
 9. Failed/cancelled preflight/build run history immediately quarantines that exact version from automatic redispatch. Preflight also creates or updates a maintenance issue in the same run; the issue is a human-visible mirror, not the sole safety record.
@@ -60,6 +60,8 @@ The release workflow accepts artifacts only from a successful build on the repos
 
 
 ## Failure classification and retries
+
+Automatic staged builds never silently cross a workflow-code update. `lineage_sha` defaults to the current `github.sha` only when a manual lineage starts, is carried through subsequent automatic stages/recoveries, and is checked again inside each build before compiler work. The dispatch helper also resolves the target branch immediately before the write and read-confirms the spawned run's `headSha`; a branch move at either side of the dispatch boundary fails closed. Write-capable build-lineage helper checkouts use the run SHA instead of the current default-branch tip. If this guard fires, keep the checkpoint and review the intervening repository change before manually starting a new lineage; do not bypass the SHA guard merely to keep a stale automatic chain moving.
 
 Compiler failures are classified before the workflow decides whether a fresh runner is useful:
 

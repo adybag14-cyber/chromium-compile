@@ -605,6 +605,30 @@ class PipelineHardeningTests(unittest.TestCase):
                 block,
                 f"{job} lost its default-branch write guard",
             )
+            self.assertIn(
+                "ref: ${{ github.sha }}",
+                block,
+                f"{job} must execute write-capable helpers from the immutable workflow commit",
+            )
+        prune_block = job_block("prune_completed_checkpoint_history")
+        self.assertIn("github.ref_name == github.event.repository.default_branch", prune_block)
+        self.assertIn("ref: ${{ github.sha }}", prune_block)
+
+    def test_automatic_compiler_lineage_is_bound_to_one_workflow_sha(self):
+        workflow = (ROOT / ".github/workflows/chromium-i686.yml").read_text(encoding="utf-8")
+        preflight = (ROOT / ".github/workflows/chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("lineage_sha:", workflow)
+        self.assertIn("REQUESTED_LINEAGE_SHA: ${{ inputs.lineage_sha }}", workflow)
+        self.assertIn("CURRENT_WORKFLOW_SHA: ${{ github.sha }}", workflow)
+        self.assertIn('lineage_sha="${REQUESTED_LINEAGE_SHA:-${CURRENT_WORKFLOW_SHA}}"', workflow)
+        self.assertIn("workflow lineage SHA drift", workflow)
+        self.assertIn('control_fail "workflow lineage SHA drift', workflow)
+        self.assertIn("lineage_sha: ${{ steps.control.outputs.lineage_sha }}", workflow)
+        self.assertEqual(workflow.count('--expected-head-sha "${LINEAGE_SHA}"'), 2)
+        self.assertEqual(workflow.count('--input "lineage_sha=${LINEAGE_SHA}"'), 2)
+        self.assertIn("LINEAGE_SHA: ${{ github.sha }}", preflight)
+        self.assertIn('--expected-head-sha "${LINEAGE_SHA}"', preflight)
+        self.assertIn('--input "lineage_sha=${LINEAGE_SHA}"', preflight)
 
     def test_fallback_checkpoint_is_downloaded_on_demand(self):
         action = (ROOT / ".github" / "actions" / "chromium-i686-stage" / "action.yml").read_text(encoding="utf-8")

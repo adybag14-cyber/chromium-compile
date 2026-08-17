@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
+SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -65,7 +68,7 @@ def list_recent_runs(repository: str, workflow: str, *, attempts: int = 3) -> li
                     "--limit",
                     str(RUN_LOOKUP_LIMIT),
                     "--json",
-                    "databaseId,displayTitle,headBranch,status,conclusion,createdAt",
+                    "databaseId,displayTitle,headBranch,headSha,status,conclusion,createdAt",
                 ]
             )
             payload = json.loads(result.stdout or "[]")
@@ -101,8 +104,29 @@ def workflow_run_created_at(repository: str, run_id: str) -> datetime:
     return created.astimezone(timezone.utc)
 
 
+def normalize_expected_sha(value: str) -> str:
+    if not SHA_RE.fullmatch(value):
+        raise ValueError(f"Expected workflow head SHA must be exactly 40 hexadecimal characters: {value!r}")
+    return value.lower()
+
+
+def resolve_ref_sha(repository: str, ref: str) -> str:
+    encoded_ref = urllib.parse.quote(ref, safe="")
+    result = run_gh(
+        ["api", f"repos/{repository}/commits/{encoded_ref}", "--jq", ".sha"]
+    )
+    sha = (result.stdout or "").strip()
+    if not SHA_RE.fullmatch(sha):
+        raise DispatchError(f"GitHub returned an invalid commit SHA for ref {ref!r}: {sha!r}")
+    return sha.lower()
+
+
 def _exact_runs_or_fail_closed(
-    repository: str, workflow: str, expected_title: str, expected_ref: str
+    repository: str,
+    workflow: str,
+    expected_title: str,
+    expected_ref: str,
+    expected_head_sha: str | None = None,
 ) -> list[dict[str, object]]:
     runs = list_recent_runs(repository, workflow)
     matches = [
@@ -110,6 +134,10 @@ def _exact_runs_or_fail_closed(
         for run in runs
         if str(run.get("displayTitle", "")) == expected_title
         and str(run.get("headBranch", "")) == expected_ref
+        and (
+            expected_head_sha is None
+            or str(run.get("headSha", "")).lower() == expected_head_sha.lower()
+        )
     ]
     if not matches and len(runs) >= RUN_LOOKUP_LIMIT:
         raise DispatchError(
@@ -119,19 +147,118 @@ def _exact_runs_or_fail_closed(
     return matches
 
 
+def recent_dispatch_head_state(
+    repository: str,
+    workflow: str,
+    expected_title: str,
+    expected_ref: str,
+    expected_head_sha: str,
+    not_before: datetime,
+) -> str:
+    threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=30)
+    runs = list_recent_runs(repository, workflow)
+    title_ref_matches = [
+        run
+        for run in runs
+        if str(run.get("displayTitle", "")) == expected_title
+        and str(run.get("headBranch", "")) == expected_ref
+    ]
+    if not title_ref_matches and len(runs) >= RUN_LOOKUP_LIMIT:
+        raise DispatchError(
+            f"Workflow run lookup saturated at {RUN_LOOKUP_LIMIT} entries for {workflow}; "
+            f"refusing to assume {expected_title!r} is absent"
+        )
+    saw_expected = False
+    saw_other = False
+    for run in title_ref_matches:
+        raw = str(run.get("createdAt", ""))
+        try:
+            created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise DispatchError(
+                f"Workflow run for {expected_title!r} returned invalid createdAt metadata: {raw!r}"
+            ) from exc
+        if created.tzinfo is None:
+            raise DispatchError(
+                f"Workflow run for {expected_title!r} returned timezone-naive createdAt metadata: {raw!r}"
+            )
+        created = created.astimezone(timezone.utc)
+        if created < threshold:
+            continue
+        observed_sha = str(run.get("headSha", "")).lower()
+        if observed_sha == expected_head_sha.lower():
+            saw_expected = True
+        else:
+            saw_other = True
+    if saw_expected:
+        return "matched"
+    return "mismatch" if saw_other else "absent"
+
+
+def confirm_expected_dispatch_head(
+    repository: str,
+    workflow: str,
+    expected_title: str,
+    expected_ref: str,
+    expected_head_sha: str,
+    started: datetime,
+    *,
+    confirm_attempts: int,
+) -> bool:
+    for attempt in range(confirm_attempts):
+        try:
+            state = recent_dispatch_head_state(
+                repository,
+                workflow,
+                expected_title,
+                expected_ref,
+                expected_head_sha,
+                started,
+            )
+        except DispatchError:
+            state = "absent"
+        if state == "mismatch":
+            raise DispatchError(
+                f"Workflow {workflow} materialized at a different head SHA than the immutable lineage "
+                f"{expected_head_sha}; refusing to continue"
+            )
+        if state == "matched":
+            return True
+        if attempt + 1 < confirm_attempts:
+            delay = CONFIRM_DELAYS_SECONDS[min(attempt, len(CONFIRM_DELAYS_SECONDS) - 1)]
+            time.sleep(delay)
+    return False
+
+
 def exact_active_exists(
-    repository: str, workflow: str, expected_title: str, expected_ref: str
+    repository: str,
+    workflow: str,
+    expected_title: str,
+    expected_ref: str,
+    *,
+    expected_head_sha: str | None = None,
 ) -> bool:
     return any(
         str(run.get("status", "")) in ACTIVE
-        for run in _exact_runs_or_fail_closed(repository, workflow, expected_title, expected_ref)
+        for run in _exact_runs_or_fail_closed(
+            repository, workflow, expected_title, expected_ref, expected_head_sha
+        )
     )
 
 
 def exact_any_exists(
-    repository: str, workflow: str, expected_title: str, expected_ref: str
+    repository: str,
+    workflow: str,
+    expected_title: str,
+    expected_ref: str,
+    *,
+    expected_head_sha: str | None = None,
 ) -> bool:
-    return bool(_exact_runs_or_fail_closed(repository, workflow, expected_title, expected_ref))
+    return bool(
+        _exact_runs_or_fail_closed(
+            repository, workflow, expected_title, expected_ref, expected_head_sha
+        )
+    )
 
 
 def exact_exists_since(
@@ -142,9 +269,12 @@ def exact_exists_since(
     not_before: datetime,
     *,
     grace_seconds: int = 0,
+    expected_head_sha: str | None = None,
 ) -> bool:
     threshold = not_before.astimezone(timezone.utc) - timedelta(seconds=grace_seconds)
-    for run in _exact_runs_or_fail_closed(repository, workflow, expected_title, expected_ref):
+    for run in _exact_runs_or_fail_closed(
+        repository, workflow, expected_title, expected_ref, expected_head_sha
+    ):
         raw = str(run.get("createdAt", ""))
         try:
             created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -161,9 +291,16 @@ def exact_recent_exists(
     expected_title: str,
     expected_ref: str,
     not_before: datetime,
+    expected_head_sha: str | None = None,
 ) -> bool:
     return exact_exists_since(
-        repository, workflow, expected_title, expected_ref, not_before, grace_seconds=30
+        repository,
+        workflow,
+        expected_title,
+        expected_ref,
+        not_before,
+        grace_seconds=30,
+        expected_head_sha=expected_head_sha,
     )
 
 
@@ -177,30 +314,64 @@ def dispatch_once(
     confirm_attempts: int = 8,
     dedupe_completed: bool = False,
     dedupe_since_run_id: str | None = None,
+    expected_head_sha: str | None = None,
 ) -> str:
+    normalized_head_sha = (
+        normalize_expected_sha(expected_head_sha) if expected_head_sha is not None else None
+    )
+    for value in inputs:
+        if "=" not in value:
+            raise ValueError(f"Workflow input must be key=value: {value!r}")
+
     if dedupe_completed:
         if not dedupe_since_run_id:
             raise ValueError("dedupe_completed requires dedupe_since_run_id")
         parent_started = workflow_run_created_at(repository, dedupe_since_run_id)
-        if exact_exists_since(repository, workflow, expected_title, ref, parent_started):
+        if exact_exists_since(
+            repository,
+            workflow,
+            expected_title,
+            ref,
+            parent_started,
+            expected_head_sha=normalized_head_sha,
+        ):
             return "already-seen"
-    elif exact_active_exists(repository, workflow, expected_title, ref):
+    elif exact_active_exists(
+        repository, workflow, expected_title, ref, expected_head_sha=normalized_head_sha
+    ):
         return "already-active"
+
+    if normalized_head_sha is not None:
+        current_ref_sha = resolve_ref_sha(repository, ref)
+        if current_ref_sha != normalized_head_sha:
+            raise DispatchError(
+                f"Ref {ref!r} now resolves to {current_ref_sha}, not immutable lineage "
+                f"{normalized_head_sha}; refusing workflow dispatch"
+            )
 
     command = ["workflow", "run", workflow, "--repo", repository, "--ref", ref]
     for value in inputs:
-        if "=" not in value:
-            raise ValueError(f"Workflow input must be key=value: {value!r}")
         command.extend(["-f", value])
 
     started = datetime.now(timezone.utc)
     try:
         run_gh(command, timeout=120)
-        return "accepted"
     except DispatchError as dispatch_error:
         # Do not blindly retry a non-idempotent workflow_dispatch call: GitHub may
         # have accepted it just before the client/network failed. Check immediately,
         # then use bounded backoff so Actions has time to materialize a delayed run.
+        if normalized_head_sha is not None:
+            if confirm_expected_dispatch_head(
+                repository,
+                workflow,
+                expected_title,
+                ref,
+                normalized_head_sha,
+                started,
+                confirm_attempts=confirm_attempts,
+            ):
+                return "accepted-after-client-error"
+            raise dispatch_error
         for attempt in range(confirm_attempts):
             try:
                 if exact_recent_exists(repository, workflow, expected_title, ref, started):
@@ -212,6 +383,23 @@ def dispatch_once(
                 time.sleep(delay)
         raise dispatch_error
 
+    if normalized_head_sha is None:
+        return "accepted"
+    if confirm_expected_dispatch_head(
+        repository,
+        workflow,
+        expected_title,
+        ref,
+        normalized_head_sha,
+        started,
+        confirm_attempts=confirm_attempts,
+    ):
+        return "accepted-confirmed"
+    raise DispatchError(
+        f"Workflow dispatch returned success but no run at immutable lineage SHA "
+        f"{normalized_head_sha} became visible"
+    )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -219,6 +407,7 @@ def main() -> int:
     parser.add_argument("--workflow", required=True)
     parser.add_argument("--ref", required=True)
     parser.add_argument("--expected-title", required=True)
+    parser.add_argument("--expected-head-sha")
     parser.add_argument("--input", action="append", default=[])
     parser.add_argument("--dedupe-completed", action="store_true")
     parser.add_argument("--dedupe-since-run-id")
@@ -231,6 +420,7 @@ def main() -> int:
         args.input,
         dedupe_completed=args.dedupe_completed,
         dedupe_since_run_id=args.dedupe_since_run_id,
+        expected_head_sha=args.expected_head_sha,
     )
     print(result)
     return 0

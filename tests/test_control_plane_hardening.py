@@ -13,6 +13,10 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("Start next stage on a fresh runner exactly once", workflow)
         self.assertIn("Redispatch failed stage exactly once", workflow)
         self.assertIn("CHROMIUM_VERSION", workflow)
+        self.assertEqual(workflow.count('--expected-head-sha "${LINEAGE_SHA}"'), 2)
+        self.assertEqual(workflow.count('--input "lineage_sha=${LINEAGE_SHA}"'), 2)
+        self.assertIn("lineage_sha:", workflow)
+        self.assertIn("workflow lineage SHA drift", workflow)
 
     def test_early_build_failure_still_enters_bounded_runner_recovery(self):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
@@ -66,6 +70,9 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("scripts/github_workflow_dispatch.py", preflight)
         self.assertIn("scripts/github_maintenance_issue.py", preflight)
         self.assertNotIn("gh workflow run chromium-i686.yml", preflight)
+        self.assertIn('--expected-head-sha "${LINEAGE_SHA}"', preflight)
+        self.assertIn('--input "lineage_sha=${LINEAGE_SHA}"', preflight)
+        self.assertIn("LINEAGE_SHA: ${{ github.sha }}", preflight)
 
     def test_non_default_runs_cannot_mutate_production_control_state(self):
         preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
@@ -101,8 +108,9 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", bootstrap)
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", watcher)
         self.assertIn("github.ref_name == github.event.repository.default_branch && needs.resolve_runner.outputs.valid == 'true'", preflight)
-        for workflow in (bootstrap, watcher, preflight):
+        for workflow in (bootstrap, watcher):
             self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
+        self.assertIn("ref: ${{ github.sha }}", preflight)
         self.assertIn("needs.detect.result == 'failure' && github.ref_name == github.event.repository.default_branch", watcher)
         build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         self.assertIn("chromium-i686-build-nonprod-{0}", build)
