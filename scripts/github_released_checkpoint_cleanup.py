@@ -136,12 +136,14 @@ def read_release_identity(repository: str, version: str, expected_build_sha: str
     payload = parse_object(
         run_gh([
             "release", "view", tag, "--repo", repository,
-            "--json", "isDraft,isPrerelease,assets,publishedAt,tagName",
+            "--json", "isDraft,isPrerelease,isImmutable,assets,publishedAt,tagName",
         ]),
         "release state",
     )
     if payload.get("isDraft") is not False or payload.get("isPrerelease") is not False:
         raise CleanupError(f"release {tag} is draft/prerelease; checkpoint cleanup is forbidden")
+    if payload.get("isImmutable") is not True:
+        raise CleanupError(f"release {tag} is mutable; checkpoint cleanup requires GitHub-enforced release immutability")
     if payload.get("tagName") != tag:
         raise CleanupError(f"release lookup returned unexpected tag name: {payload.get('tagName')!r}")
     published_at = parse_github_timestamp(payload.get("publishedAt"), f"release {tag} publishedAt")

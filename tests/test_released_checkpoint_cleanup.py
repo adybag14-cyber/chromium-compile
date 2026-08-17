@@ -27,7 +27,7 @@ def done(payload=None, *, stdout=None, code=0, stderr=""):
     return subprocess.CompletedProcess(["gh"], code, stdout, stderr)
 
 
-def release_payload(version=VERSION, *, draft=False, prerelease=False, missing_digest=False):
+def release_payload(version=VERSION, *, draft=False, prerelease=False, immutable=True, missing_digest=False):
     names = [
         f"chromium-{version}-linux-i686.tar.xz",
         f"chromium-{version}-linux-i686.tar.xz.sha256",
@@ -47,6 +47,7 @@ def release_payload(version=VERSION, *, draft=False, prerelease=False, missing_d
     return {
         "isDraft": draft,
         "isPrerelease": prerelease,
+        "isImmutable": immutable,
         "tagName": f"chromium-{version}-linux-i686",
         "publishedAt": "2026-08-16T10:00:12Z",
         "assets": assets,
@@ -141,7 +142,7 @@ def run_payload(version=VERSION, stage=2, **changes):
 
 class ReleasedCheckpointCleanupTests(unittest.TestCase):
     def test_release_must_be_published_and_digest_complete(self):
-        for payload in [release_payload(draft=True), release_payload(prerelease=True), release_payload(missing_digest=True)]:
+        for payload in [release_payload(draft=True), release_payload(prerelease=True), release_payload(immutable=False), release_payload(missing_digest=True)]:
             with self.subTest(payload=payload), mock.patch.object(cleanup, "run_gh", return_value=done(payload)), self.assertRaises(cleanup.CleanupError):
                 cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA)
 
