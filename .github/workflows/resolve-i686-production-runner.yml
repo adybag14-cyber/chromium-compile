@@ -1,0 +1,50 @@
+name: Resolve Chromium i686 Production Runner
+
+on:
+  workflow_call:
+    inputs:
+      requested_runner:
+        description: "Optional explicit GitHub-hosted runner label; empty uses the fail-closed production default"
+        required: false
+        default: ""
+        type: string
+    outputs:
+      label:
+        description: "Validated explicit production runner label"
+        value: ${{ jobs.resolve.outputs.label }}
+      valid:
+        description: "true only when the requested/default runner is an allowed production LTS label"
+        value: ${{ jobs.resolve.outputs.valid }}
+
+permissions: {}
+
+jobs:
+  resolve:
+    name: Resolve tested i686 runner policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.resolve.outputs.label }}
+      valid: ${{ steps.resolve.outputs.valid }}
+    steps:
+      - name: Validate configured explicit LTS runner label
+        id: resolve
+        env:
+          REQUESTED_RUNNER: ${{ inputs.requested_runner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${REQUESTED_RUNNER:-ubuntu-24.04}"
+          case "${requested}" in
+            ubuntu-22.04|ubuntu-24.04)
+              echo "label=${requested}" >> "${GITHUB_OUTPUT}"
+              echo "valid=true" >> "${GITHUB_OUTPUT}"
+              echo "Validated explicit Chromium i686 production runner: ${requested}"
+              ;;
+            *)
+              echo "label=" >> "${GITHUB_OUTPUT}"
+              echo "valid=false" >> "${GITHUB_OUTPUT}"
+              echo "::error::Unsupported CHROMIUM_I686_RUNNER '${requested}'. Allowed explicit production labels: ubuntu-22.04, ubuntu-24.04. ubuntu-latest is validation/control-plane only."
+              exit 1
+              ;;
+          esac

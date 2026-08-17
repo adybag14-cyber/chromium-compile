@@ -28,6 +28,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve_runtime_runner:
+    name: Resolve tested release-smoke runner
+    permissions: {}
+    uses: ./.github/workflows/resolve-i686-production-runner.yml
+    with:
+      requested_runner: ${{ vars.CHROMIUM_I686_RUNNER }}
+
   validate:
     if: >-
       ${{
@@ -264,12 +271,12 @@ jobs:
           echo "package_sha=${actual}" >> "${GITHUB_OUTPUT}"
 
   smoke:
-    needs: validate
-    if: ${{ needs.validate.result == 'success' && needs.validate.outputs.found == 'true' }}
+    needs: [validate, resolve_runtime_runner]
+    if: ${{ needs.validate.result == 'success' && needs.resolve_runtime_runner.result == 'success' && needs.resolve_runtime_runner.outputs.valid == 'true' && needs.validate.outputs.found == 'true' }}
     permissions:
       actions: read
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.resolve_runtime_runner.outputs.label }}
     timeout-minutes: 30
     steps:
       - name: Checkout trusted release helpers
@@ -337,8 +344,8 @@ jobs:
           echo "Read-only runtime smoke passed for Chromium ${CHROMIUM_VERSION}."
 
   report_validation_failure:
-    needs: [validate, smoke]
-    if: ${{ always() && (needs.validate.result == 'failure' || needs.smoke.result == 'failure') }}
+    needs: [validate, smoke, resolve_runtime_runner]
+    if: ${{ always() && (needs.resolve_runtime_runner.result != 'success' || needs.validate.result == 'failure' || needs.smoke.result == 'failure') }}
     permissions:
       contents: read
       issues: write
@@ -356,6 +363,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VALIDATION_RESULT: ${{ needs.validate.result }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
+          RUNTIME_RUNNER_RESULT: ${{ needs.resolve_runtime_runner.result }}
           VALIDATED_VERSION: ${{ needs.validate.outputs.version }}
           REQUESTED_VERSION: ${{ inputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -376,6 +384,7 @@ jobs:
           - Release workflow: ${RUN_URL}
           - Chromium version: ${version}
           - Metadata/structure validation: ${VALIDATION_RESULT}
+          - Runtime runner policy: ${RUNTIME_RUNNER_RESULT}
           - Runtime smoke: ${SMOKE_RESULT}
 
           No release/tag mutation was attempted by the failing validation path.

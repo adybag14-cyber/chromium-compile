@@ -51,28 +51,9 @@ jobs:
   resolve_production_runner:
     name: Resolve tested production i686 runner
     permissions: {}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      label: ${{ steps.resolve.outputs.label }}
-    steps:
-      - name: Validate configured explicit LTS runner label
-        id: resolve
-        env:
-          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${REQUESTED_RUNNER}" in
-            ubuntu-22.04|ubuntu-24.04)
-              echo "label=${REQUESTED_RUNNER}" >> "${GITHUB_OUTPUT}"
-              echo "Validated explicit Chromium i686 production runner: ${REQUESTED_RUNNER}"
-              ;;
-            *)
-              echo "::error::Unsupported CHROMIUM_I686_RUNNER '${REQUESTED_RUNNER}'. Allowed explicit production labels: ubuntu-22.04, ubuntu-24.04. ubuntu-latest is matrix-only."
-              exit 1
-              ;;
-          esac
+    uses: ./.github/workflows/resolve-i686-production-runner.yml
+    with:
+      requested_runner: ${{ vars.CHROMIUM_I686_RUNNER }}
 
   validate:
     runs-on: ubuntu-latest
@@ -742,7 +723,7 @@ jobs:
       - name: Record invalid runner configuration
         env:
           GH_TOKEN: ${{ github.token }}
-          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04' }}
+          REQUESTED_RUNNER: ${{ vars.CHROMIUM_I686_RUNNER }}
         shell: bash
         run: |
           set -euo pipefail

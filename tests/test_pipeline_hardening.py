@@ -241,16 +241,19 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn('test "${VERSION}" = "${version_sentinel}"', validation)
 
     def test_ubuntu_24_is_default_production_runner(self):
-        default_expr = "vars.CHROMIUM_I686_RUNNER || 'ubuntu-24.04'"
-        legacy_default = "vars.CHROMIUM_I686_RUNNER || 'ubuntu-22.04'"
+        policy = (ROOT / ".github" / "workflows" / "resolve-i686-production-runner.yml").read_text(encoding="utf-8")
+        self.assertIn('requested="${REQUESTED_RUNNER:-ubuntu-24.04}"', policy)
+        self.assertIn("ubuntu-22.04|ubuntu-24.04", policy)
+        self.assertNotIn('requested="${REQUESTED_RUNNER:-ubuntu-22.04}"', policy)
         for rel in (
             ".github/workflows/chromium-i686.yml",
             ".github/workflows/chromium-i686-preflight.yml",
             ".github/workflows/validate-port-infrastructure.yml",
+            ".github/workflows/publish-i686-release.yml",
         ):
             text = (ROOT / rel).read_text(encoding="utf-8")
-            self.assertIn(default_expr, text, rel)
-            self.assertNotIn(legacy_default, text, rel)
+            self.assertIn("uses: ./.github/workflows/resolve-i686-production-runner.yml", text, rel)
+            self.assertIn("requested_runner: ${{ vars.CHROMIUM_I686_RUNNER }}", text, rel)
         self.assertIn("CHROMIUM_I686_RUNNER=ubuntu-24.04", (ROOT / "README.md").read_text(encoding="utf-8"))
         self.assertIn("CHROMIUM_I686_RUNNER=ubuntu-24.04", (ROOT / "docs" / "MAINTENANCE.md").read_text(encoding="utf-8"))
         self.assertIn("fail-closed default is `ubuntu-24.04`", (ROOT / "README.md").read_text(encoding="utf-8"))
@@ -260,13 +263,16 @@ class PipelineHardeningTests(unittest.TestCase):
         build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
-        allowed = "ubuntu-22.04|ubuntu-24.04"
+        policy = (ROOT / ".github" / "workflows" / "resolve-i686-production-runner.yml").read_text(encoding="utf-8")
+        self.assertIn("ubuntu-22.04|ubuntu-24.04", policy)
+        self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", policy)
         for name, text, heavy_marker in (
             ("build", build, "  build:\n"),
             ("preflight", preflight, "  preflight:\n"),
         ):
             self.assertIn("  resolve_runner:\n", text, name)
-            self.assertIn(allowed, text, name)
+            self.assertIn("uses: ./.github/workflows/resolve-i686-production-runner.yml", text, name)
+            self.assertIn("requested_runner: ${{ vars.CHROMIUM_I686_RUNNER }}", text, name)
             self.assertIn("  report_runner_configuration:\n", text, name)
             self.assertIn("needs: resolve_runner", text, name)
             self.assertIn("runs-on: ${{ needs.resolve_runner.outputs.label }}", text, name)
@@ -293,8 +299,10 @@ class PipelineHardeningTests(unittest.TestCase):
         resolver_start = validation.index("  resolve_production_runner:\n")
         resolver_end = validation.index("  validate:\n", resolver_start)
         resolver = validation[resolver_start:resolver_end]
-        self.assertIn("ubuntu-22.04|ubuntu-24.04", resolver)
-        self.assertNotIn("ubuntu-26.04", resolver)
+        self.assertIn("uses: ./.github/workflows/resolve-i686-production-runner.yml", resolver)
+        policy = (ROOT / ".github" / "workflows" / "resolve-i686-production-runner.yml").read_text(encoding="utf-8")
+        self.assertIn("ubuntu-22.04|ubuntu-24.04", policy)
+        self.assertNotIn("ubuntu-26.04", policy)
 
     def test_selected_runner_i386_canary_accepts_release_local_qt_package_names(self):
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
@@ -319,8 +327,11 @@ class PipelineHardeningTests(unittest.TestCase):
         resolver_start = validation.index("  resolve_production_runner:\n")
         validate_start = validation.index("  validate:\n", resolver_start)
         resolver = validation[resolver_start:validate_start]
-        self.assertIn("ubuntu-22.04|ubuntu-24.04", resolver)
-        self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", resolver)
+        self.assertIn("uses: ./.github/workflows/resolve-i686-production-runner.yml", resolver)
+        self.assertIn("requested_runner: ${{ vars.CHROMIUM_I686_RUNNER }}", resolver)
+        policy = (ROOT / ".github" / "workflows" / "resolve-i686-production-runner.yml").read_text(encoding="utf-8")
+        self.assertIn("ubuntu-22.04|ubuntu-24.04", policy)
+        self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", policy)
         release_start = validation.index("  validate_real_release_runtime:\n")
         full_start = validation.index("  validate_full_source_preflight:\n")
         i386_start = validation.index("  validate_i386_runtime:\n")
@@ -974,10 +985,11 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertNotIn("outputs:", smoke_job)
 
         # Validation/runtime failures are mirrored by a non-release reporting job.
-        self.assertIn("needs: [validate, smoke]", report_job)
+        self.assertIn("needs: [validate, smoke, resolve_runtime_runner]", report_job)
         self.assertIn("always()", report_job)
         self.assertIn("needs.validate.result == 'failure'", report_job)
         self.assertIn("needs.smoke.result == 'failure'", report_job)
+        self.assertIn("needs.resolve_runtime_runner.result != 'success'", report_job)
         self.assertIn("contents: read", report_job)
         self.assertIn("issues: write", report_job)
         self.assertNotIn("contents: write", report_job)
