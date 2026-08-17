@@ -227,6 +227,9 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("ubuntu-22.04", validation)
         self.assertIn("ubuntu-24.04", validation)
         self.assertIn("ubuntu-latest", validation)
+        self.assertIn("ubuntu-26.04", validation)
+        self.assertIn("continue-on-error: ${{ matrix.experimental }}", validation)
+        self.assertIn("experimental: true", validation)
         self.assertIn("maximize_runner_disk_space", validation)
         self.assertIn("install_system_dependencies", validation)
         self.assertIn("schedule:", validation)
@@ -258,10 +261,24 @@ class PipelineHardeningTests(unittest.TestCase):
             reporter = text[reporter_start:reporter_end]
             self.assertIn("issues: write", reporter, name)
             self.assertIn("exit 1", reporter, name)
-        for label in ("ubuntu-22.04", "ubuntu-24.04", "ubuntu-latest"):
+        for label in ("ubuntu-22.04", "ubuntu-24.04", "ubuntu-latest", "ubuntu-26.04"):
             self.assertIn(label, validation)
         self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", build)
         self.assertNotIn("ubuntu-22.04|ubuntu-24.04|ubuntu-latest", preflight)
+
+    def test_ubuntu_26_preview_is_nonblocking_and_not_a_production_runner(self):
+        validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
+        lts_start = validation.index("  validate_lts_compatibility:\n")
+        lts_end = validation.index("  report_upstream_contract_drift:\n", lts_start)
+        lts = validation[lts_start:lts_end]
+        self.assertIn("- runner: ubuntu-26.04", lts)
+        self.assertIn("experimental: true", lts)
+        self.assertIn("continue-on-error: ${{ matrix.experimental }}", lts)
+        resolver_start = validation.index("  resolve_production_runner:\n")
+        resolver_end = validation.index("  validate:\n", resolver_start)
+        resolver = validation[resolver_start:resolver_end]
+        self.assertIn("ubuntu-22.04|ubuntu-24.04", resolver)
+        self.assertNotIn("ubuntu-26.04", resolver)
 
     def test_validation_heavy_jobs_use_resolved_explicit_lts_runner(self):
         validation = (ROOT / ".github" / "workflows" / "validate-port-infrastructure.yml").read_text(encoding="utf-8")
