@@ -249,6 +249,21 @@ class StableWatcherTests(unittest.TestCase):
             ["version=155.0.1.2", "dispatch_build=true"],
         )
 
+    def test_preflight_dispatch_can_bind_to_watcher_workflow_sha(self):
+        expected_sha = "a" * 40
+        with mock.patch.object(watcher, "dispatch_once", return_value="accepted-confirmed") as dispatch_call:
+            watcher.dispatch_preflight(
+                "owner/repository", "main", "155.0.1.2", False, expected_sha
+            )
+        dispatch_call.assert_called_once_with(
+            "owner/repository",
+            "chromium-i686-preflight.yml",
+            "main",
+            "Chromium i686 preflight 155.0.1.2",
+            ["version=155.0.1.2", "dispatch_build=true"],
+            expected_head_sha=expected_sha,
+        )
+
     def test_racing_manual_preflight_is_deduped_by_central_dispatcher(self):
         with mock.patch.object(watcher, "dispatch_once", return_value="already-active") as dispatch_call:
             watcher.dispatch_preflight("owner/repository", "main", "155.0.1.2", False)

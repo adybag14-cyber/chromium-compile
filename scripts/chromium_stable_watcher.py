@@ -439,7 +439,13 @@ def select_candidates(
     return selected
 
 
-def dispatch_preflight(repository: str, ref: str, version: str, dry_run: bool) -> None:
+def dispatch_preflight(
+    repository: str,
+    ref: str,
+    version: str,
+    dry_run: bool,
+    expected_head_sha: str | None = None,
+) -> None:
     display_title = f"Chromium i686 preflight {version}"
     inputs = [f"version={version}", "dispatch_build=true"]
     if dry_run:
@@ -451,12 +457,16 @@ def dispatch_preflight(repository: str, ref: str, version: str, dry_run: bool) -
         return
 
     try:
+        dispatch_kwargs: dict[str, object] = {}
+        if expected_head_sha is not None:
+            dispatch_kwargs["expected_head_sha"] = expected_head_sha
         result = dispatch_once(
             repository,
             "chromium-i686-preflight.yml",
             ref,
             display_title,
             inputs,
+            **dispatch_kwargs,
         )
     except (DispatchError, ValueError) as exc:
         raise WatcherError(f"Preflight dispatch could not be established safely: {exc}") from exc
@@ -472,6 +482,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", required=True)
     parser.add_argument("--ref", default="main")
+    parser.add_argument(
+        "--expected-head-sha",
+        default="",
+        help="Optional immutable workflow commit that the dispatch ref must still resolve to",
+    )
     parser.add_argument("--baseline", type=Path, default=Path("support/baseline.json"))
     parser.add_argument("--api-url", default=DEFAULT_API)
     parser.add_argument("--max-new-builds", type=int, default=1)
@@ -546,7 +561,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidates = select_candidates(versions, minimum, state, args.max_new_builds)
 
     for version in candidates:
-        dispatch_preflight(args.repository, args.ref, version, args.dry_run)
+        dispatch_preflight(
+            args.repository,
+            args.ref,
+            version,
+            args.dry_run,
+            args.expected_head_sha or None,
+        )
 
     summary = [
         "## Chromium i686 stable watcher",
