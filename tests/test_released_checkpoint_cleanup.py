@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import pathlib
@@ -26,17 +27,91 @@ def done(payload=None, *, stdout=None, code=0, stderr=""):
     return subprocess.CompletedProcess(["gh"], code, stdout, stderr)
 
 
-def release_payload(version=VERSION, *, draft=False, prerelease=False, missing_digest=False):
+def release_payload(version=VERSION, *, draft=False, prerelease=False, immutable=True, missing_digest=False):
     names = [
         f"chromium-{version}-linux-i686.tar.xz",
         f"chromium-{version}-linux-i686.tar.xz.sha256",
         f"chromium-{version}-linux-i686-manifest.txt",
     ]
+    sizes = [123456, 159, 12000]
     assets = []
-    for idx, name in enumerate(names):
-        assets.append({"name": name, "digest": "" if missing_digest and idx == 0 else "sha256:" + "a" * 64})
-    return {"isDraft": draft, "isPrerelease": prerelease, "assets": assets}
+    for idx, (name, size) in enumerate(zip(names, sizes, strict=True)):
+        assets.append({
+            "name": name,
+            "digest": "" if missing_digest and idx == 0 else "sha256:" + "a" * 64,
+            "size": size,
+            "state": "uploaded",
+            "createdAt": "2026-08-16T10:00:10Z",
+            "updatedAt": "2026-08-16T10:00:11Z",
+        })
+    return {
+        "isDraft": draft,
+        "isPrerelease": prerelease,
+        "isImmutable": immutable,
+        "tagName": f"chromium-{version}-linux-i686",
+        "publishedAt": "2026-08-16T10:00:12Z",
+        "assets": assets,
+    }
 
+
+def release_identity(*, published_at="2026-08-16T10:00:12Z", asset_created_at="2026-08-16T10:00:10Z", asset_updated_at="2026-08-16T10:00:11Z"):
+    payload = release_payload()
+    assets = tuple(
+        sorted(
+            (
+                cleanup.ReleaseAsset(
+                    item["name"],
+                    item["digest"],
+                    item["size"],
+                    cleanup.parse_github_timestamp(asset_created_at, "fixture asset created"),
+                    cleanup.parse_github_timestamp(asset_updated_at, "fixture asset updated"),
+                )
+                for item in payload["assets"]
+            ),
+            key=lambda item: item.name,
+        )
+    )
+    return cleanup.ReleaseIdentity(
+        f"chromium-{VERSION}-linux-i686",
+        BUILD_SHA,
+        cleanup.parse_github_timestamp(published_at, "fixture release published"),
+        assets,
+    )
+
+
+def release_workflow_run_payload(**changes):
+    payload = {
+        "path": ".github/workflows/publish-i686-release.yml",
+        "head_repository": {"full_name": REPO},
+        "head_branch": BRANCH,
+        "event": "workflow_run",
+        "status": "in_progress",
+        "display_title": f"Publish Chromium i686 {VERSION} - stage 6 - attempt 1",
+    }
+    payload.update(changes)
+    return payload
+
+
+def release_workflow_jobs_payload(*, smoke_conclusion="success", publish_step_conclusion="success"):
+    jobs = [
+        {"name": "validate", "status": "completed", "conclusion": "success", "steps": []},
+        {"name": "smoke", "status": "completed", "conclusion": smoke_conclusion, "steps": []},
+        {
+            "name": "publish",
+            "status": "completed",
+            "conclusion": "success",
+            "steps": [
+                {
+                    "name": "Create or resume transactional immutable release",
+                    "status": "completed",
+                    "conclusion": publish_step_conclusion,
+                    "started_at": "2026-08-16T10:00:00Z",
+                    "completed_at": "2026-08-16T10:00:20Z",
+                }
+            ],
+        },
+    ]
+    return {"total_count": len(jobs), "jobs": jobs}
 
 def artifact(artifact_id, run_id, stage, size=1000, expired=False):
     return {
@@ -67,7 +142,7 @@ def run_payload(version=VERSION, stage=2, **changes):
 
 class ReleasedCheckpointCleanupTests(unittest.TestCase):
     def test_release_must_be_published_and_digest_complete(self):
-        for payload in [release_payload(draft=True), release_payload(prerelease=True), release_payload(missing_digest=True)]:
+        for payload in [release_payload(draft=True), release_payload(prerelease=True), release_payload(immutable=False), release_payload(missing_digest=True)]:
             with self.subTest(payload=payload), mock.patch.object(cleanup, "run_gh", return_value=done(payload)), self.assertRaises(cleanup.CleanupError):
                 cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA)
 
@@ -79,6 +154,228 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
         with mock.patch.object(cleanup, "run_gh", side_effect=[done(release_payload()), done(stdout="c" * 40 + "\n")]), self.assertRaises(cleanup.CleanupError):
             cleanup.verify_healthy_release(REPO, VERSION, BUILD_SHA)
 
+    def test_release_workflow_proof_is_bound_to_successful_publish_step(self):
+        identity = release_identity()
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            side_effect=[done(release_workflow_run_payload()), done(release_workflow_jobs_payload())],
+        ):
+            cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
+
+    def test_release_workflow_proof_allows_resumed_release_object_with_current_assets(self):
+        identity = release_identity(
+            published_at="2026-08-16T09:00:00Z",
+            asset_created_at="2026-08-16T09:30:00Z",
+            asset_updated_at="2026-08-16T09:31:00Z",
+        )
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            side_effect=[done(release_workflow_run_payload()), done(release_workflow_jobs_payload())],
+        ):
+            cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
+    def test_release_workflow_proof_rejects_failed_smoke_and_replaced_assets(self):
+        identity = release_identity()
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            side_effect=[
+                done(release_workflow_run_payload()),
+                done(release_workflow_jobs_payload(smoke_conclusion="failure")),
+            ],
+        ), self.assertRaises(cleanup.CleanupError):
+            cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
+
+        replaced = release_identity(asset_updated_at="2026-08-16T10:01:00Z")
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            side_effect=[done(release_workflow_run_payload()), done(release_workflow_jobs_payload())],
+        ), self.assertRaises(cleanup.CleanupError):
+            cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", replaced)
+
+    def test_release_workflow_proof_rejects_failed_publish_step(self):
+        identity = release_identity()
+        with mock.patch.object(
+            cleanup,
+            "run_gh",
+            side_effect=[
+                done(release_workflow_run_payload()),
+                done(release_workflow_jobs_payload(publish_step_conclusion="failure")),
+            ],
+        ), self.assertRaisesRegex(cleanup.CleanupError, "publication step did not complete successfully"):
+            cleanup.verify_release_workflow_proof(REPO, VERSION, BRANCH, "123456", identity)
+
+    def test_release_archive_bytes_cross_bind_package_checksum_and_manifest(self):
+        package_name = f"chromium-{VERSION}-linux-i686.tar.xz"
+        checksum_name = f"{package_name}.sha256"
+        manifest_name = f"chromium-{VERSION}-linux-i686-manifest.txt"
+        package_bytes = b"synthetic-package-bytes"
+        package_sha = hashlib.sha256(package_bytes).hexdigest()
+        checksum_bytes = f"{package_sha}  {package_name}\n".encode()
+        manifest_bytes = (
+            "manifest_schema=2\n"
+            f"version={VERSION}\n"
+            "target_cpu=x86\n"
+            "target_os=linux\n"
+            f"package_sha256={package_sha}\n"
+            f"github_sha={BUILD_SHA}\n"
+            "packaged_files:\n"
+            "chrome\n"
+        ).encode()
+        created = cleanup.parse_github_timestamp("2026-08-16T10:00:10Z", "fixture")
+        assets = tuple(
+            sorted(
+                [
+                    cleanup.ReleaseAsset(
+                        name,
+                        "sha256:" + hashlib.sha256(data).hexdigest(),
+                        len(data),
+                        created,
+                        created,
+                    )
+                    for name, data in [
+                        (package_name, package_bytes),
+                        (checksum_name, checksum_bytes),
+                        (manifest_name, manifest_bytes),
+                    ]
+                ],
+                key=lambda item: item.name,
+            )
+        )
+        identity = cleanup.ReleaseIdentity(
+            f"chromium-{VERSION}-linux-i686", BUILD_SHA, created, assets
+        )
+
+        asset_bytes = {
+            package_name: package_bytes,
+            checksum_name: checksum_bytes,
+            manifest_name: manifest_bytes,
+        }
+
+        download_outputs = []
+
+        def fake_gh(args, **kwargs):
+            if args[:2] == ["release", "download"]:
+                remote_name = args[args.index("--pattern") + 1]
+                output = pathlib.Path(args[args.index("--output") + 1])
+                download_outputs.append((remote_name, output, kwargs.get("timeout")))
+                output.write_bytes(asset_bytes[remote_name])
+                return done()
+            raise AssertionError(args)
+
+        with mock.patch.object(cleanup, "read_release_identity", return_value=identity), \
+             mock.patch.object(cleanup, "run_gh", side_effect=fake_gh), \
+             mock.patch.object(cleanup, "run_release_archive_validator") as validator:
+            cleanup.verify_release_archive_bytes(REPO, VERSION, BUILD_SHA, identity)
+        validator.assert_called_once()
+        self.assertEqual(
+            [output.name for _, output, _ in download_outputs],
+            ["release-package.tar.xz", "release-package.sha256", "release-manifest.txt"],
+        )
+        self.assertEqual(len({output.parent for _, output, _ in download_outputs}), 1)
+        self.assertTrue(all(output.name != remote for remote, output, _ in download_outputs))
+        self.assertEqual([timeout for _, _, timeout in download_outputs], [600, 120, 120])
+
+    def test_release_byte_proof_fails_before_download_when_temp_space_is_insufficient(self):
+        identity = release_identity()
+        with mock.patch.object(cleanup, "read_release_identity", return_value=identity), \
+             mock.patch.object(cleanup.shutil, "disk_usage", return_value=mock.Mock(free=1)), \
+             mock.patch.object(cleanup, "run_gh") as gh, \
+             self.assertRaisesRegex(cleanup.CleanupError, "insufficient temporary-disk space"):
+            cleanup.verify_release_archive_bytes(REPO, VERSION, BUILD_SHA, identity)
+        gh.assert_not_called()
+
+    def test_archive_completeness_failure_precedes_legacy_manifest_parsing(self):
+        package_name = f"chromium-{VERSION}-linux-i686.tar.xz"
+        checksum_name = f"{package_name}.sha256"
+        manifest_name = f"chromium-{VERSION}-linux-i686-manifest.txt"
+        package_bytes = b"incomplete-runtime-package"
+        package_sha = hashlib.sha256(package_bytes).hexdigest()
+        checksum_bytes = f"{package_sha}  {package_name}\n".encode()
+        manifest_bytes = b"legacy-file-list-without-schema\n"
+        created = cleanup.parse_github_timestamp("2026-08-16T10:00:10Z", "fixture")
+        assets = tuple(
+            sorted(
+                [
+                    cleanup.ReleaseAsset(name, "sha256:" + hashlib.sha256(data).hexdigest(), len(data), created, created)
+                    for name, data in [
+                        (package_name, package_bytes),
+                        (checksum_name, checksum_bytes),
+                        (manifest_name, manifest_bytes),
+                    ]
+                ],
+                key=lambda item: item.name,
+            )
+        )
+        identity = cleanup.ReleaseIdentity(
+            f"chromium-{VERSION}-linux-i686", BUILD_SHA, created, assets
+        )
+
+        asset_bytes = {
+            package_name: package_bytes,
+            checksum_name: checksum_bytes,
+            manifest_name: manifest_bytes,
+        }
+
+        def fake_gh(args, **kwargs):
+            if args[:2] == ["release", "download"]:
+                remote_name = args[args.index("--pattern") + 1]
+                output = pathlib.Path(args[args.index("--output") + 1])
+                output.write_bytes(asset_bytes[remote_name])
+                return done()
+            raise AssertionError(args)
+
+        with mock.patch.object(cleanup, "read_release_identity", return_value=identity), \
+             mock.patch.object(cleanup, "run_gh", side_effect=fake_gh), \
+             mock.patch.object(
+                 cleanup,
+                 "run_release_archive_validator",
+                 side_effect=cleanup.CleanupError("archive missing required runtime paths"),
+             ), \
+             mock.patch.object(cleanup, "_parse_release_manifest") as parse_manifest, \
+             self.assertRaisesRegex(cleanup.CleanupError, "missing required runtime paths"):
+            cleanup.verify_release_archive_bytes(REPO, VERSION, BUILD_SHA, identity)
+        parse_manifest.assert_not_called()
+    def test_release_archive_validator_oserror_is_cleanup_error(self):
+        archive = ROOT / "missing-release-archive.tar.xz"
+        with mock.patch.object(cleanup.subprocess, "run", side_effect=OSError("validator unavailable")), \
+             self.assertRaisesRegex(cleanup.CleanupError, "could not run release archive validator"):
+            cleanup.run_release_archive_validator(archive)
+
+    def test_apply_without_workflow_proof_fails_before_release_io(self):
+        with mock.patch.object(cleanup, "read_release_identity") as identity, \
+             mock.patch.object(cleanup, "verify_release_archive_bytes") as byte_proof, \
+             self.assertRaisesRegex(cleanup.CleanupError, "--apply requires a trusted release workflow run ID"):
+            cleanup.prepare_release_cleanup_proof(
+                REPO, VERSION, BRANCH, BUILD_SHA, None, require_runtime_proof=True
+            )
+        identity.assert_not_called()
+        byte_proof.assert_not_called()
+
+    def test_apply_proof_requires_trusted_runtime_workflow(self):
+        identity = release_identity()
+        with mock.patch.object(cleanup, "read_release_identity", return_value=identity), \
+             mock.patch.object(cleanup, "verify_release_archive_bytes"):
+            with self.assertRaises(cleanup.CleanupError):
+                cleanup.prepare_release_cleanup_proof(
+                    REPO, VERSION, BRANCH, BUILD_SHA, None, require_runtime_proof=True
+                )
+
+    def test_destructive_helpers_require_prepared_release_identity(self):
+        with self.assertRaises(cleanup.CleanupError):
+            cleanup.cleanup_released_version(REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False)
+        with self.assertRaises(cleanup.CleanupError):
+            cleanup.cleanup_released_source_caches(REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False)
+
+    def test_publisher_cleanup_exports_exact_proof_inputs(self):
+        workflow = (ROOT / ".github/workflows/publish-i686-release.yml").read_text(encoding="utf-8")
+        section = workflow.split("  cleanup_published_checkpoints:\n", 1)[1]
+        self.assertIn("VALIDATED_BUILD_SHA: ${{ needs.validate.outputs.head_sha }}", section)
+        self.assertIn("RELEASE_WORKFLOW_RUN_ID: ${{ github.run_id }}", section)
+        self.assertIn('--release-workflow-run-id "${RELEASE_WORKFLOW_RUN_ID}"', section)
+        self.assertIn('--expected-build-sha "${VALIDATED_BUILD_SHA}"', section)
     def test_invalid_inputs_fail_closed(self):
         invalid_cases = [
             ("owner repo", VERSION, BRANCH, BUILD_SHA),
@@ -111,11 +408,16 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             cleanup.CheckpointArtifact(101, 201, 2, 111),
             cleanup.CheckpointArtifact(102, 202, 3, 222),
         ]
-        with mock.patch.object(cleanup, "verify_healthy_release", return_value=BUILD_SHA), \
-             mock.patch.object(cleanup, "ensure_no_active_build_for_version"), \
+        identity = mock.sentinel.release_identity
+        with mock.patch.object(cleanup, "revalidate_release_identity") as revalidate, \
+             mock.patch.object(cleanup, "ensure_no_active_build_for_version") as active, \
              mock.patch.object(cleanup, "find_version_checkpoints", return_value=items), \
              mock.patch.object(cleanup, "delete_checkpoint", side_effect=["deleted:101", "deleted:102"]) as delete:
-            results, total = cleanup.cleanup_released_version(REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False)
+            results, total = cleanup.cleanup_released_version(
+                REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False, release_identity=identity
+            )
+        self.assertEqual(revalidate.call_count, 2)
+        self.assertEqual(active.call_count, 2)
         self.assertEqual(delete.call_count, 2)
         self.assertEqual(results, ["deleted:101", "deleted:102"])
         self.assertEqual(total, 333)
@@ -292,8 +594,9 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
             cleanup.SourceCache(301, f"chromium-src-v4-{VERSION}-12345", 5000),
             cleanup.SourceCache(302, f"chromium-src-v3-{VERSION}", 4000),
         ]
-        with mock.patch.object(cleanup, "verify_healthy_release"), \
-             mock.patch.object(cleanup, "ensure_no_active_build_for_version"), \
+        identity = mock.sentinel.release_identity
+        with mock.patch.object(cleanup, "revalidate_release_identity") as revalidate, \
+             mock.patch.object(cleanup, "ensure_no_active_build_for_version") as active, \
              mock.patch.object(cleanup, "list_source_caches", return_value=items), \
              mock.patch.object(
                  cleanup,
@@ -304,8 +607,10 @@ class ReleasedCheckpointCleanupTests(unittest.TestCase):
                  ],
              ) as delete:
             results, total = cleanup.cleanup_released_source_caches(
-                REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False
+                REPO, VERSION, BRANCH, BUILD_SHA, dry_run=False, release_identity=identity
             )
+        self.assertEqual(revalidate.call_count, 2)
+        self.assertEqual(active.call_count, 2)
         self.assertEqual(delete.call_count, 2)
         self.assertEqual(total, 9000)
         self.assertEqual(len(results), 2)

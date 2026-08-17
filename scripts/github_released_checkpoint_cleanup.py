@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import shutil
 import subprocess
+import sys
+import tempfile
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Sequence
 
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -22,7 +28,13 @@ ACTIVE_RUN_VERSION_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-
 MAX_STAGE = 50
 MAX_ARTIFACTS_PER_STAGE = 1000
 MAX_SOURCE_CACHES_PER_FILTER = 100
+MAX_RELEASE_WORKFLOW_JOBS = 100
 PER_PAGE = 100
+PUBLISH_WORKFLOW_PATH = ".github/workflows/publish-i686-release.yml"
+MAX_RELEASE_PACKAGE_BYTES = 16 * 1024**3
+MAX_RELEASE_CHECKSUM_BYTES = 64 * 1024
+MAX_RELEASE_MANIFEST_BYTES = 4 * 1024**2
+CHECKSUM_LINE_RE = re.compile(r"^([0-9a-fA-F]{64})  ([A-Za-z0-9._-]+)$")
 
 
 class CleanupError(RuntimeError):
@@ -42,6 +54,23 @@ class SourceCache:
     cache_id: int
     key: str
     size_bytes: int
+
+
+@dataclass(frozen=True)
+class ReleaseAsset:
+    name: str
+    digest: str
+    size_bytes: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class ReleaseIdentity:
+    tag: str
+    tag_commit: str
+    published_at: datetime
+    assets: tuple[ReleaseAsset, ...]
 
 
 def run_gh(args: Sequence[str], *, timeout: int = 90, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -82,34 +111,71 @@ def validate_inputs(repository: str, version: str, default_branch: str, expected
         raise CleanupError(f"invalid expected build SHA: {expected_build_sha!r}")
 
 
-def verify_healthy_release(repository: str, version: str, expected_build_sha: str) -> None:
+def parse_github_timestamp(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise CleanupError(f"{label} is missing or not an RFC3339 UTC timestamp: {value!r}")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise CleanupError(f"{label} is not a valid RFC3339 UTC timestamp: {value!r}") from exc
+    if parsed.utcoffset() is None:
+        raise CleanupError(f"{label} is not timezone-aware: {value!r}")
+    return parsed
+
+
+def _release_asset_limits(version: str) -> dict[str, int]:
+    return {
+        f"chromium-{version}-linux-i686.tar.xz": MAX_RELEASE_PACKAGE_BYTES,
+        f"chromium-{version}-linux-i686.tar.xz.sha256": MAX_RELEASE_CHECKSUM_BYTES,
+        f"chromium-{version}-linux-i686-manifest.txt": MAX_RELEASE_MANIFEST_BYTES,
+    }
+
+
+def read_release_identity(repository: str, version: str, expected_build_sha: str) -> ReleaseIdentity:
     tag = f"chromium-{version}-linux-i686"
     payload = parse_object(
-        run_gh(["release", "view", tag, "--repo", repository, "--json", "isDraft,isPrerelease,assets"]),
+        run_gh([
+            "release", "view", tag, "--repo", repository,
+            "--json", "isDraft,isPrerelease,isImmutable,assets,publishedAt,tagName",
+        ]),
         "release state",
     )
     if payload.get("isDraft") is not False or payload.get("isPrerelease") is not False:
         raise CleanupError(f"release {tag} is draft/prerelease; checkpoint cleanup is forbidden")
-    assets = payload.get("assets")
-    if not isinstance(assets, list):
+    if payload.get("isImmutable") is not True:
+        raise CleanupError(f"release {tag} is mutable; checkpoint cleanup requires GitHub-enforced release immutability")
+    if payload.get("tagName") != tag:
+        raise CleanupError(f"release lookup returned unexpected tag name: {payload.get('tagName')!r}")
+    published_at = parse_github_timestamp(payload.get("publishedAt"), f"release {tag} publishedAt")
+    raw_assets = payload.get("assets")
+    if not isinstance(raw_assets, list):
         raise CleanupError(f"release {tag} lacks an assets array")
-    expected = {
-        f"chromium-{version}-linux-i686.tar.xz",
-        f"chromium-{version}-linux-i686.tar.xz.sha256",
-        f"chromium-{version}-linux-i686-manifest.txt",
-    }
-    seen: dict[str, int] = {}
-    for item in assets:
+    limits = _release_asset_limits(version)
+    seen: dict[str, ReleaseAsset] = {}
+    counts: dict[str, int] = {}
+    for item in raw_assets:
         if not isinstance(item, dict):
             raise CleanupError(f"release {tag} contains malformed asset metadata")
         name = str(item.get("name", ""))
-        if name not in expected:
+        if name not in limits:
             continue
-        seen[name] = seen.get(name, 0) + 1
+        counts[name] = counts.get(name, 0) + 1
         digest = str(item.get("digest", ""))
         if not SHA256_DIGEST_RE.fullmatch(digest):
             raise CleanupError(f"release asset {name} lacks a verifiable SHA-256 digest")
-    missing = sorted(name for name in expected if seen.get(name) != 1)
+        if item.get("state") != "uploaded":
+            raise CleanupError(f"release asset {name} is not in uploaded state: {item.get('state')!r}")
+        created_at = parse_github_timestamp(item.get("createdAt"), f"release asset {name} createdAt")
+        updated_at = parse_github_timestamp(item.get("updatedAt"), f"release asset {name} updatedAt")
+        if updated_at < created_at:
+            raise CleanupError(f"release asset {name} updatedAt precedes createdAt")
+        size = item.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > limits[name]:
+            raise CleanupError(
+                f"release asset {name} size violates bounded 1..{limits[name]} byte contract: {size!r}"
+            )
+        seen[name] = ReleaseAsset(name, digest.lower(), size, created_at, updated_at)
+    missing = sorted(name for name in limits if counts.get(name) != 1)
     if missing:
         raise CleanupError(f"release {tag} does not have exactly one of each required asset: {', '.join(missing)}")
     commit = run_gh(["api", f"repos/{repository}/commits/{tag}", "--jq", ".sha"]).stdout.strip()
@@ -119,7 +185,294 @@ def verify_healthy_release(repository: str, version: str, expected_build_sha: st
         raise CleanupError(
             f"release tag {tag} resolves to {commit}, not validated build {expected_build_sha}; cleanup is forbidden"
         )
+    return ReleaseIdentity(
+        tag, commit.lower(), published_at, tuple(sorted(seen.values(), key=lambda item: item.name))
+    )
+
+
+def verify_healthy_release(repository: str, version: str, expected_build_sha: str) -> None:
+    # Compatibility wrapper used by focused callers/tests. Destructive cleanup uses
+    # prepare_release_cleanup_proof(), which additionally verifies the immutable bytes.
+    read_release_identity(repository, version, expected_build_sha)
     return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _parse_release_manifest(path: Path) -> dict[str, str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise CleanupError(f"could not read release manifest {path.name}: {exc}") from exc
+    fields: dict[str, str] = {}
+    saw_packaged_files = False
+    for raw in text.splitlines():
+        if raw == "packaged_files:":
+            saw_packaged_files = True
+            break
+        if not raw:
+            continue
+        if "=" not in raw:
+            raise CleanupError(f"release manifest contains malformed metadata line: {raw!r}")
+        key, value = raw.split("=", 1)
+        if not key or key in fields:
+            raise CleanupError(f"release manifest contains invalid/duplicate key: {key!r}")
+        fields[key] = value
+    if not saw_packaged_files:
+        raise CleanupError("release manifest lacks packaged_files section")
+    return fields
+
+
+def run_release_archive_validator(archive: Path) -> None:
+    validator = Path(__file__).with_name("validate_release_archive.py")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(validator), str(archive)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CleanupError("release archive safety validation timed out after 600s") from exc
+    except OSError as exc:
+        raise CleanupError(f"could not run release archive validator: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "release archive validator failed").strip()
+        raise CleanupError(f"release archive safety/completeness validation failed: {detail}")
+
+
+def verify_release_archive_bytes(
+    repository: str,
+    version: str,
+    expected_build_sha: str,
+    identity: ReleaseIdentity,
+) -> None:
+    expected_identity = read_release_identity(repository, version, expected_build_sha)
+    if expected_identity != identity:
+        raise CleanupError("release identity changed before immutable-byte validation; cleanup is forbidden")
+    package_name = f"chromium-{version}-linux-i686.tar.xz"
+    checksum_name = f"{package_name}.sha256"
+    manifest_name = f"chromium-{version}-linux-i686-manifest.txt"
+    by_name = {asset.name: asset for asset in identity.assets}
+
+    with tempfile.TemporaryDirectory(prefix="chromium-release-cleanup-proof-") as temp:
+        root = Path(temp)
+        # Never derive a local filesystem path from release metadata or CLI input.
+        # The three remotely validated asset names are downloaded one-at-a-time into
+        # fixed internal filenames; remote names remain data used only by the GitHub CLI.
+        package = root / "release-package.tar.xz"
+        checksum = root / "release-package.sha256"
+        manifest = root / "release-manifest.txt"
+        downloads = (
+            (package_name, package),
+            (checksum_name, checksum),
+            (manifest_name, manifest),
+        )
+        required_download_bytes = sum(by_name[name].size_bytes for name, _ in downloads)
+        free_download_bytes = shutil.disk_usage(root).free
+        if free_download_bytes < required_download_bytes:
+            raise CleanupError(
+                "insufficient temporary-disk space for immutable release proof: "
+                f"need {required_download_bytes} bytes, have {free_download_bytes} bytes"
+            )
+
+        downloaded_digests: dict[str, str] = {}
+        for remote_name, local_path in downloads:
+            # The package is the only large asset. Sidecars should fail quickly rather
+            # than consume the same ten-minute budget as a multi-GiB archive.
+            download_timeout = 600 if remote_name == package_name else 120
+            run_gh(
+                [
+                    "release",
+                    "download",
+                    identity.tag,
+                    "--repo",
+                    repository,
+                    "--pattern",
+                    remote_name,
+                    "--output",
+                    str(local_path),
+                ],
+                timeout=download_timeout,
+            )
+            if not local_path.is_file() or local_path.is_symlink():
+                raise CleanupError(
+                    f"release download did not materialize a regular {remote_name} asset"
+                )
+            actual_size = local_path.stat().st_size
+            asset = by_name[remote_name]
+            if actual_size != asset.size_bytes:
+                raise CleanupError(
+                    f"release asset {remote_name} size changed: "
+                    f"metadata={asset.size_bytes}, downloaded={actual_size}"
+                )
+            actual_digest = _sha256_file(local_path)
+            expected_digest = asset.digest.removeprefix("sha256:")
+            if actual_digest.lower() != expected_digest.lower():
+                raise CleanupError(
+                    f"release asset {remote_name} does not match its GitHub SHA-256 digest"
+                )
+            downloaded_digests[remote_name] = actual_digest.lower()
+
+        run_release_archive_validator(package)
+        package_sha = downloaded_digests[package_name]
+        try:
+            checksum_text = checksum.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise CleanupError(f"could not read release checksum sidecar: {exc}") from exc
+        checksum_match = CHECKSUM_LINE_RE.fullmatch(checksum_text)
+        if not checksum_match or checksum_match.group(2) != package_name:
+            raise CleanupError("release checksum sidecar does not name exactly the expected package")
+        if checksum_match.group(1).lower() != package_sha.lower():
+            raise CleanupError("release checksum sidecar does not match the immutable package bytes")
+
+
+
+        fields = _parse_release_manifest(manifest)
+        required_fields = {
+            "manifest_schema": "2",
+            "version": version,
+            "target_cpu": "x86",
+            "target_os": "linux",
+            "package_sha256": package_sha,
+            "github_sha": expected_build_sha.lower(),
+        }
+        for key, expected in required_fields.items():
+            actual = fields.get(key, "")
+            if key in {"package_sha256", "github_sha"}:
+                actual = actual.lower()
+            if actual != expected:
+                raise CleanupError(
+                    f"release manifest {key} does not match cleanup proof: expected {expected!r}, got {fields.get(key)!r}"
+                )
+
+
+
+def _normalized_workflow_path(value: object) -> str:
+    return str(value or "").split("@", 1)[0]
+
+
+def verify_release_workflow_proof(
+    repository: str,
+    version: str,
+    default_branch: str,
+    release_workflow_run_id: str,
+    identity: ReleaseIdentity,
+) -> None:
+    if not ID_RE.fullmatch(release_workflow_run_id):
+        raise CleanupError(f"invalid release workflow run ID: {release_workflow_run_id!r}")
+    run = parse_object(
+        run_gh(["api", f"repos/{repository}/actions/runs/{release_workflow_run_id}"]),
+        "release workflow run",
+    )
+    if _normalized_workflow_path(run.get("path")) != PUBLISH_WORKFLOW_PATH:
+        raise CleanupError("release workflow proof does not come from the trusted publication workflow")
+    head_repository = run.get("head_repository")
+    if not isinstance(head_repository, dict) or head_repository.get("full_name") != repository:
+        raise CleanupError("release workflow proof comes from an unexpected repository")
+    if run.get("head_branch") != default_branch:
+        raise CleanupError("release workflow proof does not run on the default branch")
+    if run.get("event") not in {"workflow_run", "workflow_dispatch"}:
+        raise CleanupError(f"release workflow proof has unexpected event: {run.get('event')!r}")
+    title = str(run.get("display_title", ""))
+    if not title.startswith(f"Publish Chromium i686 {version} "):
+        raise CleanupError(f"release workflow proof title is not scoped to Chromium {version}: {title!r}")
+    if run.get("status") not in {"in_progress", "completed"}:
+        raise CleanupError(f"release workflow proof has unexpected status: {run.get('status')!r}")
+
+    jobs = parse_object(
+        run_gh(["api", f"repos/{repository}/actions/runs/{release_workflow_run_id}/jobs?per_page=100&page=1"]),
+        "release workflow jobs",
+    )
+    total = jobs.get("total_count")
+    raw_jobs = jobs.get("jobs")
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 3
+        or total > MAX_RELEASE_WORKFLOW_JOBS
+        or not isinstance(raw_jobs, list)
+        or len(raw_jobs) != total
+    ):
+        raise CleanupError("release workflow job listing violates bounded complete-list contract")
+    required = {"validate", "smoke", "publish"}
+    selected: dict[str, dict[str, object]] = {}
+    counts: dict[str, int] = {}
+    for job in raw_jobs:
+        if not isinstance(job, dict):
+            raise CleanupError("release workflow job listing contains malformed metadata")
+        name = str(job.get("name", ""))
+        if name not in required:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+        selected[name] = job
+    for name in sorted(required):
+        job = selected.get(name)
+        if (
+            counts.get(name) != 1
+            or job is None
+            or job.get("status") != "completed"
+            or job.get("conclusion") != "success"
+        ):
+            raise CleanupError(f"release workflow job {name!r} is not uniquely completed/successful")
+
+    publish_job = selected["publish"]
+    raw_steps = publish_job.get("steps")
+    if not isinstance(raw_steps, list):
+        raise CleanupError("publish job lacks step metadata for release-byte provenance")
+    publish_step_name = "Create or resume transactional immutable release"
+    publish_steps = [step for step in raw_steps if isinstance(step, dict) and step.get("name") == publish_step_name]
+    if len(publish_steps) != 1:
+        raise CleanupError(f"publish job does not contain exactly one {publish_step_name!r} step")
+    publish_step = publish_steps[0]
+    if publish_step.get("status") != "completed" or publish_step.get("conclusion") != "success":
+        raise CleanupError("transactional release publication step did not complete successfully")
+    step_started = parse_github_timestamp(publish_step.get("started_at"), "publish step started_at")
+    step_completed = parse_github_timestamp(publish_step.get("completed_at"), "publish step completed_at")
+    if step_completed < step_started:
+        raise CleanupError("publish step completion precedes its start")
+    # A transactional retry may resume a release object and immutable assets created
+    # by an earlier failed attempt. Current bytes are independently re-downloaded and
+    # cross-bound to the tag, GitHub digests, checksum, manifest, and build SHA, so the
+    # temporal requirement is that no current asset was modified after this successful
+    # publication step completed.
+    if identity.published_at > step_completed:
+        raise CleanupError("current release publishedAt postdates the supplied successful publish step")
+    for asset in identity.assets:
+        if not (asset.created_at <= asset.updated_at <= step_completed):
+            raise CleanupError(
+                f"release asset {asset.name} creation/update timestamps postdate or contradict the supplied publish proof"
+            )
+
+
+def prepare_release_cleanup_proof(
+    repository: str,
+    version: str,
+    default_branch: str,
+    expected_build_sha: str,
+    release_workflow_run_id: str | None,
+    *,
+    require_runtime_proof: bool,
+) -> ReleaseIdentity:
+    validate_inputs(repository, version, default_branch, expected_build_sha)
+    if require_runtime_proof and not release_workflow_run_id:
+        raise CleanupError("--apply requires a trusted release workflow run ID with successful validate/smoke/publish jobs")
+    identity = read_release_identity(repository, version, expected_build_sha)
+    verify_release_archive_bytes(repository, version, expected_build_sha, identity)
+    if release_workflow_run_id:
+        verify_release_workflow_proof(
+            repository, version, default_branch, release_workflow_run_id, identity
+        )
+    if read_release_identity(repository, version, expected_build_sha) != identity:
+        raise CleanupError("release identity changed while cleanup proof was running; cleanup is forbidden")
+    return identity
 
 
 ACTIVE_RUN_STATES = {"queued", "in_progress", "waiting", "pending", "requested"}
@@ -279,14 +632,66 @@ def delete_checkpoint(repository: str, artifact: CheckpointArtifact) -> str:
     return f"deleted:{artifact.artifact_id}"
 
 
-def cleanup_released_version(
-    repository: str, version: str, default_branch: str, expected_build_sha: str, *, dry_run: bool
-) -> tuple[list[str], int]:
+def revalidate_release_identity(
+    repository: str, version: str, expected_build_sha: str, identity: ReleaseIdentity
+) -> None:
+    if read_release_identity(repository, version, expected_build_sha) != identity:
+        raise CleanupError("release identity changed after immutable-byte proof; cleanup is forbidden")
+
+
+def guard_cleanup_phase(
+    repository: str,
+    version: str,
+    default_branch: str,
+    expected_build_sha: str,
+    *,
+    dry_run: bool,
+    release_identity: ReleaseIdentity | None,
+    phase: str,
+) -> None:
     validate_inputs(repository, version, default_branch, expected_build_sha)
-    verify_healthy_release(repository, version, expected_build_sha)
+    if release_identity is None:
+        if not dry_run:
+            raise CleanupError(
+                f"destructive {phase} cleanup requires a verified immutable release proof"
+            )
+        verify_healthy_release(repository, version, expected_build_sha)
+    else:
+        revalidate_release_identity(repository, version, expected_build_sha, release_identity)
     ensure_no_active_build_for_version(repository, version, default_branch)
+
+
+def cleanup_released_version(
+    repository: str,
+    version: str,
+    default_branch: str,
+    expected_build_sha: str,
+    *,
+    dry_run: bool,
+    release_identity: ReleaseIdentity | None = None,
+) -> tuple[list[str], int]:
+    guard_cleanup_phase(
+        repository,
+        version,
+        default_branch,
+        expected_build_sha,
+        dry_run=dry_run,
+        release_identity=release_identity,
+        phase="checkpoint",
+    )
     candidates = find_version_checkpoints(repository, version, default_branch)
     total_bytes = sum(item.size_bytes for item in candidates)
+    if not dry_run:
+        assert release_identity is not None
+        guard_cleanup_phase(
+            repository,
+            version,
+            default_branch,
+            expected_build_sha,
+            dry_run=False,
+            release_identity=release_identity,
+            phase="checkpoint",
+        )
     results: list[str] = []
     for item in candidates:
         if dry_run:
@@ -387,15 +792,38 @@ def delete_source_cache(
 
 
 def cleanup_released_source_caches(
-    repository: str, version: str, default_branch: str, expected_build_sha: str, *, dry_run: bool
+    repository: str,
+    version: str,
+    default_branch: str,
+    expected_build_sha: str,
+    *,
+    dry_run: bool,
+    release_identity: ReleaseIdentity | None = None,
 ) -> tuple[list[str], int]:
     # Revalidate independently from checkpoint deletion so a same-version build that
     # starts between the two phases protects its source cache.
-    validate_inputs(repository, version, default_branch, expected_build_sha)
-    verify_healthy_release(repository, version, expected_build_sha)
-    ensure_no_active_build_for_version(repository, version, default_branch)
+    guard_cleanup_phase(
+        repository,
+        version,
+        default_branch,
+        expected_build_sha,
+        dry_run=dry_run,
+        release_identity=release_identity,
+        phase="source-cache",
+    )
     caches = list_source_caches(repository, version, default_branch)
     total_bytes = sum(item.size_bytes for item in caches)
+    if not dry_run:
+        assert release_identity is not None
+        guard_cleanup_phase(
+            repository,
+            version,
+            default_branch,
+            expected_build_sha,
+            dry_run=False,
+            release_identity=release_identity,
+            phase="source-cache",
+        )
     results: list[str] = []
     for item in caches:
         if dry_run:
@@ -412,15 +840,29 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--default-branch", required=True)
     parser.add_argument("--expected-build-sha", required=True)
+    parser.add_argument(
+        "--release-workflow-run-id",
+        default="",
+        help="Trusted publication workflow run; required for --apply runtime proof",
+    )
     parser.add_argument("--apply", action="store_true", help="Actually delete; default is dry-run")
     args = parser.parse_args()
     try:
+        release_identity = prepare_release_cleanup_proof(
+            args.repository,
+            args.version,
+            args.default_branch,
+            args.expected_build_sha,
+            args.release_workflow_run_id or None,
+            require_runtime_proof=args.apply,
+        )
         results, total_bytes = cleanup_released_version(
             args.repository,
             args.version,
             args.default_branch,
             args.expected_build_sha,
             dry_run=not args.apply,
+            release_identity=release_identity,
         )
         cache_results, cache_bytes = cleanup_released_source_caches(
             args.repository,
@@ -428,6 +870,7 @@ def main() -> int:
             args.default_branch,
             args.expected_build_sha,
             dry_run=not args.apply,
+            release_identity=release_identity,
         )
     except CleanupError as exc:
         parser.error(str(exc))
