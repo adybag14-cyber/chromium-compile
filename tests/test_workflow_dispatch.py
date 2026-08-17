@@ -81,7 +81,11 @@ class WorkflowDispatchTests(unittest.TestCase):
         with mock.patch.object(dispatch, "list_recent_runs", return_value=[run]) as listing:
             self.assertTrue(
                 dispatch.exact_active_exists(
-                    "owner/repo", "workflow.yml", "Expected title", "main", expected_sha
+                    "owner/repo",
+                    "workflow.yml",
+                    "Expected title",
+                    "main",
+                    expected_head_sha=expected_sha,
                 )
             )
         self.assertEqual(listing.call_args.kwargs["branch"], "main")
