@@ -183,6 +183,8 @@ When preflight passes, rerun it with `dispatch_build=true` to start stage 1.
 
 Open **Actions → Chromium i686 Build (Unofficial Port) → Run workflow**.
 
+Select the repository **default branch** when starting either a manual compatibility preflight or a manual build/recovery lineage. Non-default workflow runs are validation-only and do not automatically continue or recover production stages.
+
 Fresh build:
 
 ```text

@@ -169,6 +169,7 @@ def recent_dispatch_head_state(
             f"refusing to assume {expected_title!r} is absent"
         )
     saw_expected = False
+    saw_other = False
     for run in title_ref_matches:
         raw = str(run.get("createdAt", ""))
         try:
@@ -185,10 +186,13 @@ def recent_dispatch_head_state(
         if created < threshold:
             continue
         observed_sha = str(run.get("headSha", "")).lower()
-        if observed_sha != expected_head_sha.lower():
-            return "mismatch"
-        saw_expected = True
-    return "matched" if saw_expected else "absent"
+        if observed_sha == expected_head_sha.lower():
+            saw_expected = True
+        else:
+            saw_other = True
+    if saw_expected:
+        return "matched"
+    return "mismatch" if saw_other else "absent"
 
 
 def confirm_expected_dispatch_head(
@@ -231,6 +235,7 @@ def exact_active_exists(
     workflow: str,
     expected_title: str,
     expected_ref: str,
+    *,
     expected_head_sha: str | None = None,
 ) -> bool:
     return any(
@@ -246,6 +251,7 @@ def exact_any_exists(
     workflow: str,
     expected_title: str,
     expected_ref: str,
+    *,
     expected_head_sha: str | None = None,
 ) -> bool:
     return bool(
@@ -331,7 +337,7 @@ def dispatch_once(
         ):
             return "already-seen"
     elif exact_active_exists(
-        repository, workflow, expected_title, ref, normalized_head_sha
+        repository, workflow, expected_title, ref, expected_head_sha=normalized_head_sha
     ):
         return "already-active"
 

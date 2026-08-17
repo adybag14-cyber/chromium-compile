@@ -622,6 +622,7 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("CURRENT_WORKFLOW_SHA: ${{ github.sha }}", workflow)
         self.assertIn('lineage_sha="${REQUESTED_LINEAGE_SHA:-${CURRENT_WORKFLOW_SHA}}"', workflow)
         self.assertIn("workflow lineage SHA drift", workflow)
+        self.assertIn('control_fail "workflow lineage SHA drift', workflow)
         self.assertIn("lineage_sha: ${{ steps.control.outputs.lineage_sha }}", workflow)
         self.assertEqual(workflow.count('--expected-head-sha "${LINEAGE_SHA}"'), 2)
         self.assertEqual(workflow.count('--input "lineage_sha=${LINEAGE_SHA}"'), 2)

@@ -108,8 +108,9 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", bootstrap)
         self.assertIn("if: ${{ github.ref_name == github.event.repository.default_branch }}", watcher)
         self.assertIn("github.ref_name == github.event.repository.default_branch && needs.resolve_runner.outputs.valid == 'true'", preflight)
-        for workflow in (bootstrap, watcher, preflight):
+        for workflow in (bootstrap, watcher):
             self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
+        self.assertIn("ref: ${{ github.sha }}", preflight)
         self.assertIn("needs.detect.result == 'failure' && github.ref_name == github.event.repository.default_branch", watcher)
         build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         self.assertIn("chromium-i686-build-nonprod-{0}", build)

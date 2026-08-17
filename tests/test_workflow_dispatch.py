@@ -225,7 +225,12 @@ class WorkflowDispatchTests(unittest.TestCase):
         with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
             self.assertFalse(
                 dispatch.exact_active_exists(
-                    "owner/repo", "workflow.yml", "Expected title", "main", expected_sha
+                    "owner/repo", "workflow.yml", "Expected title", "main", expected_head_sha=expected_sha
+                )
+            )
+            self.assertTrue(
+                dispatch.exact_active_exists(
+                    "owner/repo", "workflow.yml", "Expected title", "main", expected_head_sha="b" * 40
                 )
             )
 
@@ -288,6 +293,33 @@ class WorkflowDispatchTests(unittest.TestCase):
                     expected_sha,
                     datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc),
                 )
+
+    def test_post_dispatch_matching_head_wins_over_other_same_window_run(self):
+        expected_sha = "a" * 40
+        started = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        runs = [
+            {
+                "displayTitle": "Expected title",
+                "headBranch": "main",
+                "headSha": "b" * 40,
+                "status": "queued",
+                "createdAt": "2026-08-14T11:59:45Z",
+            },
+            {
+                "displayTitle": "Expected title",
+                "headBranch": "main",
+                "headSha": expected_sha,
+                "status": "queued",
+                "createdAt": "2026-08-14T12:00:01Z",
+            },
+        ]
+        with mock.patch.object(dispatch, "list_recent_runs", return_value=runs):
+            self.assertEqual(
+                dispatch.recent_dispatch_head_state(
+                    "owner/repo", "workflow.yml", "Expected title", "main", expected_sha, started
+                ),
+                "matched",
+            )
 
     def test_post_dispatch_head_mismatch_fails_without_second_write(self):
         expected_sha = "a" * 40
