@@ -169,7 +169,11 @@ class WorkflowDispatchTests(unittest.TestCase):
         with mock.patch.object(dispatch, "_exact_runs_or_fail_closed", side_effect=fake_exact) as exact:
             self.assertTrue(
                 dispatch.exact_active_exists(
-                    "owner/repo", "workflow.yml", "Expected title", "main", expected_sha
+                    "owner/repo",
+                    "workflow.yml",
+                    "Expected title",
+                    "main",
+                    expected_head_sha=expected_sha,
                 )
             )
         self.assertEqual(exact.call_count, 2)
@@ -187,7 +191,11 @@ class WorkflowDispatchTests(unittest.TestCase):
         with mock.patch.object(dispatch, "list_recent_runs", side_effect=fake_listing):
             self.assertFalse(
                 dispatch.exact_active_exists(
-                    "owner/repo", "workflow.yml", "Expected title", "main", expected_sha
+                    "owner/repo",
+                    "workflow.yml",
+                    "Expected title",
+                    "main",
+                    expected_head_sha=expected_sha,
                 )
             )
         self.assertEqual(observed_statuses, list(dispatch.ACTIVE_STATUSES))
