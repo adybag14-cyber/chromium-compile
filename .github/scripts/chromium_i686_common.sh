@@ -52,6 +52,10 @@ CHECKPOINT_CONTRACT_VERSION="${CHECKPOINT_CONTRACT_VERSION:-1}"
 # deliberately excluded so non-semantic pipeline refactors do not discard Ninja state.
 # Schema-1 compatibility remains in the resume path for one-way checkpoint migration.
 PORT_CONFIG_HASH_SCHEMA=2
+CHROMIUM_I686_MAX_NO_PROGRESS_STREAK=2
+CHROMIUM_I686_NINJA_STALL_MINUTES="${CHROMIUM_I686_NINJA_STALL_MINUTES:-90}"
+CHROMIUM_I686_HARD_MIN_NINJA_STALL_MINUTES=30
+CHROMIUM_I686_HARD_MAX_NINJA_STALL_MINUTES=180
 export DEPOT_TOOLS_UPDATE=0
 export CHROMIUM_I686_MAX_CHECKPOINT_UNPACKED_GIB CHROMIUM_I686_MAX_CHECKPOINT_MEMBERS
 export CHROMIUM_I686_MAX_RELEASE_UNPACKED_GIB CHROMIUM_I686_MAX_RELEASE_MEMBERS
@@ -147,6 +151,16 @@ validate_checkpoint_minutes() {
   if [[ ! "${value}" =~ ^[1-9][0-9]{0,2}$ ]] \
       || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES}" ]; then
     echo "::error::JOB_CHECKPOINT_MINUTES must be an integer from 1 through ${CHROMIUM_I686_HARD_MAX_CHECKPOINT_MINUTES}."
+    return 1
+  fi
+}
+
+validate_ninja_stall_minutes() {
+  local value="${1:-}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,2}$ ]] \
+      || [ "${value}" -lt "${CHROMIUM_I686_HARD_MIN_NINJA_STALL_MINUTES}" ] \
+      || [ "${value}" -gt "${CHROMIUM_I686_HARD_MAX_NINJA_STALL_MINUTES}" ]; then
+    echo "::error::CHROMIUM_I686_NINJA_STALL_MINUTES must be an integer from ${CHROMIUM_I686_HARD_MIN_NINJA_STALL_MINUTES} through ${CHROMIUM_I686_HARD_MAX_NINJA_STALL_MINUTES}."
     return 1
   fi
 }
@@ -1100,6 +1114,7 @@ write_stage_summary() {
   local attempt="${3:-unknown}"
   local complete="${4:-unknown}"
   local failure_class="${5:-none}"
+  local no_progress_streak="${6:-unknown}"
   local summary="${GITHUB_STEP_SUMMARY:-}"
   if [ -z "${summary}" ]; then
     return 0
@@ -1124,6 +1139,7 @@ write_stage_summary() {
     echo "| Attempt | \`${attempt}\` |"
     echo "| Complete | \`${complete}\` |"
     echo "| Failure class | \`${failure_class:-none}\` |"
+    echo "| Ninja no-progress streak | \`${no_progress_streak}/${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}\` |"
     echo "| Last Ninja progress | \`${progress}\` |"
     echo "| Checkpoint | \`${checkpoint_size}\` |"
     echo "| Free disk | \`$(available_disk_gb "${WORKSPACE}") GiB\` |"
@@ -1883,11 +1899,68 @@ configure_gn() {
   CHROMIUM_PREPARE_FAILURE_CLASS=""
 }
 
+ninja_log_entry_count() {
+  local log="${OUT_DIR}/.ninja_log"
+  if [ ! -s "${log}" ]; then
+    printf '0\n'
+    return 0
+  fi
+  awk '!/^#/ && NF { count++ } END { print count + 0 }' "${log}"
+}
+
+validate_no_progress_streak() {
+  local value="${1:-}"
+  [[ "${value}" =~ ^[0-9]$ ]] && [ "${value}" -le "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" ] || {
+    echo "::error::Checkpoint Ninja no-progress streak must be an integer from 0 through ${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}: ${value}" >&2
+    return 1
+  }
+}
+
+compute_no_progress_streak() {
+  local prior="${1:?prior no-progress streak is required}"
+  local before="${2:?baseline Ninja log entry count is required}"
+  local after="${3:?current Ninja log entry count is required}"
+  validate_no_progress_streak "${prior}" || return 1
+  [[ "${before}" =~ ^[0-9]+$ && "${after}" =~ ^[0-9]+$ ]] || {
+    echo "::error::Ninja log entry counts must be non-negative integers: before=${before}, after=${after}" >&2
+    return 1
+  }
+  if [ "${after}" -gt "${before}" ]; then
+    printf '0\n'
+    return 0
+  fi
+  local next=$((prior + 1))
+  if [ "${next}" -gt "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" ]; then
+    next="${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}"
+  fi
+  printf '%s\n' "${next}"
+}
+
+record_ninja_progress_streak() {
+  local output_file="${1:?output file is required}"
+  local prior="${2:?prior no-progress streak is required}"
+  local before="${3:?baseline Ninja log entry count is required}"
+  local after streak
+  after="$(ninja_log_entry_count)" || return 1
+  streak="$(compute_no_progress_streak "${prior}" "${before}" "${after}")" || return 1
+  echo "no_progress_streak=${streak}" >> "${output_file}"
+  if [ "${streak}" -eq 0 ]; then
+    echo "Ninja durable-progress entries increased from ${before} to ${after} during this compiler slice." >&2
+  else
+    echo "::warning::Ninja completed-entry count did not increase during this compiler slice (${before} -> ${after}); no-progress streak is ${streak}/${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}." >&2
+  fi
+  printf '%s\n' "${streak}"
+}
+
 run_build_until_checkpoint() {
   local output_file="${1:-${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}}"
   local started_at="${JOB_STARTED_AT:-}"
   local checkpoint_minutes="${JOB_CHECKPOINT_MINUTES:-340}"
-  local now remaining status failure_class pass pass_log_start pass_log
+  local now remaining status failure_class pass pass_log_start pass_log stall_marker watchdog_error_marker
+  local prior_no_progress_streak="${CHROMIUM_I686_PRIOR_NO_PROGRESS_STREAK:-0}"
+  local ninja_stall_minutes="${CHROMIUM_I686_NINJA_STALL_MINUTES:-90}"
+  local ninja_log_entries_before no_progress_streak
+  local compiler_started=false
   now="$(date +%s)"
   if ! validate_job_started_at "${started_at}" "${now}"; then
     echo "complete=false" >> "${output_file}"
@@ -1897,6 +1970,19 @@ run_build_until_checkpoint() {
   if ! validate_checkpoint_minutes "${checkpoint_minutes}"; then
     echo "complete=false" >> "${output_file}"
     echo "failure_class=deterministic_build" >> "${output_file}"
+    echo "no_progress_streak=0" >> "${output_file}"
+    return 1
+  fi
+  if ! validate_no_progress_streak "${prior_no_progress_streak}"; then
+    echo "complete=false" >> "${output_file}"
+    echo "failure_class=deterministic_build" >> "${output_file}"
+    echo "no_progress_streak=0" >> "${output_file}"
+    return 1
+  fi
+  if ! validate_ninja_stall_minutes "${ninja_stall_minutes}"; then
+    echo "complete=false" >> "${output_file}"
+    echo "failure_class=deterministic_build" >> "${output_file}"
+    echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
     return 1
   fi
   local cutoff=$((started_at + checkpoint_minutes * 60))
@@ -1912,6 +1998,8 @@ run_build_until_checkpoint() {
   export PATH="${DEPOT_TOOLS}:${DEPOT_TOOLS}/.cipd_bin:${PATH}"
   export CCACHE_DIR
   : > "${BUILD_LOG}"
+  ninja_log_entries_before="$(ninja_log_entry_count)"
+  echo "Baseline Ninja completed-entry count: ${ninja_log_entries_before}"
 
   for pass in 1 2 3; do
     now=$(date +%s)
@@ -1919,6 +2007,18 @@ run_build_until_checkpoint() {
     if [ "${remaining}" -le 300 ]; then
       echo "::warning::Less than five minutes remain before checkpoint cutoff; saving state for the next job."
       echo "complete=false" >> "${output_file}"
+      if [ "${compiler_started}" != true ]; then
+        echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
+        echo "failure_class=" >> "${output_file}"
+        echo "Compiler never started in this slice; preserving prior no-progress streak ${prior_no_progress_streak}/${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}."
+        return 0
+      fi
+      no_progress_streak="$(record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}")"
+      if [ "${no_progress_streak}" -ge "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" ]; then
+        echo "failure_class=deterministic_build" >> "${output_file}"
+        echo "::error::Two consecutive compiler slices made no durable Ninja progress; refusing to burn another staged runner."
+        return 1
+      fi
       echo "failure_class=" >> "${output_file}"
       return 0
     fi
@@ -1931,17 +2031,61 @@ run_build_until_checkpoint() {
     pass_log="${WORKSPACE}/build-stage-pass-${pass}.log"
     set +e
     set +o pipefail
-    local -a build_targets=(chrome "chrome/installer/linux:installer_deps")
-    timeout -k 120s "${remaining}s" autoninja -C out/Release_x86 -j3 "${build_targets[@]}" 2>&1 | tee -a "${BUILD_LOG}"
+    compiler_started=true
+    stall_marker="${CHROMIUM_SRC}/.ninja-stall-watchdog.marker"
+    watchdog_error_marker="${CHROMIUM_SRC}/.ninja-stall-watchdog.error"
+    rm -f -- "${stall_marker}" "${watchdog_error_marker}"
+    python3 "${WORKSPACE}/scripts/ninja_stall_watchdog.py" \
+      --stall-seconds "$((ninja_stall_minutes * 60))" \
+      --timeout-seconds "${remaining}" \
+      2>&1 | tee -a "${BUILD_LOG}"
     status=${PIPESTATUS[0]}
     set -o pipefail
     set -e
     tail -c "+$((pass_log_start + 1))" "${BUILD_LOG}" > "${pass_log}"
 
+    if [ -s "${stall_marker}" ] && [ -s "${watchdog_error_marker}" ]; then
+      rm -f -- "${stall_marker}" "${watchdog_error_marker}"
+      echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
+      echo "complete=false" >> "${output_file}"
+      echo "failure_class=infrastructure" >> "${output_file}"
+      echo "::error::Ninja watchdog produced conflicting stall/error markers; treating this as runner/control infrastructure failure."
+      return 85
+    fi
+
+    if [ -s "${stall_marker}" ]; then
+      rm -f -- "${stall_marker}" "${watchdog_error_marker}"
+      echo "::warning::Ninja made no durable progress for ${ninja_stall_minutes} minutes; preserving work and rotating this compiler slice to a fresh runner."
+      no_progress_streak="$(record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}")"
+      echo "complete=false" >> "${output_file}"
+      if [ "${no_progress_streak}" -ge "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" ]; then
+        echo "failure_class=deterministic_build" >> "${output_file}"
+        echo "::error::Two consecutive compiler slices made no durable Ninja progress; latest checkpoint will be preserved for diagnosis."
+        return 1
+      fi
+      echo "failure_class=" >> "${output_file}"
+      df -h
+      ccache -s || true
+      return 0
+    fi
+
+    if [ -s "${watchdog_error_marker}" ]; then
+      local watchdog_detail
+      watchdog_detail="$(head -n 1 "${watchdog_error_marker}" 2>/dev/null || true)"
+      rm -f -- "${stall_marker}" "${watchdog_error_marker}"
+      echo "no_progress_streak=${prior_no_progress_streak}" >> "${output_file}"
+      echo "complete=false" >> "${output_file}"
+      echo "failure_class=infrastructure" >> "${output_file}"
+      echo "::error::${watchdog_detail:-Ninja stall watchdog failed internally}; rotating to a fresh runner without incrementing the compiler no-progress streak."
+      return 85
+    fi
+    rm -f -- "${stall_marker}" "${watchdog_error_marker}"
+
     if [ "${status}" -eq 0 ]; then
       echo "Build finished at $(date)"
       echo "complete=true" >> "${output_file}"
       echo "failure_class=" >> "${output_file}"
+      echo "no_progress_streak=0" >> "${output_file}"
       df -h
       ccache -s || true
       return 0
@@ -1950,7 +2094,15 @@ run_build_until_checkpoint() {
     now=$(date +%s)
     if [ "${status}" -eq 124 ]         || { { [ "${status}" -eq 137 ] || [ "${status}" -eq 143 ]; } && [ "${now}" -ge "${cutoff}" ]; }; then
       echo "Compiler slice reached the checkpoint cutoff at $(date); preserving work for the next job."
+      no_progress_streak="$(record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}")"
       echo "complete=false" >> "${output_file}"
+      if [ "${no_progress_streak}" -ge "${CHROMIUM_I686_MAX_NO_PROGRESS_STREAK}" ]; then
+        echo "failure_class=deterministic_build" >> "${output_file}"
+        echo "::error::Two consecutive compiler slices made no durable Ninja progress; latest checkpoint will be preserved for diagnosis."
+        df -h
+        ccache -s || true
+        return 1
+      fi
       echo "failure_class=" >> "${output_file}"
       df -h
       ccache -s || true
@@ -1958,6 +2110,7 @@ run_build_until_checkpoint() {
     fi
 
     if [ "${status}" -eq 137 ] || [ "${status}" -eq 143 ]; then
+      record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}" >/dev/null
       echo "complete=false" >> "${output_file}"
       echo "failure_class=infrastructure" >> "${output_file}"
       echo "::error::Compiler was terminated before the checkpoint cutoff (status ${status}); treating this as an infrastructure failure."
@@ -1987,12 +2140,14 @@ run_build_until_checkpoint() {
       failure_class="${I386_RUNTIME_REPAIR_FAILURE_CLASS:-${failure_class}}"
     fi
 
+    record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}" >/dev/null
     echo "complete=false" >> "${output_file}"
     echo "failure_class=${failure_class}" >> "${output_file}"
     echo "::error::autoninja failed with status ${status} (${failure_class})"
     return "${status}"
   done
 
+  record_ninja_progress_streak "${output_file}" "${prior_no_progress_streak}" "${ninja_log_entries_before}" >/dev/null
   echo "complete=false" >> "${output_file}"
   echo "failure_class=runtime_environment" >> "${output_file}"
   return 1

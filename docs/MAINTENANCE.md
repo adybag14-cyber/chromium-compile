@@ -24,6 +24,7 @@ Optional repository variables:
 
 ```text
 CHROMIUM_I686_MAX_STAGES=20
+CHROMIUM_I686_NINJA_STALL_MINUTES=90
 CHROMIUM_RUNNER_RETRIES=2
 CHROMIUM_I686_RUNNER=ubuntu-22.04
 # Temporary migration only; omit normally:
@@ -97,6 +98,10 @@ All configurable timeout knobs also have hard ceilings. The generic external-pro
 The primary source archive cache key is `chromium-src-v4-<version>-<gcs-generation>`, so immutable Actions cache identity changes if GCS ever replaces an object under the same Chromium version. Every restore is checked against the authoritative GCS object's generation, stored length and MD5 while computing/confirming SHA-256. The trust marker remains reusable only when version, generation, length, MD5 and SHA-256 match and both safe-archive and Gitiles-identity proofs are present, together with a SHA-bound archive-stats sidecar whose member count and declared unpacked bytes satisfy the current hard-bounded policy. v3, v2, and older version-only cache keys are restore-only migration inputs: restored bytes are fully revalidated against the current authoritative object and policy, then saved under the v4 generation-bound key. The extracted `chrome/VERSION` is always checked, and free disk must cover declared unpacked bytes plus the configured reserve before extraction. This prevents immutable Actions caches from trapping the pipeline on stale same-version source bytes or a pre-hardening trust format while avoiding repeated decompression scans on later stages.
 
 The staged `out/Release_x86` checkpoint—not Actions ccache—is the cross-run compilation state. Checkpoint creation/upload therefore precedes optional/performance work, and a completed compile whose package or final artifact upload fails attempts to publish a same-stage recovery checkpoint.
+
+Two consecutive planned compiler slices with an non-increasing `.ninja_log` completed-entry count are treated as a deterministic stalled build. The first zero-progress slice is checkpointed with a provenance-bound streak marker; any completed Ninja command resets the streak to zero. A second consecutive zero-progress cutoff still preserves/uploads its checkpoint for diagnosis but stops automatic staged runners instead of burning the remaining stage budget.
+
+A compiler slice also has a bounded durable-progress watchdog: by default, if `out/Release_x86/.ninja_log` does not change for 90 minutes while `autoninja` is running, the process tree is terminated, the partial output is checkpointed, and the next slice gets a fresh runner. `CHROMIUM_I686_NINJA_STALL_MINUTES` may be set only from 30 through 180 minutes. The existing two-slice no-progress streak still stops a repeatedly wedged build, while the 340-minute checkpoint cutoff remains the absolute backstop.
 
 The standalone tarball is derived from Chromium's Linux `installer_deps` runtime contract, includes a rendered `chrome-wrapper`, rejects unsafe/duplicate/special archive members, and validates every ELF as 32-bit Intel 80386. The release manifest records source/package hashes, build run/SHA, clang revision, GN/depot_tools pins, port hash, checkpoint contract and runner image.
 
