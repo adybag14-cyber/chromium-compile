@@ -624,8 +624,12 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("workflow lineage SHA drift", workflow)
         self.assertIn('control_fail "workflow lineage SHA drift', workflow)
         self.assertIn("lineage_sha: ${{ steps.control.outputs.lineage_sha }}", workflow)
-        self.assertEqual(workflow.count('--expected-head-sha "${LINEAGE_SHA}"'), 2)
-        self.assertEqual(workflow.count('--input "lineage_sha=${LINEAGE_SHA}"'), 2)
+        continuation = workflow[workflow.index("  continue_pipeline:"):workflow.index("  dispatch_release_handoff:")]
+        handoff = workflow[workflow.index("  dispatch_release_handoff:"):workflow.index("  recover_bad_runner:")]
+        recovery = workflow[workflow.index("  recover_bad_runner:"):workflow.index("  prune_completed_checkpoint_history:")]
+        for block in (continuation, handoff, recovery):
+            self.assertIn('--expected-head-sha "${LINEAGE_SHA}"', block)
+            self.assertIn('--input "lineage_sha=${LINEAGE_SHA}"', block)
         self.assertIn("LINEAGE_SHA: ${{ github.sha }}", preflight)
         self.assertIn('--expected-head-sha "${LINEAGE_SHA}"', preflight)
         self.assertIn('--input "lineage_sha=${LINEAGE_SHA}"', preflight)

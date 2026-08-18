@@ -350,6 +350,49 @@ jobs:
           prune_run "${SUPERSEDED_PREFERRED_RUN_ID}" "${CURRENT_STAGE}" preferred
           exit "${failures}"
 
+  dispatch_release_handoff:
+    name: Dispatch final release handoff
+    needs: build
+    if: >-
+      ${{
+        needs.build.result == 'success' &&
+        needs.build.outputs.complete == 'true' &&
+        github.ref_name == github.event.repository.default_branch
+      }}
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout release handoff dispatcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Start release handoff exactly once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ needs.build.outputs.version }}
+          LINEAGE_SHA: ${{ needs.build.outputs.lineage_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_title="Handoff Chromium i686 ${CHROMIUM_VERSION} from build run ${GITHUB_RUN_ID}"
+          python3 scripts/github_workflow_dispatch.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow publish-i686-release-handoff.yml \
+            --ref "${DEFAULT_BRANCH}" \
+            --expected-title "${expected_title}" \
+            --expected-head-sha "${LINEAGE_SHA}" \
+            --dedupe-completed \
+            --dedupe-since-run-id "${GITHUB_RUN_ID}" \
+            --input "build_run_id=${GITHUB_RUN_ID}" \
+            --input "version=${CHROMIUM_VERSION}" \
+            --input "lineage_sha=${LINEAGE_SHA}"
+
   recover_bad_runner:
     permissions:
       actions: write

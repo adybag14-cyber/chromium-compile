@@ -1,0 +1,62 @@
+name: Chromium i686 Release Handoff
+run-name: Handoff Chromium i686 ${{ inputs.version }} from build run ${{ inputs.build_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Completed Chromium i686 build run to publish"
+        required: true
+        type: string
+      version:
+        description: "Exact Chromium version expected from the build run"
+        required: true
+        type: string
+      lineage_sha:
+        description: "Immutable workflow/build lineage SHA"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chromium-i686-release-handoff-${{ inputs.build_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  handoff:
+    if: ${{ github.ref_name == github.event.repository.default_branch }}
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout immutable handoff helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Wait for trusted build completion and publish exactly once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          CHROMIUM_VERSION: ${{ inputs.version }}
+          LINEAGE_SHA: ${{ inputs.lineage_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${WORKFLOW_SHA}" = "${LINEAGE_SHA}" || {
+            echo "::error::Handoff workflow SHA ${WORKFLOW_SHA} does not match requested lineage ${LINEAGE_SHA}."
+            exit 1
+          }
+          python3 scripts/github_release_handoff.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --build-run-id "${BUILD_RUN_ID}" \
+            --version "${CHROMIUM_VERSION}" \
+            --default-branch "${DEFAULT_BRANCH}" \
+            --expected-build-sha "${LINEAGE_SHA}"
