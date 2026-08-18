@@ -7,14 +7,17 @@ ROOT = pathlib.Path(__file__).parents[1]
 class ControlPlaneHardeningTests(unittest.TestCase):
     def test_build_continuation_and_recovery_use_exactly_once_dispatcher(self):
         workflow = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
-        self.assertGreaterEqual(workflow.count("scripts/github_workflow_dispatch.py"), 2)
-        self.assertGreaterEqual(workflow.count("--dedupe-completed"), 2)
-        self.assertEqual(workflow.count('--dedupe-since-run-id "${GITHUB_RUN_ID}"'), 2)
-        self.assertIn("Start next stage on a fresh runner exactly once", workflow)
-        self.assertIn("Redispatch failed stage exactly once", workflow)
+        continuation = workflow[workflow.index("  continue_pipeline:"):workflow.index("  dispatch_release_handoff:")]
+        recovery = workflow[workflow.index("  recover_bad_runner:"):workflow.index("  prune_completed_checkpoint_history:")]
+        for block in (continuation, recovery):
+            self.assertIn("scripts/github_workflow_dispatch.py", block)
+            self.assertIn("--dedupe-completed", block)
+            self.assertIn('--dedupe-since-run-id "${GITHUB_RUN_ID}"', block)
+            self.assertIn('--expected-head-sha "${LINEAGE_SHA}"', block)
+            self.assertIn('--input "lineage_sha=${LINEAGE_SHA}"', block)
+        self.assertIn("Start next stage on a fresh runner exactly once", continuation)
+        self.assertIn("Redispatch failed stage exactly once", recovery)
         self.assertIn("CHROMIUM_VERSION", workflow)
-        self.assertEqual(workflow.count('--expected-head-sha "${LINEAGE_SHA}"'), 2)
-        self.assertEqual(workflow.count('--input "lineage_sha=${LINEAGE_SHA}"'), 2)
         self.assertIn("lineage_sha:", workflow)
         self.assertIn("workflow lineage SHA drift", workflow)
 

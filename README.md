@@ -290,6 +290,7 @@ The staged builder now treats the GitHub-hosted runner as an untrusted, replacea
 - Resumable output checkpoints are correctness state. Cross-stage Actions ccache persistence is intentionally disabled, the immutable source archive is cached once per Chromium version, and packaging/final-artifact failures attempt a same-stage final-output recovery checkpoint before the runner disappears.
 - Release archives reject unsafe, duplicate and special tar members; every packaged ELF must be ELF32 Intel 80386. Manifest/checksum provenance must match the exact successful build run.
 - Release tags target the exact build SHA and existing release assets are immutable. A trusted manual publisher can republish a retained successful build artifact by run ID after release-logic maintenance without recompiling Chromium.
+- A completed final compiler run uses a lineage-bound release-handoff workflow to bridge to the publisher exactly once; it waits for terminal build success, prefers any legacy `workflow_run` publisher that appears, and otherwise uses `workflow_dispatch` so token-triggered staged builds cannot silently lose the publication handoff.
 
 
 Checkpoint reuse is fail-closed: the producer run/artifact must match the repository, Chromium build workflow, current ref, version and compatible stage; archive members/links are containment-validated before extraction; then checksum/manifest source, toolchain and port-contract checks apply.
