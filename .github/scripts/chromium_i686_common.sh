@@ -380,8 +380,11 @@ _run_sudo_apt_get_with_timeout() {
     retries=2
     acquire_timeout=20
   fi
-  timeout -k 30s "${seconds}s" \
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+  # Run the timeout supervisor with the same privilege as apt-get. If timeout
+  # wraps sudo instead, killing the sudo client can leave its privileged apt-get
+  # child alive and holding /var/lib/apt/lists/lock during mirror fallback.
+  sudo timeout -k 30s "${seconds}s" \
+    env DEBIAN_FRONTEND=noninteractive apt-get \
       -o "Acquire::Retries=${retries}" \
       -o "Acquire::http::Timeout=${acquire_timeout}" \
       -o "Acquire::https::Timeout=${acquire_timeout}" \

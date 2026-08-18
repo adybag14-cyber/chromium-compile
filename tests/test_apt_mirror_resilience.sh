@@ -17,14 +17,18 @@ timeout() {
   printf '%s\n' "$*" > "${apt_policy_log}"
   return 0
 }
+sudo() { "$@"; }
 real_run_sudo_apt_get_with_timeout 180 update
+grep -q '^-k 30s 180s env DEBIAN_FRONTEND=noninteractive apt-get ' "${apt_policy_log}"
 grep -q 'Acquire::Retries=2' "${apt_policy_log}"
 grep -q 'Acquire::http::Timeout=20' "${apt_policy_log}"
 grep -q 'Acquire::https::Timeout=20' "${apt_policy_log}"
 real_run_sudo_apt_get_with_timeout 900 install -y example
+grep -q '^-k 30s 900s env DEBIAN_FRONTEND=noninteractive apt-get ' "${apt_policy_log}"
 grep -q 'Acquire::Retries=3' "${apt_policy_log}"
 grep -q 'Acquire::http::Timeout=30' "${apt_policy_log}"
 grep -q 'Acquire::https::Timeout=30' "${apt_policy_log}"
+unset -f sudo
 unset -f timeout
 
 # Timeout policy is bounded before any external command is run.
