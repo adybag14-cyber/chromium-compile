@@ -21,6 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from chromium_source_object import SourceObjectNotFound, fetch_metadata as fetch_source_metadata
 from github_workflow_dispatch import DispatchError, dispatch_once
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
@@ -439,6 +440,19 @@ def select_candidates(
     return selected
 
 
+def source_object_is_ready(version: str) -> bool:
+    """Return whether the authoritative GCS source object exists and is valid."""
+    try:
+        fetch_source_metadata(version, timeout=30)
+    except SourceObjectNotFound:
+        return False
+    except ValueError as exc:
+        raise WatcherError(
+            f"Could not verify Chromium {version} source publication readiness: {exc}"
+        ) from exc
+    return True
+
+
 def dispatch_preflight(
     repository: str,
     ref: str,
@@ -560,6 +574,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         candidates = select_candidates(versions, minimum, state, args.max_new_builds)
 
+    source_pending: list[str] = []
+    ready_candidates: list[str] = []
+    if candidates:
+        # Source archives can lag Chrome VersionHistory. Scan eligible versions in
+        # order and dispatch only versions whose authoritative GCS object exists.
+        if args.force_version:
+            eligible_candidates = candidates
+        else:
+            eligible_candidates = select_candidates(
+                versions, minimum, state, max(len(set(versions)), args.max_new_builds)
+            )
+        for version in eligible_candidates:
+            if source_object_is_ready(version):
+                ready_candidates.append(version)
+                if len(ready_candidates) >= args.max_new_builds:
+                    break
+            else:
+                source_pending.append(version)
+                print(
+                    f"Chromium {version} is stable but its authoritative source object is not published yet; "
+                    "deferring compatibility preflight."
+                )
+        candidates = ready_candidates
+
     for version in candidates:
         dispatch_preflight(
             args.repository,
@@ -579,7 +617,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"- Recent terminal-run quarantines: `{len(run_quarantined)}`",
         f"- Total blocked versions: `{len(state.blocked)}`",
         f"- Candidate builds dispatched: `{len(candidates)}`",
+        f"- Stable versions waiting for source publication: `{len(source_pending)}`",
     ]
+    if source_pending:
+        summary.append(f"- Source pending: `{', '.join(source_pending)}`")
     if candidates:
         summary.append(f"- Versions: `{', '.join(candidates)}`")
     else:

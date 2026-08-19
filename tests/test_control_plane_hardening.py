@@ -81,7 +81,10 @@ class ControlPlaneHardeningTests(unittest.TestCase):
         preflight = (ROOT / ".github" / "workflows" / "chromium-i686-preflight.yml").read_text(encoding="utf-8")
         build = (ROOT / ".github" / "workflows" / "chromium-i686.yml").read_text(encoding="utf-8")
         self.assertIn("failure() && github.ref_name == github.event.repository.default_branch", preflight)
-        self.assertIn("success() && inputs.dispatch_build && github.ref_name == github.event.repository.default_branch", preflight)
+        dispatch_block = preflight[preflight.index("- name: Dispatch resumable build"): ]
+        self.assertIn("inputs.dispatch_build", dispatch_block)
+        self.assertIn("github.ref_name == github.event.repository.default_branch", dispatch_block)
+        self.assertIn("steps.source_ready.outputs.ready == 'true'", dispatch_block)
         self.assertGreaterEqual(build.count("github.ref_name == github.event.repository.default_branch"), 3)
 
     def test_bootstrap_is_manual_release_guarded_and_exactly_once(self):
