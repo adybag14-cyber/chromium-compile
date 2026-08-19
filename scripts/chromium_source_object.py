@@ -29,6 +29,10 @@ DEFAULT_MAX_SOURCE_ARCHIVE_GIB = 16
 HARD_MAX_SOURCE_ARCHIVE_GIB = 32
 
 
+class SourceObjectNotFound(ValueError):
+    """Raised when the authoritative Chromium source object is not published yet."""
+
+
 def validate_version(version: str) -> str:
     if not VERSION_RE.fullmatch(version):
         raise ValueError(f"Invalid Chromium version: {version!r}")
@@ -131,7 +135,7 @@ def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
                 "--max-time",
                 str(timeout),
                 "--write-out",
-                "\n%{url_effective}",
+                "\n%{http_code}\n%{url_effective}",
                 metadata_url,
             ],
             check=False,
@@ -142,14 +146,23 @@ def fetch_metadata(version: str, timeout: int = 60) -> dict[str, object]:
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise ValueError(f"Could not read Chromium {version} GCS metadata: {exc}") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "curl failed").strip()
-        raise ValueError(f"Could not read Chromium {version} GCS metadata: {detail}")
     try:
-        payload_text, effective_url = result.stdout.rsplit("\n", 1)
+        payload_text, http_code, effective_url = (result.stdout or "").rsplit("\n", 2)
     except ValueError as exc:
-        raise ValueError(f"GCS metadata response omitted the effective URL for Chromium {version}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "curl failed").strip()
+            raise ValueError(f"Could not read Chromium {version} GCS metadata: {detail}") from exc
+        raise ValueError(
+            f"GCS metadata response omitted HTTP/effective-URL metadata for Chromium {version}"
+        ) from exc
     validate_effective_https_host(effective_url.strip(), GCS_METADATA_HOST)
+    if http_code == "404":
+        raise SourceObjectNotFound(f"Chromium {version} source object is not published yet")
+    if result.returncode != 0:
+        detail = (result.stderr or payload_text or "curl failed").strip()
+        raise ValueError(f"Could not read Chromium {version} GCS metadata: {detail}")
+    if http_code != "200":
+        raise ValueError(f"GCS metadata request for Chromium {version} returned HTTP {http_code}")
     try:
         payload = json.loads(payload_text)
     except json.JSONDecodeError as exc:
@@ -244,13 +257,25 @@ def main() -> int:
     parser.add_argument("--safe-archive-verified", action="store_true")
     parser.add_argument("--gitiles-identity-verified", action="store_true")
     parser.add_argument("--cache-key-only", action="store_true")
+    parser.add_argument("--availability-only", action="store_true")
     args = parser.parse_args()
     version = validate_version(args.version)
+    if args.availability_only and args.metadata_in:
+        parser.error("--availability-only cannot be combined with --metadata-in")
     if args.metadata_in:
         metadata = json.loads(args.metadata_in.read_text(encoding="utf-8"))
         metadata = validate_source_metadata(version, metadata)
     else:
-        metadata = fetch_metadata(version)
+        try:
+            metadata = fetch_metadata(version)
+        except SourceObjectNotFound:
+            if args.availability_only:
+                print("pending")
+                return 3
+            raise
+    if args.availability_only:
+        print("available")
+        return 0
     result: dict[str, object] = dict(metadata)
     if args.file:
         result.update(verify_file(args.file, metadata))

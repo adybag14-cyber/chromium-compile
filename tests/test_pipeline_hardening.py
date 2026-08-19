@@ -880,6 +880,19 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("install_gn_from_cipd", validation)
         self.assertIn("report_upstream_contract_drift:", validation)
 
+    def test_preflight_source_pending_is_retryable_not_quarantined(self):
+        preflight = (ROOT / ".github/workflows/chromium-i686-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("Check Chromium source publication readiness", preflight)
+        self.assertIn("--availability-only", preflight)
+        self.assertIn('echo "ready=false" >> "${GITHUB_OUTPUT}"', preflight)
+        self.assertIn("source archive is not published yet; leaving the version retryable", preflight)
+        prepare = preflight[preflight.index("- name: Prepare source and toolchain"):preflight.index("- name: Quarantine failed preflight")]
+        self.assertIn("steps.source_ready.outputs.ready == 'true'", prepare)
+        upload = preflight[preflight.index("- name: Upload preflight evidence"):preflight.index("- name: Dispatch resumable build")]
+        self.assertIn("steps.source_ready.outputs.ready == 'true'", upload)
+        dispatch = preflight[preflight.index("- name: Dispatch resumable build"): ]
+        self.assertIn("steps.source_ready.outputs.ready == 'true'", dispatch)
+
     def test_publisher_avoids_generic_version_environment_name(self):
         publish = (ROOT / ".github" / "workflows" / "publish-i686-release.yml").read_text(encoding="utf-8")
         self.assertIn("CHROMIUM_VERSION", publish)

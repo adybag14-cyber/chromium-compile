@@ -101,7 +101,34 @@ jobs:
             exit 1
           }
 
+      - name: Check Chromium source publication readiness
+        id: source_ready
+        env:
+          CHROMIUM_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/chromium_source_object.py \
+            --version "${CHROMIUM_VERSION}" \
+            --availability-only
+          status=$?
+          set -e
+          case "${status}" in
+            0)
+              echo "ready=true" >> "${GITHUB_OUTPUT}"
+              ;;
+            3)
+              echo "ready=false" >> "${GITHUB_OUTPUT}"
+              echo "::notice::Chromium ${CHROMIUM_VERSION} is stable but its source archive is not published yet; leaving the version retryable."
+              ;;
+            *)
+              echo "::error::Could not verify Chromium ${CHROMIUM_VERSION} source publication readiness."
+              exit "${status}"
+              ;;
+          esac
+
       - name: Prepare source and toolchain
+        if: ${{ steps.source_ready.outputs.ready == 'true' }}
         env:
           CHROMIUM_VERSION: ${{ inputs.version }}
         shell: bash
@@ -157,7 +184,7 @@ jobs:
             --body-file "${body_file}"
 
       - name: Upload preflight evidence
-        if: ${{ success() }}
+        if: ${{ success() && steps.source_ready.outputs.ready == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: chromium-${{ inputs.version }}-linux-i686-preflight
@@ -166,7 +193,7 @@ jobs:
           if-no-files-found: error
 
       - name: Dispatch resumable build
-        if: ${{ success() && inputs.dispatch_build && github.ref_name == github.event.repository.default_branch }}
+        if: ${{ success() && steps.source_ready.outputs.ready == 'true' && inputs.dispatch_build && github.ref_name == github.event.repository.default_branch }}
         env:
           GH_TOKEN: ${{ github.token }}
           CHROMIUM_VERSION: ${{ inputs.version }}

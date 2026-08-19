@@ -29,7 +29,7 @@ class ChromiumSourceObjectTests(unittest.TestCase):
 
     def test_fetch_metadata_uses_fixed_gcs_endpoint_and_strict_version(self):
         data=b"abc"
-        result=subprocess.CompletedProcess(["curl"],0,json.dumps(self._gcs_payload(data))+"\n"+source_object.source_metadata_url(VERSION),"")
+        result=subprocess.CompletedProcess(["curl"],0,json.dumps(self._gcs_payload(data))+"\n200\n"+source_object.source_metadata_url(VERSION),"")
         with mock.patch.object(source_object.subprocess,"run",return_value=result) as run:
             metadata=source_object.fetch_metadata(VERSION)
         args=run.call_args.args[0]
@@ -38,7 +38,7 @@ class ChromiumSourceObjectTests(unittest.TestCase):
         self.assertIn(f"chromium-{VERSION}.tar.xz",args[-1])
         self.assertIn("--proto", args)
         self.assertIn("--proto-redir", args)
-        self.assertIn("\n%{url_effective}", args)
+        self.assertIn("\n%{http_code}\n%{url_effective}", args)
         self.assertEqual(metadata["content_length"],len(data))
         for bad in ("../etc/passwd","151","151.0.0.1?x=y","https://evil.invalid/"):
             with self.subTest(bad=bad), self.assertRaises(ValueError): source_object.fetch_metadata(bad)
@@ -47,12 +47,12 @@ class ChromiumSourceObjectTests(unittest.TestCase):
         data=b"abc"
         for key,value in (("bucket","other"),("name","other.tar.xz"),("md5Hash","not-base64")):
             payload=self._gcs_payload(data); payload[key]=value
-            result=subprocess.CompletedProcess(["curl"],0,json.dumps(payload)+"\n"+source_object.source_metadata_url(VERSION),"")
+            result=subprocess.CompletedProcess(["curl"],0,json.dumps(payload)+"\n200\n"+source_object.source_metadata_url(VERSION),"")
             with mock.patch.object(source_object.subprocess,"run",return_value=result), self.subTest(key=key), self.assertRaises(ValueError): source_object.fetch_metadata(VERSION)
 
     def test_fetch_metadata_rejects_untrusted_effective_host(self):
         data=b"abc"
-        stdout=json.dumps(self._gcs_payload(data))+"\nhttps://evil.invalid/storage/v1/object"
+        stdout=json.dumps(self._gcs_payload(data))+"\n200\nhttps://evil.invalid/storage/v1/object"
         result=subprocess.CompletedProcess(["curl"],0,stdout,"")
         with mock.patch.object(source_object.subprocess,"run",return_value=result), self.assertRaises(ValueError):
             source_object.fetch_metadata(VERSION)
@@ -70,9 +70,28 @@ class ChromiumSourceObjectTests(unittest.TestCase):
             "https://storage.googleapis.com/storage/v1/x", source_object.GCS_METADATA_HOST
         )
 
-    def test_fetch_metadata_curl_failure_is_closed(self):
-        result=subprocess.CompletedProcess(["curl"],22,"","404")
-        with mock.patch.object(source_object.subprocess,"run",return_value=result), self.assertRaises(ValueError): source_object.fetch_metadata(VERSION)
+    def test_fetch_metadata_404_is_explicit_source_not_found(self):
+        stdout="\n404\n"+source_object.source_metadata_url(VERSION)
+        result=subprocess.CompletedProcess(["curl"],22,stdout,"curl: (22) 404")
+        with mock.patch.object(source_object.subprocess,"run",return_value=result), self.assertRaises(
+            source_object.SourceObjectNotFound
+        ):
+            source_object.fetch_metadata(VERSION)
+
+    def test_fetch_metadata_non_404_curl_failure_is_closed(self):
+        stdout="\n503\n"+source_object.source_metadata_url(VERSION)
+        result=subprocess.CompletedProcess(["curl"],22,stdout,"curl: (22) 503")
+        with mock.patch.object(source_object.subprocess,"run",return_value=result), self.assertRaisesRegex(
+            ValueError, "Could not read"
+        ):
+            source_object.fetch_metadata(VERSION)
+
+    def test_availability_only_returns_pending_without_traceback(self):
+        with mock.patch.object(source_object, "fetch_metadata", side_effect=source_object.SourceObjectNotFound("pending")), \
+             mock.patch.object(sys, "argv", [str(MODULE_PATH), "--version", VERSION, "--availability-only"]), \
+             mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()) as stdout:
+            self.assertEqual(source_object.main(), 3)
+        self.assertEqual(stdout.getvalue().strip(), "pending")
 
     def test_cache_key_is_bound_to_version_and_bounded_gcs_generation(self):
         metadata = self._metadata(b"abc")

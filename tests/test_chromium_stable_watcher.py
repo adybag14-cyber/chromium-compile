@@ -238,6 +238,50 @@ class StableWatcherTests(unittest.TestCase):
             with self.assertRaises(watcher.WatcherError):
                 watcher.run_gh(["api", "repos/owner/repository"], timeout=1)
 
+    def test_source_readiness_distinguishes_pending_from_api_failure(self):
+        with mock.patch.object(
+            watcher, "fetch_source_metadata", side_effect=watcher.SourceObjectNotFound("pending")
+        ):
+            self.assertFalse(watcher.source_object_is_ready("155.0.1.2"))
+        with mock.patch.object(watcher, "fetch_source_metadata", side_effect=ValueError("503")), \
+             self.assertRaises(watcher.WatcherError):
+            watcher.source_object_is_ready("155.0.1.2")
+
+    def test_source_pending_version_is_deferred_without_preflight_dispatch(self):
+        version = "155.0.1.2"
+        baseline = str(pathlib.Path(__file__).parents[1] / "support" / "baseline.json")
+        with mock.patch.object(watcher, "fetch_stable_versions", return_value=[version]), \
+             mock.patch.object(watcher, "list_blocked_versions", return_value=set()), \
+             mock.patch.object(watcher, "list_port_run_state", return_value=(set(), set())), \
+             mock.patch.object(watcher, "list_release_health", return_value=(set(), set())), \
+             mock.patch.object(watcher, "source_object_is_ready", return_value=False), \
+             mock.patch.object(watcher, "dispatch_preflight") as dispatch_call, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            rc = watcher.main([
+                "--repository", "owner/repo", "--ref", "main", "--dry-run", "--baseline", baseline
+            ])
+        self.assertEqual(rc, 0)
+        dispatch_call.assert_not_called()
+        self.assertIn("source object is not published yet", stdout.getvalue())
+        self.assertIn("Stable versions waiting for source publication: `1`", stdout.getvalue())
+
+    def test_pending_older_source_does_not_hide_later_ready_version(self):
+        older, newer = "155.0.1.2", "155.0.1.3"
+        baseline = str(pathlib.Path(__file__).parents[1] / "support" / "baseline.json")
+        readiness = {older: False, newer: True}
+        with mock.patch.object(watcher, "fetch_stable_versions", return_value=[newer, older]), \
+             mock.patch.object(watcher, "list_blocked_versions", return_value=set()), \
+             mock.patch.object(watcher, "list_port_run_state", return_value=(set(), set())), \
+             mock.patch.object(watcher, "list_release_health", return_value=(set(), set())), \
+             mock.patch.object(watcher, "source_object_is_ready", side_effect=lambda v: readiness[v]), \
+             mock.patch.object(watcher, "dispatch_preflight") as dispatch_call:
+            rc = watcher.main([
+                "--repository", "owner/repo", "--ref", "main", "--dry-run", "--baseline", baseline
+            ])
+        self.assertEqual(rc, 0)
+        dispatch_call.assert_called_once()
+        self.assertEqual(dispatch_call.call_args.args[2], newer)
+
     def test_uncertain_dispatch_uses_central_exact_once_confirmation(self):
         with mock.patch.object(watcher, "dispatch_once", return_value="accepted-after-client-error") as dispatch_call:
             watcher.dispatch_preflight("owner/repository", "main", "155.0.1.2", False)

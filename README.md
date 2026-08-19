@@ -35,6 +35,7 @@ For every newly observed Linux stable version, the automation aims to produce on
 3. an open maintenance issue describing the upstream breakage.
 
 Only one port version owns the queue at a time. A failed version is not repeatedly dispatched, but later stable versions still receive their own compatibility attempt. Completed terminal preflight/build/publisher runs are recent backup quarantine records; maintenance issues mirror terminal state for humans and releases are the durable success record. Manual `force_version` bypasses historical quarantine for a deliberate retry, but never bypasses an active port owner.
+The watcher also requires the authoritative `chromium-browser-official/chromium-<version>.tar.xz` GCS object to exist and pass bounded metadata validation before it dispatches a compatibility preflight. Chrome VersionHistory can lead Chromium source publication; a clean GCS 404 is therefore reported as **source pending** and retried later without creating a failed preflight/quarantine record. Other metadata/network errors still fail the watcher closed. The preflight repeats the same readiness check so direct/manual dispatches cannot turn normal source-publication lag into a maintenance quarantine.
 
 This process cannot guarantee that every future source release remains portable to i686 without additional work. It guarantees detection, an attempted port, validation, and visible failure reporting.
 
