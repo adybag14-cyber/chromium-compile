@@ -515,6 +515,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     state = PortState(known=known, released=set(), blocked=set(), active=set())
     issue_blocked: set[str] = set()
     run_quarantined: set[str] = set()
+    superseded_run_quarantines: set[str] = set()
 
     if args.force_version:
         version_key(args.force_version)
@@ -554,6 +555,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         issue_blocked = list_blocked_versions(args.repository)
         active, run_quarantined = list_port_run_state(args.repository, args.ref)
         released, broken_releases = list_release_health(args.repository)
+        superseded_run_quarantines = run_quarantined & released
+        run_quarantined = run_quarantined - released
         unattended_broken = broken_releases - active
         if unattended_broken:
             formatted = ", ".join(sorted(unattended_broken, key=version_key))
@@ -569,7 +572,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         state = PortState(
             known=known,
             released=released,
-            blocked=issue_blocked | run_quarantined,
+            blocked=(issue_blocked | run_quarantined) - released,
             active=active,
         )
         candidates = select_candidates(versions, minimum, state, args.max_new_builds)
@@ -615,6 +618,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"- Active port runs: `{len(state.active)}`",
         f"- Open maintenance issues: `{len(issue_blocked)}`",
         f"- Recent terminal-run quarantines: `{len(run_quarantined)}`",
+        f"- Historical run quarantines superseded by healthy releases: `{len(superseded_run_quarantines)}`",
         f"- Total blocked versions: `{len(state.blocked)}`",
         f"- Candidate builds dispatched: `{len(candidates)}`",
         f"- Stable versions waiting for source publication: `{len(source_pending)}`",
