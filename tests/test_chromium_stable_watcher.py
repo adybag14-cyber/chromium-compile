@@ -238,6 +238,48 @@ class StableWatcherTests(unittest.TestCase):
             with self.assertRaises(watcher.WatcherError):
                 watcher.run_gh(["api", "repos/owner/repository"], timeout=1)
 
+    def test_healthy_release_supersedes_historical_run_quarantine(self):
+        version = "155.0.1.2"
+        baseline = str(pathlib.Path(__file__).parents[1] / "support" / "baseline.json")
+        with mock.patch.object(watcher, "fetch_stable_versions", return_value=[version]), \
+             mock.patch.object(watcher, "list_blocked_versions", return_value=set()), \
+             mock.patch.object(watcher, "list_port_run_state", return_value=(set(), {version})), \
+             mock.patch.object(watcher, "list_release_health", return_value=({version}, set())), \
+             mock.patch.object(watcher, "source_object_is_ready") as source_ready, \
+             mock.patch.object(watcher, "dispatch_preflight") as dispatch_call, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            rc = watcher.main([
+                "--repository", "owner/repo", "--ref", "main", "--dry-run", "--baseline", baseline
+            ])
+        self.assertEqual(rc, 0)
+        source_ready.assert_not_called()
+        dispatch_call.assert_not_called()
+        output = stdout.getvalue()
+        self.assertIn("Recent terminal-run quarantines: `0`", output)
+        self.assertIn("Historical run quarantines superseded by healthy releases: `1`", output)
+        self.assertIn("Total blocked versions: `0`", output)
+
+    def test_unreleased_terminal_failure_remains_live_quarantine(self):
+        version = "155.0.1.2"
+        baseline = str(pathlib.Path(__file__).parents[1] / "support" / "baseline.json")
+        with mock.patch.object(watcher, "fetch_stable_versions", return_value=[version]), \
+             mock.patch.object(watcher, "list_blocked_versions", return_value=set()), \
+             mock.patch.object(watcher, "list_port_run_state", return_value=(set(), {version})), \
+             mock.patch.object(watcher, "list_release_health", return_value=(set(), set())), \
+             mock.patch.object(watcher, "source_object_is_ready") as source_ready, \
+             mock.patch.object(watcher, "dispatch_preflight") as dispatch_call, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            rc = watcher.main([
+                "--repository", "owner/repo", "--ref", "main", "--dry-run", "--baseline", baseline
+            ])
+        self.assertEqual(rc, 0)
+        source_ready.assert_not_called()
+        dispatch_call.assert_not_called()
+        output = stdout.getvalue()
+        self.assertIn("Recent terminal-run quarantines: `1`", output)
+        self.assertIn("Historical run quarantines superseded by healthy releases: `0`", output)
+        self.assertIn("Total blocked versions: `1`", output)
+
     def test_source_readiness_distinguishes_pending_from_api_failure(self):
         with mock.patch.object(
             watcher, "fetch_source_metadata", side_effect=watcher.SourceObjectNotFound("pending")

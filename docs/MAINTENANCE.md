@@ -137,3 +137,5 @@ Maintenance issue creation should use `scripts/github_maintenance_issue.py`. Exa
 ### Linux sandbox executable policy
 
 The standalone runtime archive requires `chrome_sandbox` (and the other Chromium helper binaries) to retain execute permission. The archive intentionally does **not** require setuid/root ownership: whether to install the legacy setuid sandbox with elevated ownership/mode is a target-system deployment policy. Runtime CI uses `--no-sandbox` only for the isolated headless smoke test so the package can be validated on an unprivileged GitHub runner without mutating host security policy.
+
+Healthy completed releases supersede older failed-run quarantine for the same Chromium version. The failed workflow history remains auditable in Actions, while only unreleased terminal failures remain live watcher quarantine.
