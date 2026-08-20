@@ -55,7 +55,7 @@ def version_key(version: str) -> tuple[int, int, int, int]:
     return tuple(int(part) for part in version.split("."))  # type: ignore[return-value]
 
 
-def load_baseline(path: Path) -> tuple[str, set[str]]:
+def load_baseline(path: Path) -> tuple[str, set[str], set[str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     minimum = data["minimum_version"]
     version_key(minimum)
@@ -64,7 +64,17 @@ def load_baseline(path: Path) -> tuple[str, set[str]]:
         for entry in data.get("verified_builds", [])
         if VERSION_RE.fullmatch(entry.get("version", ""))
     }
-    return minimum, known
+    raw_legacy_mutable = data.get("legacy_mutable_releases", [])
+    if not isinstance(raw_legacy_mutable, list):
+        raise ValueError("legacy_mutable_releases must be a JSON list")
+    legacy_mutable: set[str] = set()
+    for version in raw_legacy_mutable:
+        if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+            raise ValueError(f"Invalid legacy mutable release version: {version!r}")
+        if version in legacy_mutable:
+            raise ValueError(f"Duplicate legacy mutable release version: {version}")
+        legacy_mutable.add(version)
+    return minimum, known, legacy_mutable
 
 
 def fetch_stable_versions(api_url: str, minimum: str, timeout: int = 30) -> list[str]:
@@ -275,7 +285,9 @@ def list_rest_items(
     raise AssertionError("unreachable REST pagination state")
 
 
-def list_release_health(repository: str) -> tuple[set[str], set[str]]:
+def list_release_health(
+    repository: str, legacy_mutable_versions: set[str] | frozenset[str] = frozenset()
+) -> tuple[set[str], set[str]]:
     releases = list_rest_items(repository, "releases")
     healthy: set[str] = set()
     broken: set[str] = set()
@@ -315,10 +327,12 @@ def list_release_health(repository: str) -> tuple[set[str], set[str]]:
                     complete = False
                     break
 
+        immutable_ok = release.get("immutable") is True or version in legacy_mutable_versions
         if (
             bool(release.get("draft", False))
             or bool(release.get("prerelease", False))
             or not complete
+            or not immutable_ok
         ):
             broken.add(version)
         else:
@@ -326,8 +340,10 @@ def list_release_health(repository: str) -> tuple[set[str], set[str]]:
     return healthy, broken
 
 
-def list_release_versions(repository: str) -> set[str]:
-    return list_release_health(repository)[0]
+def list_release_versions(
+    repository: str, legacy_mutable_versions: set[str] | frozenset[str] = frozenset()
+) -> set[str]:
+    return list_release_health(repository, legacy_mutable_versions)[0]
 
 
 def list_blocked_versions(repository: str) -> set[str]:
@@ -511,7 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    minimum, known = load_baseline(args.baseline)
+    minimum, known, legacy_mutable_releases = load_baseline(args.baseline)
     state = PortState(known=known, released=set(), blocked=set(), active=set())
     issue_blocked: set[str] = set()
     run_quarantined: set[str] = set()
@@ -521,7 +537,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         version_key(args.force_version)
         versions = [args.force_version]
         active, _run_quarantine = list_port_run_state(args.repository, args.ref)
-        released, broken_releases = list_release_health(args.repository)
+        released, broken_releases = list_release_health(args.repository, legacy_mutable_releases)
         unattended_broken = broken_releases - active
         if unattended_broken:
             formatted = ", ".join(sorted(unattended_broken, key=version_key))
@@ -540,7 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.force_version in released:
             candidates = []
             print(
-                f"Chromium {args.force_version} already has a healthy immutable release; "
+                f"Chromium {args.force_version} already has a healthy release accepted by repository immutability policy; "
                 "force_version cannot launch a replacement build."
             )
         elif version_key(args.force_version) <= version_key(minimum):
@@ -554,7 +570,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         versions = fetch_stable_versions(args.api_url, minimum)
         issue_blocked = list_blocked_versions(args.repository)
         active, run_quarantined = list_port_run_state(args.repository, args.ref)
-        released, broken_releases = list_release_health(args.repository)
+        released, broken_releases = list_release_health(args.repository, legacy_mutable_releases)
         superseded_run_quarantines = run_quarantined & released
         run_quarantined = run_quarantined - released
         unattended_broken = broken_releases - active

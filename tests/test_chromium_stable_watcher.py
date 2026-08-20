@@ -409,6 +409,7 @@ class StableWatcherTests(unittest.TestCase):
             "tag_name": f"chromium-{version}-linux-i686",
             "draft": False,
             "prerelease": False,
+            "immutable": True,
             "assets": [
                 {
                     "name": f"chromium-{version}-linux-i686.tar.xz",
@@ -432,6 +433,34 @@ class StableWatcherTests(unittest.TestCase):
         }
         release.update(overrides)
         return release
+
+    def test_release_health_requires_immutability_outside_legacy_allowlist(self):
+        version = "155.0.0.1"
+        mutable = self._healthy_release(version, immutable=False)
+        with mock.patch.object(watcher, "list_rest_items", return_value=[mutable]):
+            healthy, broken = watcher.list_release_health("owner/repo")
+        self.assertEqual(healthy, set())
+        self.assertEqual(broken, {version})
+
+    def test_legacy_mutable_release_is_explicitly_grandfathered(self):
+        version = "151.0.7922.108"
+        mutable = self._healthy_release(version, immutable=False)
+        with mock.patch.object(watcher, "list_rest_items", return_value=[mutable]):
+            healthy, broken = watcher.list_release_health("owner/repo", {version})
+            versions = watcher.list_release_versions("owner/repo", {version})
+        self.assertEqual(healthy, {version})
+        self.assertEqual(broken, set())
+        self.assertEqual(versions, {version})
+
+    def test_baseline_legacy_mutable_release_policy_is_strict_and_explicit(self):
+        baseline = pathlib.Path(__file__).parents[1] / "support" / "baseline.json"
+        minimum, known, legacy = watcher.load_baseline(baseline)
+        self.assertEqual(minimum, "150.0.7871.186")
+        self.assertIn("150.0.7871.186", known)
+        self.assertEqual(
+            legacy,
+            {"150.0.7871.186", "151.0.7922.71", "151.0.7922.75", "151.0.7922.108"},
+        )
 
     def test_draft_release_does_not_mark_version_released(self):
         releases = [
