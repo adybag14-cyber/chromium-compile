@@ -1078,7 +1078,7 @@ class PipelineHardeningTests(unittest.TestCase):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")
         deps = common[common.index("NATIVE_BUILD_PACKAGES=(") : common.index("I386_BASELINE_SONAMES=(")]
         self.assertIn("file binutils", deps)
-        self.assertIn('bounded_sudo_apt_get install -y "${NATIVE_BUILD_PACKAGES[@]}"', deps)
+        self.assertIn('bounded_sudo_apt_install_prefetched -y "${NATIVE_BUILD_PACKAGES[@]}"', deps)
 
     def test_required_runtime_executable_modes_are_preserved(self):
         common = (ROOT / ".github" / "scripts" / "chromium_i686_common.sh").read_text(encoding="utf-8")

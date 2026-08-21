@@ -199,7 +199,7 @@ dpkg-query() { return 1; }
 SUDO_CALLS="${RUNNER_TEMP}/sudo-calls"
 : > "${SUDO_CALLS}"
 bounded_apt_get_simulate() { return 0; }
-bounded_sudo_apt_get() {
+bounded_sudo_apt_install_prefetched() {
   printf '%s\n' "$*" >> "${SUDO_CALLS}"
   return 0
 }

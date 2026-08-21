@@ -10,6 +10,7 @@ source "${ROOT}/.github/scripts/chromium_i686_common.sh"
 # Keep an alias to the real mirror-rewrite function before policy mocks replace it.
 eval "$(declare -f normalize_ubuntu_archive_mirrors | sed '1s/normalize_ubuntu_archive_mirrors/real_normalize_ubuntu_archive_mirrors/')"
 eval "$(declare -f _run_sudo_apt_get_with_timeout | sed '1s/_run_sudo_apt_get_with_timeout/real_run_sudo_apt_get_with_timeout/')"
+eval "$(declare -f bounded_sudo_apt_get | sed '1s/bounded_sudo_apt_get/real_bounded_sudo_apt_get/')"
 
 # Fast mirror-failure detection applies only to index refreshes; package installs keep the more tolerant transport policy.
 apt_policy_log="${RUNNER_TEMP}/apt-policy.log"
@@ -30,6 +31,14 @@ grep -q 'Acquire::http::Timeout=30' "${apt_policy_log}"
 grep -q 'Acquire::https::Timeout=30' "${apt_policy_log}"
 unset -f sudo
 unset -f timeout
+
+# Every package mutation call site goes through the prefetch-before-mutation helper.
+common="${ROOT}/.github/scripts/chromium_i686_common.sh"
+grep -q 'bounded_sudo_apt_install_prefetched -y "${NATIVE_BUILD_PACKAGES\[@\]}"' "${common}"
+grep -q 'bounded_sudo_apt_install_prefetched -y --no-install-recommends apt-file' "${common}"
+grep -q 'bounded_sudo_apt_install_prefetched -y --no-install-recommends "${packages\[@\]}"' "${common}"
+grep -q 'bounded_sudo_apt_install_prefetched -y --no-install-recommends "${to_install\[@\]}"' "${common}"
+[ "$(grep -c 'bounded_sudo_apt_get install' "${common}")" -eq 1 ]
 
 # Timeout policy is bounded before any external command is run.
 validate_apt_timeout_seconds 180 CHROMIUM_I686_APT_UPDATE_TIMEOUT_SECONDS 300
@@ -78,6 +87,56 @@ if bounded_sudo_apt_get install -y example >/dev/null 2>&1; then
 fi
 [ "${calls}" -eq 1 ]
 [ "${normalized}" -eq 0 ]
+
+# Package prefetch is non-mutating and may retry once after canonical-mirror normalization.
+prefetch_calls=0
+update_calls=0
+normalized=0
+_run_sudo_apt_get_with_timeout() {
+  local seconds="${1}"
+  shift
+  [ "${seconds}" = "900" ] || [ "${1:-}" = update ] || return 90
+  if [ "${1:-}" = install ] && [ "${2:-}" = --download-only ]; then
+    prefetch_calls=$((prefetch_calls + 1))
+    [ "${prefetch_calls}" -eq 2 ]
+    return
+  fi
+  if [ "${1:-}" = update ]; then
+    update_calls=$((update_calls + 1))
+    return 0
+  fi
+  return 91
+}
+normalize_ubuntu_archive_mirrors() {
+  normalized=$((normalized + 1))
+  return 0
+}
+CHROMIUM_I686_APT_TIMEOUT_SECONDS=900
+bounded_sudo_apt_prefetch_install -y example
+[ "${prefetch_calls}" -eq 2 ]
+[ "${update_calls}" -eq 1 ]
+[ "${normalized}" -eq 1 ]
+
+# The mutating install is attempted exactly once and is explicitly network-disabled.
+prefetch_calls=0
+install_calls=0
+bounded_sudo_apt_prefetch_install() {
+  prefetch_calls=$((prefetch_calls + 1))
+  return 0
+}
+bounded_sudo_apt_get() {
+  [ "${1:-}" = install ] || return 92
+  [ "${2:-}" = --no-download ] || return 93
+  install_calls=$((install_calls + 1))
+  return 1
+}
+if bounded_sudo_apt_install_prefetched -y example >/dev/null 2>&1; then
+  echo "expected one failed network-disabled mutation" >&2
+  exit 1
+fi
+[ "${prefetch_calls}" -eq 1 ]
+[ "${install_calls}" -eq 1 ]
+eval "$(declare -f real_bounded_sudo_apt_get | sed '1s/real_bounded_sudo_apt_get/bounded_sudo_apt_get/')"
 
 # If mirror normalization cannot be proven, update also fails after one attempt.
 calls=0
