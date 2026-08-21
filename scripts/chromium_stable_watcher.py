@@ -34,6 +34,7 @@ ACTIVE_QUERY_STATES = ("queued", "in_progress", "waiting", "pending", "requested
 PORT_WORKFLOWS = (
     "chromium-i686-preflight.yml",
     "chromium-i686.yml",
+    "publish-i686-release-handoff.yml",
     "publish-i686-release.yml",
 )
 GH_TIMEOUT_SECONDS = int(os.environ.get("CHROMIUM_I686_GH_TIMEOUT_SECONDS", "30"))

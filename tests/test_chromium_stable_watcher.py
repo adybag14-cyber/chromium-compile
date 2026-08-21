@@ -59,6 +59,35 @@ class StableWatcherTests(unittest.TestCase):
         with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
             self.assertEqual(watcher.list_active_versions("owner/repository"), {"155.0.1.2"})
 
+    def test_active_versions_include_release_handoff_title(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "publish-i686-release-handoff.yml":
+                return [{
+                    "status": "in_progress",
+                    "conclusion": "",
+                    "display_title": "Handoff Chromium i686 155.0.1.2 from build run 123456",
+                }]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            self.assertEqual(watcher.list_active_versions("owner/repository"), {"155.0.1.2"})
+
+    def test_failed_release_handoff_quarantines_production_version(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "publish-i686-release-handoff.yml":
+                return [{
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "display_title": "Handoff Chromium i686 155.0.1.2 from build run 123456",
+                    "head_branch": "main",
+                }]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            active, quarantined = watcher.list_port_run_state("owner/repository", "main")
+        self.assertEqual(active, set())
+        self.assertEqual(quarantined, {"155.0.1.2"})
+
     def test_active_versions_include_manual_publisher_title(self):
         def fake_runs(_repository, workflow, **_kwargs):
             if workflow == "publish-i686-release.yml":
