@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,8 @@ from chromium_source_object import SourceObjectNotFound, fetch_metadata as fetch
 from github_workflow_dispatch import DispatchError, dispatch_once
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
+SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+RELEASE_MANIFEST_MAX_BYTES = 64 * 1024
 ACTIVE_RUN_STATES = {"queued", "in_progress", "requested", "waiting", "pending"}
 QUARANTINE_RUN_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 ACTIVE_QUERY_STATES = ("queued", "in_progress", "waiting", "pending", "requested")
@@ -161,6 +164,131 @@ def gh_json(args: Sequence[str], *, attempts: int = GH_READ_ATTEMPTS) -> object:
             time.sleep(min(2 ** (attempt - 1), 5))
     assert last_error is not None
     raise last_error
+
+
+def _github_not_found(detail: str) -> bool:
+    return bool(re.search(r"(?:HTTP\s+404|Not Found\s*\(HTTP 404\)|status\s*404)", detail, re.I))
+
+
+def gh_resource_text(
+    args: Sequence[str], *, context: str, attempts: int = GH_READ_ATTEMPTS
+) -> str:
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    last_error: WatcherError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = run_gh(args, check=False)
+        except WatcherError as exc:
+            last_error = exc
+        else:
+            if result.returncode == 0:
+                return result.stdout
+            detail = (result.stderr or result.stdout or "unknown GitHub CLI error").strip()
+            if _github_not_found(detail):
+                raise ValueError(f"{context}: GitHub resource was not found")
+            last_error = WatcherError(f"{context}: {detail}")
+        if attempt < attempts:
+            time.sleep(min(2 ** (attempt - 1), 5))
+    assert last_error is not None
+    raise last_error
+
+
+def read_release_manifest_build_sha(
+    repository: str, version: str, asset: dict[str, object]
+) -> str:
+    asset_id = asset.get("id")
+    size = asset.get("size")
+    digest = str(asset.get("digest", ""))
+    if not isinstance(asset_id, int) or isinstance(asset_id, bool) or asset_id <= 0:
+        raise ValueError("release manifest asset lacks a positive numeric id")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ValueError("release manifest asset lacks a positive numeric size")
+    if size > RELEASE_MANIFEST_MAX_BYTES:
+        raise ValueError(
+            f"release manifest is {size} bytes, above {RELEASE_MANIFEST_MAX_BYTES}-byte watcher limit"
+        )
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("release manifest asset lacks a valid SHA-256 digest")
+
+    text = gh_resource_text(
+        [
+            "api",
+            "-H",
+            "Accept: application/octet-stream",
+            f"repos/{repository}/releases/assets/{asset_id}",
+        ],
+        context=f"Could not read Chromium {version} release manifest",
+    )
+    raw = text.encode("utf-8")
+    if len(raw) != size:
+        raise ValueError(f"release manifest byte length changed: metadata={size}, downloaded={len(raw)}")
+    actual_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if actual_digest != digest:
+        raise ValueError(
+            f"release manifest digest changed: metadata={digest}, downloaded={actual_digest}"
+        )
+
+    fields: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\r")
+        if not line:
+            continue
+        if line == "packaged_files:":
+            break
+        if "=" not in line:
+            required_seen = {"version", "target_cpu", "target_os", "github_sha"}.issubset(fields)
+            if required_seen:
+                # Pre-schema manifests begin the packaged-file list directly, without
+                # a packaged_files: marker. Only accept that legacy transition after
+                # every provenance field required by the watcher is already present.
+                break
+            raise ValueError(f"release manifest contains malformed metadata line: {line!r}")
+        key, value = line.split("=", 1)
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", key) or key in fields:
+            raise ValueError(f"release manifest contains invalid/duplicate key: {key!r}")
+        fields[key] = value
+
+    if fields.get("version") != version:
+        raise ValueError(
+            f"release manifest version does not match tag version: {fields.get('version')!r} != {version!r}"
+        )
+    if fields.get("target_cpu") != "x86" or fields.get("target_os") != "linux":
+        raise ValueError("release manifest does not describe the Linux x86 target")
+    build_sha = str(fields.get("github_sha", "")).lower()
+    if not SHA1_RE.fullmatch(build_sha):
+        raise ValueError(f"release manifest github_sha is missing or malformed: {build_sha!r}")
+    return build_sha
+
+
+def read_release_tag_commit(repository: str, version: str) -> str:
+    tag = f"chromium-{version}-linux-i686"
+    encoded_tag = urllib.parse.quote(tag, safe="")
+    text = gh_resource_text(
+        ["api", f"repos/{repository}/commits/{encoded_tag}"],
+        context=f"Could not resolve release tag {tag}",
+    )
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise WatcherError(f"GitHub returned invalid commit JSON for release tag {tag}") from exc
+    if not isinstance(payload, dict):
+        raise WatcherError(f"GitHub returned non-object commit JSON for release tag {tag}")
+    commit = str(payload.get("sha", "")).lower()
+    if not SHA1_RE.fullmatch(commit):
+        raise WatcherError(f"GitHub returned invalid commit SHA for release tag {tag}: {commit!r}")
+    return commit
+
+
+def verify_release_provenance(
+    repository: str, version: str, manifest_asset: dict[str, object]
+) -> None:
+    manifest_sha = read_release_manifest_build_sha(repository, version, manifest_asset)
+    tag_sha = read_release_tag_commit(repository, version)
+    if tag_sha != manifest_sha:
+        raise ValueError(
+            f"release tag resolves to {tag_sha}, but release manifest records build {manifest_sha}"
+        )
 
 
 def list_workflow_runs(
@@ -328,15 +456,23 @@ def list_release_health(
                     break
 
         immutable_ok = release.get("immutable") is True or version in legacy_mutable_versions
-        if (
+        healthy_candidate = not (
             bool(release.get("draft", False))
             or bool(release.get("prerelease", False))
             or not complete
             or not immutable_ok
-        ):
-            broken.add(version)
-        else:
+        )
+        if healthy_candidate:
+            manifest_name = f"chromium-{version}-linux-i686-manifest.txt"
+            try:
+                verify_release_provenance(repository, version, asset_map[manifest_name])
+            except ValueError as exc:
+                print(f"Release provenance rejected for Chromium {version}: {exc}", file=sys.stderr)
+                healthy_candidate = False
+        if healthy_candidate:
             healthy.add(version)
+        else:
+            broken.add(version)
     return healthy, broken
 
 
