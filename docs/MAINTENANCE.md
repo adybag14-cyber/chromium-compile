@@ -141,3 +141,5 @@ The standalone runtime archive requires `chrome_sandbox` (and the other Chromium
 Healthy completed releases supersede older failed-run quarantine for the same Chromium version. The failed workflow history remains auditable in Actions, while only unreleased terminal failures remain live watcher quarantine.
 
 Release health in the stable watcher requires GitHub-enforced immutability in addition to the expected three uploaded SHA-256-digested assets. `support/baseline.json` explicitly grandfathers only the pre-policy mutable releases 150.0.7871.186, 151.0.7922.71, 151.0.7922.75, and 151.0.7922.108; this legacy exception does not authorize destructive checkpoint cleanup. Any other mutable or immutability-unverifiable release is broken publication state and blocks unattended rebuild decisions.
+
+APT package mutation is split into two phases: a retryable `apt-get install --download-only` prefetch (with one safe Azure-to-canonical Ubuntu mirror recovery) and one `apt-get install --no-download` mutation. This keeps network stalls out of the dpkg-mutating phase while preserving the rule that an uncertain package mutation is never replayed.

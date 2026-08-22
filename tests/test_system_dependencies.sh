@@ -8,10 +8,10 @@ source "${ROOT}/.github/scripts/chromium_i686_common.sh"
 MODE=success
 INSTALL_CALLS=0
 bounded_sudo_apt_get() {
-  if [ "${1:-}" = update ]; then
-    [ "${MODE}" != update_fail ]
-    return
-  fi
+  [ "${1:-}" = update ] || return 97
+  [ "${MODE}" != update_fail ]
+}
+bounded_sudo_apt_install_prefetched() {
   INSTALL_CALLS=$((INSTALL_CALLS + 1))
   [ "${MODE}" != install_fail ]
 }

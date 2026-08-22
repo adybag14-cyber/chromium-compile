@@ -11,6 +11,7 @@ apt_mutation_calls=0
 timeout_log="${RUNNER_TEMP}/timeout.log"
 bounded_sudo_rm_rf() { rm_calls=$((rm_calls + 1)); return 0; }
 bounded_sudo_apt_get() { apt_mutation_calls=$((apt_mutation_calls + 1)); return 99; }
+bounded_sudo_apt_install_prefetched() { apt_mutation_calls=$((apt_mutation_calls + 1)); return 99; }
 ensure_swap() { return 0; }
 timeout() { printf '%s\n' "$*" >> "${timeout_log}"; return 0; }
 

@@ -269,7 +269,7 @@ install_system_dependencies() {
     return 1
   fi
 
-  if ! bounded_sudo_apt_get install -y "${NATIVE_BUILD_PACKAGES[@]}"; then
+  if ! bounded_sudo_apt_install_prefetched -y "${NATIVE_BUILD_PACKAGES[@]}"; then
     SYSTEM_DEPENDENCY_FAILURE_CLASS=infrastructure
     echo "::error::Native build prerequisite installation failed after a successful simulation; treating this as runner/mirror infrastructure."
     return 1
@@ -450,6 +450,37 @@ bounded_sudo_apt_get() {
   _run_sudo_apt_get_with_timeout "${seconds}" "$@"
 }
 
+bounded_sudo_apt_prefetch_install() {
+  validate_apt_timeout_seconds \
+    "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}" CHROMIUM_I686_APT_TIMEOUT_SECONDS \
+    "${CHROMIUM_I686_HARD_MAX_APT_TIMEOUT_SECONDS}" || return 1
+  local seconds="${CHROMIUM_I686_APT_TIMEOUT_SECONDS}"
+
+  if _run_sudo_apt_get_with_timeout "${seconds}" install --download-only "$@"; then
+    return 0
+  fi
+
+  echo "::warning::APT package prefetch failed/timed out before mutation; trying canonical Ubuntu mirrors once."
+  if ! normalize_ubuntu_archive_mirrors; then
+    echo "::warning::No Azure Ubuntu mirror entry could be safely normalized for package-prefetch retry."
+    return 1
+  fi
+  if ! bounded_sudo_apt_get update; then
+    echo "::warning::Canonical-mirror package indexes could not be refreshed after prefetch failure."
+    return 1
+  fi
+  _run_sudo_apt_get_with_timeout "${seconds}" install --download-only "$@"
+}
+
+bounded_sudo_apt_install_prefetched() {
+  if ! bounded_sudo_apt_prefetch_install "$@"; then
+    return 1
+  fi
+  # The only dpkg-mutating attempt is network-disabled. This keeps mirror stalls
+  # entirely in the retryable prefetch phase and never replays uncertain mutation.
+  bounded_sudo_apt_get install --no-download "$@"
+}
+
 bounded_apt_get_simulate() {
   validate_apt_timeout_seconds \
     "${CHROMIUM_I686_APT_TIMEOUT_SECONDS}" CHROMIUM_I686_APT_TIMEOUT_SECONDS \
@@ -613,7 +644,7 @@ ensure_apt_file_i386_metadata() {
       fi
       return 1
     fi
-    if ! bounded_sudo_apt_get install -y --no-install-recommends apt-file; then
+    if ! bounded_sudo_apt_install_prefetched -y --no-install-recommends apt-file; then
       I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
       echo "::error::apt-file fallback tooling was installable but installation failed; a fresh runner may recover."
       return 1
@@ -769,7 +800,7 @@ install_i386_runtime_libraries() {
     echo "::error::Resolved baseline i386 packages cannot be installed together on this runner image."
     return 1
   fi
-  if ! bounded_sudo_apt_get install -y --no-install-recommends "${packages[@]}"; then
+  if ! bounded_sudo_apt_install_prefetched -y --no-install-recommends "${packages[@]}"; then
     I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
     return 1
   fi
@@ -892,7 +923,7 @@ repair_missing_i386_runtime_for_binary() {
       return 1
     fi
     echo "Repair round ${round}: installing i386 runtime dependencies: ${to_install[*]}"
-    if ! bounded_sudo_apt_get install -y --no-install-recommends "${to_install[@]}"; then
+    if ! bounded_sudo_apt_install_prefetched -y --no-install-recommends "${to_install[@]}"; then
       I386_RUNTIME_REPAIR_FAILURE_CLASS=infrastructure
       return 1
     fi
