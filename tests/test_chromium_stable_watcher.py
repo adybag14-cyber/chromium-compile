@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import io
 import json
@@ -412,18 +413,21 @@ class StableWatcherTests(unittest.TestCase):
             "immutable": True,
             "assets": [
                 {
+                    "id": 101,
                     "name": f"chromium-{version}-linux-i686.tar.xz",
                     "state": "uploaded",
                     "size": 100,
                     "digest": "sha256:" + "a" * 64,
                 },
                 {
+                    "id": 102,
                     "name": f"chromium-{version}-linux-i686.tar.xz.sha256",
                     "state": "uploaded",
                     "size": 100,
                     "digest": "sha256:" + "b" * 64,
                 },
                 {
+                    "id": 103,
                     "name": f"chromium-{version}-linux-i686-manifest.txt",
                     "state": "uploaded",
                     "size": 100,
@@ -445,7 +449,8 @@ class StableWatcherTests(unittest.TestCase):
     def test_legacy_mutable_release_is_explicitly_grandfathered(self):
         version = "151.0.7922.108"
         mutable = self._healthy_release(version, immutable=False)
-        with mock.patch.object(watcher, "list_rest_items", return_value=[mutable]):
+        with mock.patch.object(watcher, "list_rest_items", return_value=[mutable]), \
+             mock.patch.object(watcher, "verify_release_provenance", return_value=None):
             healthy, broken = watcher.list_release_health("owner/repo", {version})
             versions = watcher.list_release_versions("owner/repo", {version})
         self.assertEqual(healthy, {version})
@@ -462,12 +467,116 @@ class StableWatcherTests(unittest.TestCase):
             {"150.0.7871.186", "151.0.7922.71", "151.0.7922.75", "151.0.7922.108"},
         )
 
+    @staticmethod
+    def _release_manifest(version: str, build_sha: str) -> str:
+        return (
+            f"manifest_schema=2\nversion={version}\ntarget_cpu=x86\ntarget_os=linux\n"
+            f"github_sha={build_sha}\n\npackaged_files:\nchrome\n"
+        )
+
+    def test_legacy_release_manifest_file_list_is_accepted_after_required_metadata(self):
+        version = "151.0.7922.75"
+        build_sha = "a" * 40
+        manifest = (
+            f"version={version}\ntarget_cpu=x86\ntarget_os=linux\ngithub_sha={build_sha}\n"
+            ".gitignore\nchrome\n"
+        )
+        raw = manifest.encode("utf-8")
+        asset = {
+            "id": 103,
+            "size": len(raw),
+            "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        }
+        with mock.patch.object(watcher, "gh_resource_text", return_value=manifest):
+            self.assertEqual(
+                watcher.read_release_manifest_build_sha("owner/repo", version, asset), build_sha
+            )
+
+    def test_legacy_release_manifest_cannot_enter_file_list_before_required_metadata(self):
+        version = "151.0.7922.75"
+        manifest = f"version={version}\ntarget_cpu=x86\n.gitignore\ngithub_sha={'a' * 40}\n"
+        raw = manifest.encode("utf-8")
+        asset = {
+            "id": 103,
+            "size": len(raw),
+            "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        }
+        with mock.patch.object(watcher, "gh_resource_text", return_value=manifest), \
+             self.assertRaisesRegex(ValueError, "malformed metadata"):
+            watcher.read_release_manifest_build_sha("owner/repo", version, asset)
+
+    def test_release_provenance_cross_binds_manifest_digest_and_tag(self):
+        version = "155.0.0.1"
+        build_sha = "a" * 40
+        manifest = self._release_manifest(version, build_sha)
+        raw = manifest.encode("utf-8")
+        asset = {
+            "id": 103,
+            "size": len(raw),
+            "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        }
+        with mock.patch.object(
+            watcher, "gh_resource_text", side_effect=[manifest, json.dumps({"sha": build_sha})]
+        ) as read:
+            watcher.verify_release_provenance("owner/repo", version, asset)
+        self.assertEqual(read.call_count, 2)
+        self.assertIn("Accept: application/octet-stream", read.call_args_list[0].args[0])
+        self.assertIn(f"commits/chromium-{version}-linux-i686", read.call_args_list[1].args[0][-1])
+
+    def test_release_health_rejects_tag_manifest_mismatch(self):
+        version = "155.0.0.1"
+        manifest_sha = "a" * 40
+        tag_sha = "b" * 40
+        manifest = self._release_manifest(version, manifest_sha)
+        raw = manifest.encode("utf-8")
+        release = self._healthy_release(version)
+        manifest_asset = release["assets"][2]
+        manifest_asset["size"] = len(raw)
+        manifest_asset["digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+        with mock.patch.object(watcher, "list_rest_items", return_value=[release]), \
+             mock.patch.object(
+                 watcher, "gh_resource_text", side_effect=[manifest, json.dumps({"sha": tag_sha})]
+             ):
+            healthy, broken = watcher.list_release_health("owner/repo")
+        self.assertEqual(healthy, set())
+        self.assertEqual(broken, {version})
+
+    def test_release_manifest_digest_mismatch_is_rejected_before_tag_lookup(self):
+        version = "155.0.0.1"
+        manifest = self._release_manifest(version, "a" * 40)
+        raw = manifest.encode("utf-8")
+        asset = {"id": 103, "size": len(raw), "digest": "sha256:" + "0" * 64}
+        with mock.patch.object(watcher, "gh_resource_text", return_value=manifest) as read, \
+             self.assertRaisesRegex(ValueError, "digest changed"):
+            watcher.verify_release_provenance("owner/repo", version, asset)
+        self.assertEqual(read.call_count, 1)
+
+    def test_release_manifest_size_bound_precedes_download(self):
+        asset = {
+            "id": 103,
+            "size": watcher.RELEASE_MANIFEST_MAX_BYTES + 1,
+            "digest": "sha256:" + "a" * 64,
+        }
+        with mock.patch.object(watcher, "gh_resource_text") as read, \
+             self.assertRaisesRegex(ValueError, "watcher limit"):
+            watcher.read_release_manifest_build_sha("owner/repo", "155.0.0.1", asset)
+        read.assert_not_called()
+
+    def test_release_provenance_network_uncertainty_propagates(self):
+        release = self._healthy_release("155.0.0.1")
+        with mock.patch.object(watcher, "list_rest_items", return_value=[release]), \
+             mock.patch.object(
+                 watcher, "verify_release_provenance", side_effect=watcher.WatcherError("rate limit")
+             ), self.assertRaisesRegex(watcher.WatcherError, "rate limit"):
+            watcher.list_release_health("owner/repo")
+
     def test_draft_release_does_not_mark_version_released(self):
         releases = [
             self._healthy_release("151.0.0.1", draft=True),
             self._healthy_release("152.0.0.1"),
         ]
-        with mock.patch.object(watcher, "list_rest_items", return_value=releases):
+        with mock.patch.object(watcher, "list_rest_items", return_value=releases), \
+             mock.patch.object(watcher, "verify_release_provenance", return_value=None):
             healthy, broken = watcher.list_release_health("owner/repo")
             self.assertEqual(healthy, {"152.0.0.1"})
             self.assertEqual(broken, {"151.0.0.1"})
