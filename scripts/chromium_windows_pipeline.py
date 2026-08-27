@@ -40,11 +40,14 @@ from chromium_source_object import fetch_metadata as fetch_source_metadata
 from chromium_tool_pins import (
     CipdPackagePin,
     GcsObjectPin,
+    GitDependencyPin,
     resolve_pins,
     resolve_windows_cipd_tool_pins,
     resolve_windows_gcs_tool_pins,
+    resolve_windows_git_tool_pins,
     windows_cipd_tool_descriptor_sha256,
     windows_gcs_tool_descriptor_sha256,
+    windows_git_tool_descriptor_sha256,
 )
 from chromium_windows_runtime import (
     WindowsRuntimeError,
@@ -71,9 +74,9 @@ RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 OUT_NAME = "Release_x86_win"
-CHECKPOINT_CONTRACT_VERSION = 3
-CHECKPOINT_MANIFEST_SCHEMA = 3
-PREPARED_STATE_SCHEMA = 3
+CHECKPOINT_CONTRACT_VERSION = 4
+CHECKPOINT_MANIFEST_SCHEMA = 4
+PREPARED_STATE_SCHEMA = 4
 PORT_CONFIG_HASH_SCHEMA = 1
 MAX_NO_PROGRESS_STREAK = 2
 DEFAULT_MIN_WORK_GIB = 70
@@ -115,8 +118,10 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
         "git",
         "git.exe",
         "gn.exe",
+        "gperf.exe",
         "ninja.exe",
         "node.exe",
+        "perl.exe",
         "powershell.exe",
         "pwsh",
         "pwsh.exe",
@@ -209,6 +214,7 @@ class PreparedState:
     cpython3_version: str
     windows_cipd_tools_sha256: str
     windows_gcs_tools_sha256: str
+    windows_git_tools_sha256: str
     clang_revision: str
     sdk_family: str
     sdk_servicing: str
@@ -1513,6 +1519,127 @@ def install_windows_cipd_tools(
     return descriptor_sha, pins
 
 
+def install_windows_git_tools(
+    source: Path,
+    work_root: Path,
+    env: Mapping[str, str],
+) -> tuple[str, tuple[GitDependencyPin, ...]]:
+    pins = resolve_windows_git_tool_pins(source / "DEPS")
+    descriptor_sha = windows_git_tool_descriptor_sha256(pins)
+    checkout_root = work_root / "git-tools"
+    checkout_root.mkdir(exist_ok=True)
+    names = {
+        "src/third_party/gperf": "gperf",
+        "src/third_party/microsoft_dxheaders/src": "microsoft-dxheaders",
+        "src/third_party/microsoft_webauthn/src": "microsoft-webauthn",
+        "src/third_party/perl": "perl",
+    }
+    resolved_source = source.resolve()
+    for pin in pins:
+        checkout = checkout_root / names[pin.dependency]
+        if checkout.is_symlink() or (checkout.exists() and not checkout.is_dir()):
+            raise WindowsPipelineError(
+                f"Windows Git tool checkout path is unsafe: {checkout}"
+            )
+        if checkout.exists():
+            current = _run(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                capture=True,
+                timeout=60,
+            ).stdout.strip()
+            if current != pin.revision:
+                raise InfrastructureError(
+                    f"Existing Windows Git tool checkout has revision {current!r}, "
+                    f"expected {pin.revision}"
+                )
+        else:
+            checkout.mkdir(parents=True)
+            _run(["git", "-C", str(checkout), "init", "-q"], timeout=60)
+            _run(
+                ["git", "-C", str(checkout), "remote", "add", "origin", pin.repository],
+                timeout=60,
+            )
+            _run(
+                ["git", "-C", str(checkout), "config", "core.longpaths", "true"],
+                timeout=60,
+            )
+            _run(
+                [
+                    "git",
+                    "-C",
+                    str(checkout),
+                    "fetch",
+                    "--depth=1",
+                    "origin",
+                    pin.revision,
+                ],
+                timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS,
+            )
+            _run(
+                ["git", "-C", str(checkout), "checkout", "-q", "--detach", "FETCH_HEAD"],
+                timeout=120,
+            )
+        checked = _run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            capture=True,
+            timeout=60,
+        ).stdout.strip()
+        if checked != pin.revision:
+            raise WindowsPipelineError(
+                f"Windows Git tool revision mismatch for {pin.dependency}: {checked}"
+            )
+        relative = PurePosixPath(pin.dependency).relative_to("src")
+        destination = source.joinpath(*relative.parts)
+        resolved_parent = destination.parent.resolve()
+        if (
+            resolved_parent != resolved_source
+            and resolved_source not in resolved_parent.parents
+        ):
+            raise WindowsPipelineError(
+                f"Windows Git tool destination escapes source: {destination}"
+            )
+        if destination.is_symlink() or (
+            destination.exists() and not destination.is_dir()
+        ):
+            raise WindowsPipelineError(
+                f"Windows Git tool destination is unsafe: {destination}"
+            )
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(
+            checkout,
+            destination,
+            ignore=shutil.ignore_patterns(".git"),
+        )
+        marker = destination / ".chromium-windows-i686-git.json"
+        marker.write_text(
+            json.dumps(asdict(pin), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    gperf = source / "third_party/gperf/bin/gperf.exe"
+    perl = source / "third_party/perl/perl/bin/perl.exe"
+    dxheader = source / "third_party/microsoft_dxheaders/src/include/directx/d3d12.h"
+    webauthn = source / "third_party/microsoft_webauthn/src/webauthn.h"
+    for path, label in (
+        (gperf, "gperf.exe"),
+        (perl, "perl.exe"),
+        (dxheader, "DirectX d3d12.h"),
+        (webauthn, "Microsoft webauthn.h"),
+    ):
+        if not path.is_file() or path.is_symlink():
+            raise WindowsPipelineError(
+                f"Chromium-pinned Windows Git dependency omitted {label}: {path}"
+            )
+    _run([str(gperf), "--version"], cwd=source, env=env, timeout=120)
+    _run([str(perl), "-v"], cwd=source, env=env, timeout=120)
+    print(
+        "Validated source-declared Windows Git tool descriptors: "
+        f"SHA-256 {descriptor_sha}"
+    )
+    return descriptor_sha, pins
+
+
 def install_source_declared_tools(
     source: Path,
     work_root: Path,
@@ -1527,6 +1654,8 @@ def install_source_declared_tools(
     tuple[GcsObjectPin, ...],
     str,
     tuple[CipdPackagePin, ...],
+    str,
+    tuple[GitDependencyPin, ...],
 ]:
     cipd = depot_tools / "cipd.bat"
     gn_root = work_root / "gn"
@@ -1635,6 +1764,9 @@ def install_source_declared_tools(
     windows_cipd_tools_sha256, windows_cipd_pins = install_windows_cipd_tools(
         source, depot_tools, env
     )
+    windows_git_tools_sha256, windows_git_pins = install_windows_git_tools(
+        source, work_root, env
+    )
 
     depot_python = _depot_python(depot_tools)
     _run(
@@ -1687,6 +1819,8 @@ def install_source_declared_tools(
         windows_gcs_pins,
         windows_cipd_tools_sha256,
         windows_cipd_pins,
+        windows_git_tools_sha256,
+        windows_git_pins,
     )
 
 
@@ -1801,6 +1935,10 @@ def read_prepared_state(work_root: Path) -> PreparedState:
     validate_sha256(
         state.windows_gcs_tools_sha256,
         "prepared Windows GCS tool descriptor SHA-256",
+    )
+    validate_sha256(
+        state.windows_git_tools_sha256,
+        "prepared Windows Git tool descriptor SHA-256",
     )
     validate_sha256(state.port_config_sha256, "prepared port configuration SHA-256")
     bounded_int(
@@ -2045,7 +2183,7 @@ def validate_release_bundle(
         raise WindowsPipelineError("Release checksum sidecar is malformed or inconsistent")
     fields = _parse_release_manifest(manifest_path)
     exact = {
-        "manifest_schema": "3",
+        "manifest_schema": "4",
         "version": version,
         "target_cpu": "x86",
         "target_os": "win",
@@ -2066,6 +2204,7 @@ def validate_release_bundle(
         "port_config_sha256",
         "windows_cipd_tools_sha256",
         "windows_gcs_tools_sha256",
+        "windows_git_tools_sha256",
     ):
         validate_sha256(fields.get(key, ""), f"manifest {key}")
     if not re.fullmatch(r"git_revision:[0-9a-f]{40}", fields.get("gn_version", "")):
@@ -2120,6 +2259,7 @@ def _checkpoint_manifest_matches_state(
         "cpython3_version": state.cpython3_version,
         "windows_cipd_tools_sha256": state.windows_cipd_tools_sha256,
         "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
+        "windows_git_tools_sha256": state.windows_git_tools_sha256,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "visual_studio_year": state.visual_studio_year,
@@ -2387,6 +2527,7 @@ def create_checkpoint(
         "cpython3_version": state.cpython3_version,
         "windows_cipd_tools_sha256": state.windows_cipd_tools_sha256,
         "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
+        "windows_git_tools_sha256": state.windows_git_tools_sha256,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "sdk_servicing": state.sdk_servicing,
@@ -2465,6 +2606,8 @@ def prepare_pipeline(
         windows_gcs_pins,
         windows_cipd_tools_sha256,
         windows_cipd_pins,
+        windows_git_tools_sha256,
+        windows_git_pins,
     ) = install_source_declared_tools(
         source, work_root, depot_tools, pins, env
     )
@@ -2480,6 +2623,7 @@ def prepare_pipeline(
         cpython3_version=pins["cpython3_version"],
         windows_cipd_tools_sha256=windows_cipd_tools_sha256,
         windows_gcs_tools_sha256=windows_gcs_tools_sha256,
+        windows_git_tools_sha256=windows_git_tools_sha256,
         clang_revision=clang_revision,
         sdk_family=requirements.sdk_family,
         sdk_servicing=sdk_servicing,
@@ -2557,6 +2701,15 @@ def prepare_pipeline(
         (evidence_dir / "windows-cipd-tools.json").write_text(
             json.dumps(
                 [asdict(pin) for pin in windows_cipd_pins],
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (evidence_dir / "windows-git-tools.json").write_text(
+            json.dumps(
+                [asdict(pin) for pin in windows_git_pins],
                 indent=2,
                 sort_keys=True,
             )
@@ -2833,7 +2986,7 @@ def package_build(
         raise WindowsPipelineError("GITHUB_RUN_ID is missing or malformed during packaging")
     packaged_files = _zip_member_names(package)
     fields = (
-        ("manifest_schema", "3"),
+        ("manifest_schema", "4"),
         ("version", version),
         ("target_cpu", "x86"),
         ("target_os", "win"),
@@ -2849,6 +3002,7 @@ def package_build(
         ("cpython3_version", state.cpython3_version),
         ("windows_cipd_tools_sha256", state.windows_cipd_tools_sha256),
         ("windows_gcs_tools_sha256", state.windows_gcs_tools_sha256),
+        ("windows_git_tools_sha256", state.windows_git_tools_sha256),
         ("depot_tools_revision", state.depot_tools_revision),
         ("windows_sdk_family", state.sdk_family),
         ("windows_sdk_servicing", state.sdk_servicing),

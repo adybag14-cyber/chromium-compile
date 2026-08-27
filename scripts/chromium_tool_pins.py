@@ -77,6 +77,30 @@ WINDOWS_CIPD_TOOL_POLICIES = {
         "conditions": {"non_git_source"},
     },
 }
+WINDOWS_GIT_TOOL_DEPENDENCIES = (
+    "src/third_party/gperf",
+    "src/third_party/microsoft_dxheaders/src",
+    "src/third_party/microsoft_webauthn/src",
+    "src/third_party/perl",
+)
+WINDOWS_GIT_TOOL_REPOSITORIES = {
+    "src/third_party/gperf": (
+        "/chromium/deps/gperf.git",
+        "https://chromium.googlesource.com/chromium/deps/gperf.git",
+    ),
+    "src/third_party/microsoft_dxheaders/src": (
+        "/external/github.com/microsoft/DirectX-Headers.git",
+        "https://chromium.googlesource.com/external/github.com/microsoft/DirectX-Headers.git",
+    ),
+    "src/third_party/microsoft_webauthn/src": (
+        "/external/github.com/microsoft/webauthn.git",
+        "https://chromium.googlesource.com/external/github.com/microsoft/webauthn.git",
+    ),
+    "src/third_party/perl": (
+        "/chromium/deps/perl.git",
+        "https://chromium.googlesource.com/chromium/deps/perl.git",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -96,6 +120,13 @@ class CipdPackagePin:
     package_template: str
     package: str
     version: str
+
+
+@dataclass(frozen=True)
+class GitDependencyPin:
+    dependency: str
+    repository: str
+    revision: str
 
 
 def _balanced_region(text: str, start: int, opener: str, closer: str) -> str:
@@ -393,6 +424,60 @@ def windows_cipd_tool_descriptor_sha256(pins: tuple[CipdPackagePin, ...]) -> str
     if tuple(pin.dependency for pin in pins) != WINDOWS_CIPD_TOOL_DEPENDENCIES:
         raise ValueError(
             "Windows CIPD tool descriptors are missing or out of canonical order"
+        )
+    payload = json.dumps(
+        [asdict(pin) for pin in pins],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def resolve_windows_git_dependency(path: Path, dependency: str) -> GitDependencyPin:
+    if dependency not in WINDOWS_GIT_TOOL_DEPENDENCIES:
+        raise ValueError(f"Unsupported Windows Git tool dependency: {dependency!r}")
+    text = path.read_text(encoding="utf-8")
+    mapping = _dependency_mapping(text, dependency)
+    condition = _literal_field(mapping, "condition")
+    if re.sub(r"\s+", " ", condition).strip() != "checkout_win":
+        raise ValueError(
+            f"Windows Git dependency {dependency!r} has an unexpected condition: "
+            f"{condition!r}"
+        )
+    matches = re.findall(
+        r"['\"]url['\"]\s*:\s*Var\(['\"]chromium_git['\"]\)\s*\+\s*"
+        r"(['\"])([^'\"\r\n]+)\1\s*\+\s*['\"]@['\"]\s*\+\s*"
+        r"(['\"])([0-9a-f]{40})\3",
+        mapping,
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"Could not resolve one immutable Chromium Git dependency for {dependency!r}"
+        )
+    expected_path, repository = WINDOWS_GIT_TOOL_REPOSITORIES[dependency]
+    if matches[0][1] != expected_path:
+        raise ValueError(
+            f"Windows Git dependency {dependency!r} moved repositories: "
+            f"{matches[0][1]!r}"
+        )
+    return GitDependencyPin(
+        dependency=dependency,
+        repository=repository,
+        revision=matches[0][3],
+    )
+
+
+def resolve_windows_git_tool_pins(path: Path) -> tuple[GitDependencyPin, ...]:
+    return tuple(
+        resolve_windows_git_dependency(path, dependency)
+        for dependency in WINDOWS_GIT_TOOL_DEPENDENCIES
+    )
+
+
+def windows_git_tool_descriptor_sha256(pins: tuple[GitDependencyPin, ...]) -> str:
+    if tuple(pin.dependency for pin in pins) != WINDOWS_GIT_TOOL_DEPENDENCIES:
+        raise ValueError(
+            "Windows Git tool descriptors are missing or out of canonical order"
         )
     payload = json.dumps(
         [asdict(pin) for pin in pins],

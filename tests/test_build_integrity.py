@@ -126,6 +126,22 @@ deps = {
       'version': 'version:2@7.0.2',
     }],
   },
+  'src/third_party/gperf': {
+    'url': Var('chromium_git') + '/chromium/deps/gperf.git' + '@' + 'e9eeea862a18e77b945d98eff7e1bf065d3daf8e',
+    'condition': 'checkout_win',
+  },
+  'src/third_party/microsoft_dxheaders/src': {
+    'url': Var('chromium_git') + '/external/github.com/microsoft/DirectX-Headers.git' + '@' + '07b94cba474be6cdfd934febdbd0b21ca0524187',
+    'condition': 'checkout_win',
+  },
+  'src/third_party/microsoft_webauthn/src': {
+    'url': Var('chromium_git') + '/external/github.com/microsoft/webauthn.git' + '@' + 'ef82c157125a0490e05f6ea82a7adb1b8e1bad08',
+    'condition': 'checkout_win',
+  },
+  'src/third_party/perl': {
+    'url': Var('chromium_git') + '/chromium/deps/perl.git' + '@' + 'a2bd4470d3485e6eda532eee416a71d16db2d7ba',
+    'condition': 'checkout_win',
+  },
 """
 
     def test_cpython_pin_is_optional_for_pre_cpython_chromium_deps(self):
@@ -243,6 +259,16 @@ deps = {
                 tool_pins.windows_cipd_tool_descriptor_sha256(cipd),
                 r"^[0-9a-f]{64}$",
             )
+            git_pins = tool_pins.resolve_windows_git_tool_pins(deps)
+            self.assertEqual(len(git_pins), 4)
+            self.assertEqual(
+                git_pins[0].revision,
+                "e9eeea862a18e77b945d98eff7e1bf065d3daf8e",
+            )
+            self.assertRegex(
+                tool_pins.windows_git_tool_descriptor_sha256(git_pins),
+                r"^[0-9a-f]{64}$",
+            )
 
     def test_windows_gcs_tool_pin_rejects_broadened_host_condition(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,6 +314,21 @@ deps = {
             devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
                 tool_pins.resolve_windows_cipd_tool_pins(deps, devtools)
+
+    def test_windows_git_tool_rejects_repository_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace(
+                    "/chromium/deps/gperf.git",
+                    "/attacker/gperf.git",
+                )
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "moved repositories"):
+                tool_pins.resolve_windows_git_tool_pins(deps)
 
 
 
