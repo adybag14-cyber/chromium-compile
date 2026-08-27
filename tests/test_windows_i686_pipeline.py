@@ -103,6 +103,273 @@ class WindowsI686PipelineTests(unittest.TestCase):
         self.assertIn("/+show/refs/tags/", opener.call_args.args[0].full_url)
         sleep.assert_called_once_with(1)
 
+    def test_gitiles_tag_identity_is_exact_and_utc_timestamped(self):
+        payload = {
+            "commit": "971a7443b0c9b0a9b2860529b33331b76077ec62",
+            "committer": {"time": "Tue Aug 25 20:20:53 2026"},
+            "message": (
+                "Incrementing VERSION\n\n"
+                "Cr-Commit-Position: refs/branch-heads/8010@{#343}\n"
+            ),
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return (
+                    "https://chromium.googlesource.com/chromium/src/+/refs/tags/"
+                    "153.0.8010.12?format=JSON"
+                )
+
+            def read(self, _limit):
+                return b")]}'\n" + json.dumps(payload).encode("utf-8")
+
+        with mock.patch.object(
+            pipeline.urllib.request, "urlopen", return_value=Response()
+        ) as opener, mock.patch.object(pipeline.time, "time", return_value=1_800_000_000):
+            identity = pipeline.fetch_gitiles_tag_identity("153.0.8010.12")
+        self.assertEqual(
+            identity.commit, "971a7443b0c9b0a9b2860529b33331b76077ec62"
+        )
+        self.assertEqual(identity.commit_position, "refs/branch-heads/8010@{#343}")
+        self.assertEqual(identity.timestamp, 1_787_689_253)
+        self.assertIn("/+/refs/tags/153.0.8010.12?format=JSON", opener.call_args.args[0].full_url)
+
+    def test_gitiles_tag_identity_rejects_noncanonical_commit_position(self):
+        payload = {
+            "commit": "a" * 40,
+            "committer": {"time": "Tue Aug 25 20:20:53 2026"},
+            "message": "Cr-Commit-Position: refs/tags/8010@{#343}\n",
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return (
+                    "https://chromium.googlesource.com/chromium/src/+/refs/tags/"
+                    "153.0.8010.12?format=JSON"
+                )
+
+            def read(self, _limit):
+                return b")]}'\n" + json.dumps(payload).encode("utf-8")
+
+        with mock.patch.object(
+            pipeline.urllib.request, "urlopen", return_value=Response()
+        ), mock.patch.object(pipeline.time, "time", return_value=1_800_000_000):
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError, "canonical Chromium commit position"
+            ):
+                pipeline.fetch_gitiles_tag_identity("153.0.8010.12")
+
+    def test_revision_metadata_uses_tag_time_and_preflights_linker_timestamp(self):
+        identity = pipeline.ChromiumTagIdentity(
+            commit="971a7443b0c9b0a9b2860529b33331b76077ec62",
+            commit_position="refs/branch-heads/8010@{#343}",
+            committer_time="Tue Aug 25 20:20:53 2026",
+            timestamp=1_787_689_253,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp)
+            script = source / "build/compute_build_timestamp.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print(1785646800)\n", encoding="utf-8")
+            completed = pipeline.subprocess.CompletedProcess(
+                ["python3.exe"], 0, "1785646800\n", ""
+            )
+            with mock.patch.object(pipeline, "_run", return_value=completed) as run:
+                timestamp = pipeline.materialize_chromium_revision_metadata(
+                    source,
+                    pathlib.Path("python3.exe"),
+                    {},
+                    identity,
+                )
+            self.assertEqual(timestamp, 1_785_646_800)
+            self.assertEqual(
+                (source / "build/util/LASTCHANGE").read_text(encoding="utf-8"),
+                "LASTCHANGE=971a7443b0c9b0a9b2860529b33331b76077ec62-"
+                "refs/branch-heads/8010@{#343}\n",
+            )
+            self.assertEqual(
+                (source / "build/util/LASTCHANGE.committime").read_text(
+                    encoding="utf-8"
+                ),
+                "1787689253\n",
+            )
+            self.assertEqual(run.call_args.args[0][-1], "default")
+            self.assertTrue(run.call_args.kwargs["capture"])
+
+    def test_revision_metadata_rejects_the_negative_linker_timestamp_regression(self):
+        identity = pipeline.ChromiumTagIdentity(
+            commit="a" * 40,
+            commit_position="refs/heads/main@{#1681091}",
+            committer_time="Tue Aug 25 20:20:53 2026",
+            timestamp=1_787_689_253,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp)
+            script = source / "build/compute_build_timestamp.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print(-2142000)\n", encoding="utf-8")
+            completed = pipeline.subprocess.CompletedProcess(
+                ["python3.exe"], 0, "-2142000\n", ""
+            )
+            with mock.patch.object(pipeline, "_run", return_value=completed):
+                with self.assertRaisesRegex(
+                    pipeline.WindowsPipelineError,
+                    "Chromium Windows build timestamp must be an integer",
+                ):
+                    pipeline.materialize_chromium_revision_metadata(
+                        source,
+                        pathlib.Path("python3.exe"),
+                        {},
+                        identity,
+                    )
+
+    def test_generated_chrome_linker_timestamp_resolves_renamed_executable(self):
+        timestamp = "1785646800"
+
+        def run(command, **_kwargs):
+            if "deps" in command:
+                stdout = (
+                    "//chrome:renamed_browser_executable\n"
+                    "//chrome:setup_helper\n"
+                )
+            elif command[-1] == "outputs" and command[-2].endswith(
+                ":renamed_browser_executable"
+            ):
+                stdout = "//out/Release_x86_win/initialexe/chrome.exe\n"
+            elif command[-1] == "outputs":
+                stdout = "//out/Release_x86_win/setup_helper.exe\n"
+            elif command[-1] == "ldflags":
+                stdout = f"/MACHINE:X86\n/TIMESTAMP:{timestamp}\n"
+            else:
+                self.fail(f"Unexpected GN command: {command}")
+            return pipeline.subprocess.CompletedProcess(command, 0, stdout, "")
+
+        with mock.patch.object(pipeline, "_run", side_effect=run):
+            stats = pipeline.validate_generated_chrome_linker_timestamp(
+                pathlib.Path("src"),
+                pathlib.Path("out"),
+                pathlib.Path("gn.exe"),
+                {},
+                1_785_646_800,
+            )
+        self.assertEqual(stats["chrome_executable_dependency_count"], 2)
+        self.assertEqual(
+            stats["chrome_executable_label"],
+            "//chrome:renamed_browser_executable",
+        )
+        self.assertEqual(stats["timestamp_occurrences"], 1)
+
+        timestamp = "-2142000"
+        with mock.patch.object(pipeline, "_run", side_effect=run):
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError, "observed=.*-2142000"
+            ):
+                pipeline.validate_generated_chrome_linker_timestamp(
+                    pathlib.Path("src"),
+                    pathlib.Path("out"),
+                    pathlib.Path("gn.exe"),
+                    {},
+                    1_785_646_800,
+                )
+
+    def test_prepared_state_and_checkpoint_bind_tag_and_linker_timestamps(self):
+        state = pipeline.PreparedState(
+            schema=pipeline.PREPARED_STATE_SCHEMA,
+            version="153.0.8010.12",
+            source_sha256="a" * 64,
+            chromium_commit="b" * 40,
+            chromium_commit_position="refs/branch-heads/8010@{#343}",
+            chromium_commit_timestamp=1_787_689_253,
+            windows_build_timestamp=1_785_646_800,
+            depot_tools_revision="c" * 40,
+            gn_version="git_revision:" + "d" * 40,
+            ninja_package="infra/3pp/tools/ninja/",
+            ninja_version="version:3@1.13.2.chromium.1",
+            cpython3_version="version:2@3.11.8.chromium.35",
+            windows_cipd_tools_sha256="e" * 64,
+            windows_gcs_tools_sha256="f" * 64,
+            windows_git_tools_sha256="1" * 64,
+            clang_revision="llvmorg-23-init-1234-gabcdef",
+            sdk_family="10.0.28000.0",
+            sdk_servicing="10.0.28000.2270",
+            visual_studio_year="2026",
+            visual_studio_version="18.0.0",
+            port_config_hash_schema=pipeline.PORT_CONFIG_HASH_SCHEMA,
+            port_config_sha256="2" * 64,
+            checkpoint_no_progress_streak=0,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            pipeline.write_prepared_state(root, state)
+            self.assertEqual(pipeline.read_prepared_state(root), state)
+            payload = dict(state.__dict__)
+            payload["windows_build_timestamp"] = state.chromium_commit_timestamp + 1
+            (root / "prepared-state.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError, "newer than the tag commit"
+            ):
+                pipeline.read_prepared_state(root)
+
+        proof = {
+            "producer_sha": "3" * 40,
+            "run_id": "123",
+            "run_attempt": 1,
+            "producer_stage": 1,
+        }
+        manifest = {
+            "schema": pipeline.CHECKPOINT_MANIFEST_SCHEMA,
+            "checkpoint_contract_version": pipeline.CHECKPOINT_CONTRACT_VERSION,
+            "target_os": "win",
+            "target_cpu": "x86",
+            "output_root": pipeline.OUT_NAME,
+            "version": state.version,
+            "source_sha256": state.source_sha256,
+            "chromium_commit": state.chromium_commit,
+            "chromium_commit_position": state.chromium_commit_position,
+            "chromium_commit_timestamp": state.chromium_commit_timestamp,
+            "windows_build_timestamp": state.windows_build_timestamp,
+            "depot_tools_revision": state.depot_tools_revision,
+            "gn_version": state.gn_version,
+            "ninja_package": state.ninja_package,
+            "ninja_version": state.ninja_version,
+            "cpython3_version": state.cpython3_version,
+            "windows_cipd_tools_sha256": state.windows_cipd_tools_sha256,
+            "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
+            "windows_git_tools_sha256": state.windows_git_tools_sha256,
+            "clang_revision": state.clang_revision,
+            "sdk_family": state.sdk_family,
+            "visual_studio_year": state.visual_studio_year,
+            "port_config_hash_schema": state.port_config_hash_schema,
+            "port_config_sha256": state.port_config_sha256,
+            "github_sha": proof["producer_sha"],
+            "github_run_id": proof["run_id"],
+            "github_run_attempt": proof["run_attempt"],
+            "stage": proof["producer_stage"],
+            "no_progress_streak": 0,
+        }
+        self.assertEqual(
+            pipeline._checkpoint_manifest_matches_state(manifest, state, proof), 0
+        )
+        manifest["windows_build_timestamp"] = state.windows_build_timestamp + 1
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "windows_build_timestamp"
+        ):
+            pipeline._checkpoint_manifest_matches_state(manifest, state, proof)
+
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
         vs_toolchain = """
 TOOLCHAIN_HASH = 'abc'
@@ -193,6 +460,9 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
     def test_windows_release_is_independently_pe32_smoked_and_immutable(self):
         publish = (ROOT / ".github/workflows/publish-windows-i686-release.yml").read_text(encoding="utf-8")
         runtime = (ROOT / "scripts/chromium_windows_runtime.py").read_text(encoding="utf-8")
+        pipeline_source = (ROOT / "scripts/chromium_windows_pipeline.py").read_text(
+            encoding="utf-8"
+        )
         helper = (ROOT / "scripts/github_immutable_release.py").read_text(encoding="utf-8")
         self.assertIn("validate-release-bundle", publish)
         self.assertIn("chromium_windows_runtime.py smoke", publish)
@@ -203,6 +473,12 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn("PE_MACHINE_I386 = 0x014C", runtime)
         self.assertIn("PE32_OPTIONAL_MAGIC = 0x010B", runtime)
         self.assertIn("taskkill.exe", runtime)
+        self.assertIn('("manifest_schema", "5")', pipeline_source)
+        self.assertIn('("chromium_commit", state.chromium_commit)', pipeline_source)
+        self.assertIn(
+            '("windows_build_timestamp", str(state.windows_build_timestamp))',
+            pipeline_source,
+        )
 
     def test_windows_watcher_has_separate_platform_state(self):
         baseline = json.loads((ROOT / "support/baseline.json").read_text(encoding="utf-8"))
@@ -323,6 +599,8 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('args_gn.write_text(WINDOWS_GN_ARGS', block)
         self.assertIn('[str(gn), "gen", str(out)]', block)
         self.assertNotIn("--args=", block)
+        self.assertIn("validate_generated_chrome_linker_timestamp(", block)
+        self.assertIn("source, out, gn, env, windows_build_timestamp", block)
 
     def test_prepare_traverses_full_ninja_input_graph_before_dispatch(self):
         source = (ROOT / "scripts" / "chromium_windows_pipeline.py").read_text(

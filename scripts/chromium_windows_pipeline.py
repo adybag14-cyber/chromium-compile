@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -73,10 +74,16 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+CHROMIUM_COMMIT_POSITION_RE = re.compile(
+    r"^refs/(?:heads/main|branch-heads/[1-9][0-9]*)@\{#[1-9][0-9]*\}$"
+)
+GN_TARGET_LABEL_RE = re.compile(
+    r"^//[A-Za-z0-9_./+-]+:[A-Za-z0-9_.+-]+$"
+)
 OUT_NAME = "Release_x86_win"
-CHECKPOINT_CONTRACT_VERSION = 4
-CHECKPOINT_MANIFEST_SCHEMA = 4
-PREPARED_STATE_SCHEMA = 4
+CHECKPOINT_CONTRACT_VERSION = 5
+CHECKPOINT_MANIFEST_SCHEMA = 5
+PREPARED_STATE_SCHEMA = 5
 PORT_CONFIG_HASH_SCHEMA = 1
 MAX_NO_PROGRESS_STREAK = 2
 DEFAULT_MIN_WORK_GIB = 70
@@ -92,6 +99,8 @@ DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS = 3600
 DEFAULT_ARCHIVE_TIMEOUT_SECONDS = 1800
 DEFAULT_REMOVE_TIMEOUT_SECONDS = 900
 GITILES_HOST = "chromium.googlesource.com"
+MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
+MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
 SOURCE_DOWNLOAD_HOST = "commondatastorage.googleapis.com"
 WINDOWS_GCS_TOOL_DOWNLOAD_HOST = "commondatastorage.googleapis.com"
 WINDOWS_KITS_ROOT = Path(r"C:\Program Files (x86)\Windows Kits\10")
@@ -203,10 +212,22 @@ class WindowsRequirements:
 
 
 @dataclass(frozen=True)
+class ChromiumTagIdentity:
+    commit: str
+    commit_position: str
+    committer_time: str
+    timestamp: int
+
+
+@dataclass(frozen=True)
 class PreparedState:
     schema: int
     version: str
     source_sha256: str
+    chromium_commit: str
+    chromium_commit_position: str
+    chromium_commit_timestamp: int
+    windows_build_timestamp: int
     depot_tools_revision: str
     gn_version: str
     ninja_package: str
@@ -226,12 +247,14 @@ class PreparedState:
 
 
 def validate_version(version: str) -> str:
-    if not VERSION_RE.fullmatch(version):
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise WindowsPipelineError(f"Invalid Chromium version: {version!r}")
     return version
 
 
 def validate_sha1(value: str, label: str) -> str:
+    if not isinstance(value, str):
+        raise WindowsPipelineError(f"{label} must be exactly 40 hexadecimal characters")
     normalized = value.lower()
     if not SHA1_RE.fullmatch(normalized):
         raise WindowsPipelineError(f"{label} must be exactly 40 hexadecimal characters")
@@ -239,10 +262,18 @@ def validate_sha1(value: str, label: str) -> str:
 
 
 def validate_sha256(value: str, label: str) -> str:
+    if not isinstance(value, str):
+        raise WindowsPipelineError(f"{label} must be exactly 64 hexadecimal characters")
     normalized = value.lower()
     if not SHA256_RE.fullmatch(normalized):
         raise WindowsPipelineError(f"{label} must be exactly 64 hexadecimal characters")
     return normalized
+
+
+def validate_chromium_commit_position(value: str, label: str) -> str:
+    if not isinstance(value, str) or not CHROMIUM_COMMIT_POSITION_RE.fullmatch(value):
+        raise WindowsPipelineError(f"{label} is not a canonical Chromium commit position")
+    return value
 
 
 def bounded_int(
@@ -259,6 +290,18 @@ def bounded_int(
     if not minimum <= parsed <= maximum:
         raise WindowsPipelineError(f"{label} must be between {minimum} and {maximum}")
     return parsed
+
+
+def validate_chromium_timestamp(value: str | int, label: str) -> int:
+    timestamp = bounded_int(
+        value,
+        label,
+        minimum=MIN_TRUSTED_CHROMIUM_TIMESTAMP,
+        maximum=MAX_PE_COFF_TIMESTAMP,
+    )
+    if timestamp > int(time.time()) + 86_400:
+        raise WindowsPipelineError(f"{label} is implausibly far in the future")
+    return timestamp
 
 
 def _run(
@@ -565,6 +608,116 @@ def _fetch_gitiles_bytes(version: str, relative: str) -> bytes:
         return base64.b64decode(encoded, validate=True)
     except ValueError as exc:
         raise WindowsPipelineError(f"Gitiles returned invalid base64 for {relative}") from exc
+
+
+def fetch_gitiles_tag_identity(version: str) -> ChromiumTagIdentity:
+    version = validate_version(version)
+    url = f"https://{GITILES_HOST}/chromium/src/+/refs/tags/{version}?format=JSON"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "chromium-windows-i686/1"},
+    )
+    last_error: BaseException | None = None
+    raw = b""
+    for attempt in range(1, 6):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                validate_effective_https_host(response.geturl(), GITILES_HOST)
+                raw = response.read(4 * 1024 * 1024 + 1)
+            last_error = None
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise WindowsPipelineError(
+                    f"Authoritative Chromium tag does not exist: {version}"
+                ) from exc
+            last_error = exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+        except ValueError:
+            raise
+        if attempt < 5:
+            delay = min(2 ** (attempt - 1), 8)
+            print(
+                f"::warning::Gitiles tag identity fetch failed on attempt "
+                f"{attempt}/5 ({last_error}); retrying in {delay}s"
+            )
+            time.sleep(delay)
+    if last_error is not None:
+        raise InfrastructureError(
+            f"Could not fetch authoritative Chromium {version} tag identity "
+            f"after bounded retries: {last_error}"
+        ) from last_error
+    if len(raw) > 4 * 1024 * 1024:
+        raise WindowsPipelineError("Gitiles tag identity unexpectedly exceeds 4 MiB")
+    prefix = b")]}'\n"
+    if not raw.startswith(prefix):
+        raise WindowsPipelineError("Gitiles tag identity omitted its XSSI prefix")
+    try:
+        payload = json.loads(raw[len(prefix) :].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WindowsPipelineError("Gitiles tag identity returned malformed JSON") from exc
+    if not isinstance(payload, dict):
+        raise WindowsPipelineError("Gitiles tag identity must be a JSON object")
+    commit_value = payload.get("commit")
+    if not isinstance(commit_value, str):
+        raise WindowsPipelineError("Gitiles tag identity omitted its commit")
+    commit = validate_sha1(commit_value, "Chromium tag commit")
+    committer = payload.get("committer")
+    if not isinstance(committer, dict):
+        raise WindowsPipelineError("Gitiles tag identity omitted committer metadata")
+    committer_time = committer.get("time")
+    if not isinstance(committer_time, str):
+        raise WindowsPipelineError("Gitiles tag identity omitted committer time")
+    match = re.fullmatch(
+        r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+        r"([ 0-9][0-9]?) ([0-2][0-9]):([0-5][0-9]):([0-5][0-9]) "
+        r"([0-9]{4})",
+        committer_time,
+    )
+    if not match:
+        raise WindowsPipelineError(
+            f"Gitiles tag committer time has an unexpected format: {committer_time!r}"
+        )
+    months = {
+        name: index
+        for index, name in enumerate(
+            ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+            start=1,
+        )
+    }
+    try:
+        moment = datetime.datetime(
+            int(match.group(6)),
+            months[match.group(1)],
+            int(match.group(2)),
+            int(match.group(3)),
+            int(match.group(4)),
+            int(match.group(5)),
+            tzinfo=datetime.timezone.utc,
+        )
+    except ValueError as exc:
+        raise WindowsPipelineError("Gitiles tag committer time is invalid") from exc
+    timestamp = int(moment.timestamp())
+    timestamp = validate_chromium_timestamp(timestamp, "Gitiles tag timestamp")
+    message = payload.get("message")
+    if not isinstance(message, str):
+        raise WindowsPipelineError("Gitiles tag identity omitted its commit message")
+    positions = re.findall(r"(?m)^Cr-Commit-Position: (\S+)$", message)
+    if len(positions) != 1:
+        raise WindowsPipelineError(
+            "Gitiles tag commit omitted one canonical Cr-Commit-Position"
+        )
+    commit_position = validate_chromium_commit_position(
+        positions[0], "Gitiles tag commit position"
+    )
+    return ChromiumTagIdentity(
+        commit=commit,
+        commit_position=commit_position,
+        committer_time=committer_time,
+        timestamp=timestamp,
+    )
 
 
 def validate_critical_source_identity(source: Path, version: str) -> None:
@@ -1674,12 +1827,69 @@ def install_windows_git_tools(
     return descriptor_sha, pins
 
 
+def materialize_chromium_revision_metadata(
+    source: Path,
+    depot_python: Path,
+    env: Mapping[str, str],
+    tag_identity: ChromiumTagIdentity,
+) -> int:
+    commit = validate_sha1(tag_identity.commit, "Chromium tag commit")
+    commit_position = validate_chromium_commit_position(
+        tag_identity.commit_position, "Chromium tag commit position"
+    )
+    commit_timestamp = validate_chromium_timestamp(
+        tag_identity.timestamp, "Chromium tag commit timestamp"
+    )
+    timestamp_script = source / "build/compute_build_timestamp.py"
+    if not timestamp_script.is_file() or timestamp_script.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium source omitted its regular build timestamp calculator"
+        )
+    util = source / "build/util"
+    util.mkdir(parents=True, exist_ok=True)
+    if not util.is_dir() or util.is_symlink():
+        raise WindowsPipelineError("Chromium build/util is not a regular directory")
+    lastchange = util / "LASTCHANGE"
+    committime = util / "LASTCHANGE.committime"
+    for path in (lastchange, committime):
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise WindowsPipelineError(
+                f"Refusing unsafe Chromium revision metadata path: {path}"
+            )
+    lastchange.write_text(
+        f"LASTCHANGE={commit}-{commit_position}\n",
+        encoding="utf-8",
+    )
+    committime.write_text(f"{commit_timestamp}\n", encoding="utf-8")
+    result = _run(
+        [str(depot_python), str(timestamp_script), "default"],
+        cwd=source,
+        env=env,
+        timeout=120,
+        capture=True,
+    )
+    windows_build_timestamp = validate_chromium_timestamp(
+        (result.stdout or "").strip(), "Chromium Windows build timestamp"
+    )
+    if windows_build_timestamp > commit_timestamp:
+        raise WindowsPipelineError(
+            "Chromium Windows build timestamp is newer than its authoritative tag commit"
+        )
+    print(
+        "Materialized Chromium tag revision metadata and validated Windows "
+        f"/TIMESTAMP:{windows_build_timestamp}"
+    )
+    return windows_build_timestamp
+
+
 def install_source_declared_tools(
     source: Path,
     work_root: Path,
     depot_tools: Path,
     pins: Mapping[str, str],
     env: Mapping[str, str],
+    *,
+    tag_identity: ChromiumTagIdentity,
 ) -> tuple[
     Path,
     Path,
@@ -1690,6 +1900,7 @@ def install_source_declared_tools(
     tuple[CipdPackagePin, ...],
     str,
     tuple[GitDependencyPin, ...],
+    int,
 ]:
     cipd = depot_tools / "cipd.bat"
     gn_root = work_root / "gn"
@@ -1838,13 +2049,12 @@ def install_source_declared_tools(
         if not rc_exe.is_file():
             raise WindowsPipelineError("Chromium-pinned Windows rc download omitted rc.exe")
 
-    util = source / "build/util"
-    util.mkdir(parents=True, exist_ok=True)
-    (util / "LASTCHANGE").write_text(
-        "LASTCHANGE=0000000000000000000000000000000000000000-refs/heads/main@{#0}\n",
-        encoding="utf-8",
+    windows_build_timestamp = materialize_chromium_revision_metadata(
+        source,
+        depot_python,
+        env,
+        tag_identity,
     )
-    (util / "LASTCHANGE.committime").write_text("0\n", encoding="utf-8")
     return (
         gn,
         ninja,
@@ -1855,6 +2065,7 @@ def install_source_declared_tools(
         windows_cipd_pins,
         windows_git_tools_sha256,
         windows_git_pins,
+        windows_build_timestamp,
     )
 
 
@@ -1881,13 +2092,132 @@ def compute_port_config_sha256(repository_root: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_windows_linker_timestamp_text(
+    text: str, expected_timestamp: int, label: str
+) -> int:
+    expected_timestamp = validate_chromium_timestamp(
+        expected_timestamp, "expected Windows linker timestamp"
+    )
+    marker_count = text.lower().count("/timestamp:")
+    matches = re.findall(r"(?i)/TIMESTAMP:([^\s\"']{1,100})", text)
+    if len(matches) != marker_count:
+        raise WindowsPipelineError(
+            f"{label} contains a malformed Windows /TIMESTAMP token"
+        )
+    timestamps = set(matches)
+    if timestamps != {str(expected_timestamp)}:
+        rendered = sorted(value[:100] for value in timestamps)
+        raise WindowsPipelineError(
+            f"{label} does not contain only the validated Windows "
+            f"/TIMESTAMP:{expected_timestamp}; observed={rendered}"
+        )
+    return marker_count
+
+
+def validate_generated_chrome_linker_timestamp(
+    source: Path,
+    out: Path,
+    gn: Path,
+    env: Mapping[str, str],
+    expected_timestamp: int,
+) -> dict[str, int | str]:
+    expected_timestamp = validate_chromium_timestamp(
+        expected_timestamp, "expected generated Chrome linker timestamp"
+    )
+    dependency_result = _run(
+        [
+            str(gn),
+            "desc",
+            str(out),
+            "//chrome",
+            "deps",
+            "--type=executable",
+            "--as=label",
+            "--default-toolchain",
+        ],
+        cwd=source,
+        env=env,
+        timeout=600,
+        capture=True,
+    )
+    labels = sorted(
+        {
+            line.strip()
+            for line in (dependency_result.stdout or "").splitlines()
+            if line.strip()
+        }
+    )
+    if not labels or len(labels) > 32:
+        raise WindowsPipelineError(
+            "Chrome group has no bounded direct executable dependency set"
+        )
+    for label in labels:
+        if (
+            not GN_TARGET_LABEL_RE.fullmatch(label)
+            or ".." in label
+            or "//" in label[2:]
+        ):
+            raise WindowsPipelineError(
+                f"GN returned an unsafe Chrome executable dependency label: {label!r}"
+            )
+    chrome_outputs: list[tuple[str, str]] = []
+    for label in labels:
+        output_result = _run(
+            [str(gn), "desc", str(out), label, "outputs"],
+            cwd=source,
+            env=env,
+            timeout=600,
+            capture=True,
+        )
+        for raw_output in (output_result.stdout or "").splitlines():
+            output = raw_output.strip()
+            normalized = output.replace("\\", "/").lower()
+            if normalized == "chrome.exe" or normalized.endswith("/chrome.exe"):
+                chrome_outputs.append((label, output))
+    if len(chrome_outputs) != 1:
+        raise WindowsPipelineError(
+            "Could not resolve exactly one Chrome executable from the generated "
+            f"group dependencies: {chrome_outputs}"
+        )
+    chrome_label, chrome_output = chrome_outputs[0]
+    flags_result = _run(
+        [str(gn), "desc", str(out), chrome_label, "ldflags"],
+        cwd=source,
+        env=env,
+        timeout=600,
+        capture=True,
+    )
+    timestamp_occurrences = _validate_windows_linker_timestamp_text(
+        flags_result.stdout or "",
+        expected_timestamp,
+        f"generated linker flags for {chrome_label}",
+    )
+    stats = {
+        "chrome_executable_dependency_count": len(labels),
+        "chrome_executable_label": chrome_label,
+        "chrome_executable_output": chrome_output,
+        "timestamp_occurrences": timestamp_occurrences,
+        "windows_build_timestamp": expected_timestamp,
+    }
+    print(
+        "Resolved the generated Chrome executable without a target-name assumption "
+        f"({chrome_label} -> {chrome_output}) and validated "
+        f"/TIMESTAMP:{expected_timestamp}"
+    )
+    return stats
+
+
 def configure_gn(
     source: Path,
     gn: Path,
     env: Mapping[str, str],
     *,
+    windows_build_timestamp: int,
     evidence_dir: Path | None = None,
 ) -> Path:
+    windows_build_timestamp = validate_chromium_timestamp(
+        windows_build_timestamp, "expected Chromium Windows build timestamp"
+    )
     out = source / "out" / OUT_NAME
     out.mkdir(parents=True, exist_ok=True)
     args_gn = out / "args.gn"
@@ -1922,11 +2252,18 @@ def configure_gn(
         if not (result.stdout or "").strip():
             raise WindowsPipelineError(f"GN graph lacks required target {label}")
         queries[label] = result.stdout
+    timestamp_stats = validate_generated_chrome_linker_timestamp(
+        source, out, gn, env, windows_build_timestamp
+    )
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args_gn, evidence_dir / "args.gn")
         (evidence_dir / "gn-targets.json").write_text(
             json.dumps(queries, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        (evidence_dir / "windows-linker-timestamp.json").write_text(
+            json.dumps(timestamp_stats, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
     return out
 
@@ -1962,6 +2299,20 @@ def read_prepared_state(work_root: Path) -> PreparedState:
         raise WindowsPipelineError(f"Unsupported prepared state schema: {state.schema}")
     validate_version(state.version)
     validate_sha256(state.source_sha256, "prepared source SHA-256")
+    validate_sha1(state.chromium_commit, "prepared Chromium tag commit")
+    validate_chromium_commit_position(
+        state.chromium_commit_position, "prepared Chromium tag commit position"
+    )
+    chromium_commit_timestamp = validate_chromium_timestamp(
+        state.chromium_commit_timestamp, "prepared Chromium tag commit timestamp"
+    )
+    windows_build_timestamp = validate_chromium_timestamp(
+        state.windows_build_timestamp, "prepared Chromium Windows build timestamp"
+    )
+    if windows_build_timestamp > chromium_commit_timestamp:
+        raise WindowsPipelineError(
+            "Prepared Chromium Windows build timestamp is newer than the tag commit"
+        )
     validate_sha256(
         state.windows_cipd_tools_sha256,
         "prepared Windows CIPD tool descriptor SHA-256",
@@ -1974,6 +2325,10 @@ def read_prepared_state(work_root: Path) -> PreparedState:
         state.windows_git_tools_sha256,
         "prepared Windows Git tool descriptor SHA-256",
     )
+    if state.port_config_hash_schema != PORT_CONFIG_HASH_SCHEMA:
+        raise WindowsPipelineError(
+            "Prepared port configuration hash schema is incompatible"
+        )
     validate_sha256(state.port_config_sha256, "prepared port configuration SHA-256")
     bounded_int(
         state.checkpoint_no_progress_streak,
@@ -2216,13 +2571,17 @@ def validate_release_bundle(
     if checksum.read_text(encoding="utf-8") != f"{package_sha}  {package.name}\n":
         raise WindowsPipelineError("Release checksum sidecar is malformed or inconsistent")
     fields = _parse_release_manifest(manifest_path)
+    tag_identity = fetch_gitiles_tag_identity(version)
     exact = {
-        "manifest_schema": "4",
+        "manifest_schema": "5",
         "version": version,
         "target_cpu": "x86",
         "target_os": "win",
         "source_tarball": source_download_url(version),
         "package_sha256": package_sha,
+        "chromium_commit": tag_identity.commit,
+        "chromium_commit_position": tag_identity.commit_position,
+        "chromium_commit_timestamp": str(tag_identity.timestamp),
         "github_sha": expected_sha,
         "github_run_id": expected_run_id,
         "port_config_hash_schema": str(PORT_CONFIG_HASH_SCHEMA),
@@ -2232,6 +2591,14 @@ def validate_release_bundle(
     if mismatches:
         raise WindowsPipelineError(
             "Release manifest failed exact provenance fields: " + ", ".join(mismatches)
+        )
+    windows_build_timestamp = validate_chromium_timestamp(
+        fields.get("windows_build_timestamp", ""),
+        "manifest Chromium Windows build timestamp",
+    )
+    if windows_build_timestamp > tag_identity.timestamp:
+        raise WindowsPipelineError(
+            "Manifest Chromium Windows build timestamp is newer than the tag commit"
         )
     for key in (
         "source_tar_sha256",
@@ -2286,6 +2653,10 @@ def _checkpoint_manifest_matches_state(
         "output_root": OUT_NAME,
         "version": state.version,
         "source_sha256": state.source_sha256,
+        "chromium_commit": state.chromium_commit,
+        "chromium_commit_position": state.chromium_commit_position,
+        "chromium_commit_timestamp": state.chromium_commit_timestamp,
+        "windows_build_timestamp": state.windows_build_timestamp,
         "depot_tools_revision": state.depot_tools_revision,
         "gn_version": state.gn_version,
         "ninja_package": state.ninja_package,
@@ -2554,6 +2925,10 @@ def create_checkpoint(
         "output_root": OUT_NAME,
         "version": state.version,
         "source_sha256": state.source_sha256,
+        "chromium_commit": state.chromium_commit,
+        "chromium_commit_position": state.chromium_commit_position,
+        "chromium_commit_timestamp": state.chromium_commit_timestamp,
+        "windows_build_timestamp": state.windows_build_timestamp,
         "depot_tools_revision": state.depot_tools_revision,
         "gn_version": state.gn_version,
         "ninja_package": state.ninja_package,
@@ -2618,6 +2993,7 @@ def prepare_pipeline(
     source, source_sha = prepare_source(
         version, work_root=work_root, cache_dir=cache_dir
     )
+    tag_identity = fetch_gitiles_tag_identity(version)
     requirements = verify_windows_x86_source_contract(source)
     visual_studio, visual_studio_version = resolve_visual_studio(requirements)
     _kits, sdk_servicing = ensure_windows_sdk(requirements)
@@ -2642,14 +3018,24 @@ def prepare_pipeline(
         windows_cipd_pins,
         windows_git_tools_sha256,
         windows_git_pins,
+        windows_build_timestamp,
     ) = install_source_declared_tools(
-        source, work_root, depot_tools, pins, env
+        source,
+        work_root,
+        depot_tools,
+        pins,
+        env,
+        tag_identity=tag_identity,
     )
     port_hash = compute_port_config_sha256(repository_root)
     state = PreparedState(
         schema=PREPARED_STATE_SCHEMA,
         version=version,
         source_sha256=source_sha,
+        chromium_commit=tag_identity.commit,
+        chromium_commit_position=tag_identity.commit_position,
+        chromium_commit_timestamp=tag_identity.timestamp,
+        windows_build_timestamp=windows_build_timestamp,
         depot_tools_revision=pins["depot_tools_revision"],
         gn_version=pins["gn_version"],
         ninja_package=pins["ninja_package"],
@@ -2695,7 +3081,13 @@ def prepare_pipeline(
             )
             write_prepared_state(work_root, state)
 
-    out = configure_gn(source, gn, env, evidence_dir=evidence_dir)
+    out = configure_gn(
+        source,
+        gn,
+        env,
+        windows_build_timestamp=windows_build_timestamp,
+        evidence_dir=evidence_dir,
+    )
     _run(
         [
             str(ninja),
@@ -2721,6 +3113,18 @@ def prepare_pipeline(
         )
         (evidence_dir / "prepared-state.json").write_text(
             json.dumps(asdict(state), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (evidence_dir / "chromium-tag-identity.json").write_text(
+            json.dumps(
+                {
+                    **asdict(tag_identity),
+                    "windows_build_timestamp": windows_build_timestamp,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
         (evidence_dir / "windows-gcs-tools.json").write_text(
@@ -3020,12 +3424,16 @@ def package_build(
         raise WindowsPipelineError("GITHUB_RUN_ID is missing or malformed during packaging")
     packaged_files = _zip_member_names(package)
     fields = (
-        ("manifest_schema", "4"),
+        ("manifest_schema", "5"),
         ("version", version),
         ("target_cpu", "x86"),
         ("target_os", "win"),
         ("source_tarball", source_download_url(version)),
         ("source_tar_sha256", state.source_sha256),
+        ("chromium_commit", state.chromium_commit),
+        ("chromium_commit_position", state.chromium_commit_position),
+        ("chromium_commit_timestamp", str(state.chromium_commit_timestamp)),
+        ("windows_build_timestamp", str(state.windows_build_timestamp)),
         ("package_sha256", package_sha),
         ("github_sha", github_sha),
         ("github_run_id", run_id),

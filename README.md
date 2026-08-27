@@ -88,6 +88,7 @@ Chrome Windows stable feed
           ▼
 Windows compatibility preflight
   ├─ verify the exact GCS source object and Gitiles-critical files
+  ├─ bind the Gitiles tag commit/position/time and preflight Chromium's PE timestamp
   ├─ prove upstream still declares target_os="win" / target_cpu="x86"
   ├─ derive Visual Studio + SDK requirements from build/vs_toolchain.py
   ├─ install a missing Microsoft.WindowsSDK.<family> package, including x86 libs
@@ -106,7 +107,7 @@ Resumable Windows staged build
   ├─ stop only the exact Ninja process tree on timeout/stall
   ├─ preserve out/Release_x86_win with PAX/subsecond metadata
   ├─ accept checkpoints only from the same repo/ref/SHA/version/stage/toolchain,
-  │  including canonical GCS, CIPD, and Git host-tool descriptor hashes
+  │  including tag/linker timestamps and canonical host-tool descriptor hashes
   └─ retain two generations and retry only runner/environment failures
           │
           ▼
