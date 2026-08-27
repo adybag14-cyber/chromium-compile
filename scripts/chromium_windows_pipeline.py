@@ -1512,6 +1512,40 @@ def install_windows_cipd_tools(
         raise WindowsPipelineError(
             "Chromium-pinned DevTools rollup libraries package is empty"
         )
+    devtools_root = source / "third_party/devtools-frontend/src"
+    sync_rollup = devtools_root / "scripts/deps/sync_rollup_libs.py"
+    if not sync_rollup.is_file() or sync_rollup.is_symlink():
+        raise WindowsPipelineError(
+            "Pinned DevTools source omitted scripts/deps/sync_rollup_libs.py"
+        )
+    depot_python = _depot_python(depot_tools)
+    _run(
+        [str(depot_python), str(sync_rollup)],
+        cwd=devtools_root,
+        env=env,
+        timeout=300,
+    )
+    rollup_native_package = (
+        devtools_root
+        / "node_modules/@rollup/rollup-win32-x64-msvc/package.json"
+    )
+    rollup_cli = devtools_root / "node_modules/rollup/dist/bin/rollup"
+    node = source / "third_party/node/win/node.exe"
+    for path, label in (
+        (rollup_native_package, "materialized native Rollup package"),
+        (rollup_cli, "DevTools Rollup CLI"),
+        (node, "Windows Node executable"),
+    ):
+        if not path.is_file() or path.is_symlink():
+            raise WindowsPipelineError(
+                f"DevTools Rollup runtime integration omitted {label}: {path}"
+            )
+    _run(
+        [str(node), str(rollup_cli), "--version"],
+        cwd=devtools_root,
+        env=env,
+        timeout=120,
+    )
     print(
         "Validated source-declared Windows CIPD tool descriptors: "
         f"SHA-256 {descriptor_sha}"
