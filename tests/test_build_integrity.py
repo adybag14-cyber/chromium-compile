@@ -38,6 +38,7 @@ vars = {
   'gn_version': 'git_revision:0123456789abcdef0123456789abcdef01234567',
   'ninja_package': 'infra/3pp/tools/ninja/',
   'ninja_version': 'version:3@1.12.1.chromium.4',
+  'cpython3_version': 'version:3@3.11.9.chromium.38',
 }
 
 deps = {
@@ -55,6 +56,7 @@ deps = {
                     "depot_tools_revision": "0123456789abcdef0123456789abcdef01234567",
                     "ninja_package": "infra/3pp/tools/ninja/",
                     "ninja_version": "version:3@1.12.1.chromium.4",
+                    "cpython3_version": "version:3@3.11.9.chromium.38",
                 },
             )
 

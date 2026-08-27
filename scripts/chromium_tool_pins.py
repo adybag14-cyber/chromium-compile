@@ -10,6 +10,9 @@ from pathlib import Path
 GN_RE = re.compile(r'[\'"]gn_version[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]')
 NINJA_PACKAGE_RE = re.compile(r'[\'"]ninja_package[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]')
 NINJA_VERSION_RE = re.compile(r'[\'"]ninja_version[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]')
+CPYTHON3_VERSION_RE = re.compile(
+    r'[\'"]cpython3_version[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]'
+)
 DEPOT_RE = re.compile(
     r"""
     [\'"]src/third_party/depot_tools[\'"]\s*:\s*
@@ -28,6 +31,7 @@ def resolve_pins(path: Path) -> dict[str, str]:
     gn = GN_RE.search(text)
     ninja_package = NINJA_PACKAGE_RE.search(text)
     ninja_version = NINJA_VERSION_RE.search(text)
+    cpython3_version = CPYTHON3_VERSION_RE.search(text)
     depot = DEPOT_RE.search(text)
     if not gn:
         raise ValueError(f"Could not resolve gn_version from {path}")
@@ -35,6 +39,8 @@ def resolve_pins(path: Path) -> dict[str, str]:
         raise ValueError(f"Could not resolve depot_tools revision from {path}")
     if not ninja_package or not ninja_version:
         raise ValueError(f"Could not resolve Ninja CIPD pin from {path}")
+    if not cpython3_version:
+        raise ValueError(f"Could not resolve CPython 3 CIPD pin from {path}")
     gn_version = gn.group(1)
     if not re.fullmatch(r"git_revision:[0-9a-f]{40}", gn_version):
         raise ValueError(f"Unsupported or mutable gn_version in {path}: {gn_version!r}")
@@ -48,11 +54,20 @@ def resolve_pins(path: Path) -> dict[str, str]:
         raise ValueError(
             f"Unsupported or mutable ninja_version in {path}: {resolved_ninja_version!r}"
         )
+    resolved_cpython3_version = cpython3_version.group(1)
+    if not re.fullmatch(
+        r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+", resolved_cpython3_version
+    ):
+        raise ValueError(
+            f"Unsupported or mutable cpython3_version in {path}: "
+            f"{resolved_cpython3_version!r}"
+        )
     return {
         "gn_version": gn_version,
         "depot_tools_revision": depot.group(1),
         "ninja_package": resolved_ninja_package,
         "ninja_version": resolved_ninja_version,
+        "cpython3_version": resolved_cpython3_version,
     }
 
 
@@ -66,6 +81,7 @@ def main() -> int:
             "depot_tools_revision",
             "ninja_package",
             "ninja_version",
+            "cpython3_version",
         ),
     )
     args = parser.parse_args()

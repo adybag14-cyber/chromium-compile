@@ -180,6 +180,7 @@ class PreparedState:
     gn_version: str
     ninja_package: str
     ninja_version: str
+    cpython3_version: str
     clang_revision: str
     sdk_family: str
     sdk_servicing: str
@@ -1105,6 +1106,40 @@ def install_source_declared_tools(
         raise WindowsPipelineError("Chromium-pinned Ninja CIPD install omitted ninja.exe")
     _run([str(ninja), "--version"], env=env, timeout=60)
 
+    cpython_root = work_root / "cpython3-host"
+    cpython_root.mkdir(exist_ok=True)
+    _run(
+        [
+            "cmd.exe",
+            "/d",
+            "/c",
+            "call",
+            str(cipd),
+            "install",
+            "infra/3pp/tools/cpython3/windows-amd64",
+            pins["cpython3_version"],
+            "-root",
+            str(cpython_root),
+            "-log-level",
+            "warning",
+        ],
+        env=env,
+        timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS,
+    )
+    cpython_executable = cpython_root / "bin/python3.exe"
+    if not cpython_executable.is_file():
+        raise WindowsPipelineError(
+            "Chromium-pinned CPython CIPD install omitted bin/python3.exe"
+        )
+    _run([str(cpython_executable), "--version"], env=env, timeout=60)
+    cpython_target = source / "third_party/cpython3/host"
+    cpython_target.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(cpython_root, cpython_target, dirs_exist_ok=True)
+    if not (cpython_target / "bin/python3.exe").is_file():
+        raise InfrastructureError(
+            "Could not materialize source-declared CPython at Chromium's GN path"
+        )
+
     depot_python = _depot_python(depot_tools)
     _run(
         [str(depot_python), str(source / "tools/clang/scripts/update.py")],
@@ -1526,6 +1561,11 @@ def validate_release_bundle(
         r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+", fields.get("ninja_version", "")
     ):
         raise WindowsPipelineError("Release manifest Ninja CIPD pin is absent or mutable")
+    if not re.fullmatch(
+        r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+",
+        fields.get("cpython3_version", ""),
+    ):
+        raise WindowsPipelineError("Release manifest CPython 3 CIPD pin is absent or mutable")
     if not re.fullmatch(r"10\.0\.[0-9]{4,6}\.0", fields.get("windows_sdk_family", "")):
         raise WindowsPipelineError("Release manifest Windows SDK family is malformed")
     stats = validate_release_zip(package, version)
@@ -1562,6 +1602,7 @@ def _checkpoint_manifest_matches_state(
         "gn_version": state.gn_version,
         "ninja_package": state.ninja_package,
         "ninja_version": state.ninja_version,
+        "cpython3_version": state.cpython3_version,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "visual_studio_year": state.visual_studio_year,
@@ -1826,6 +1867,7 @@ def create_checkpoint(
         "gn_version": state.gn_version,
         "ninja_package": state.ninja_package,
         "ninja_version": state.ninja_version,
+        "cpython3_version": state.cpython3_version,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "sdk_servicing": state.sdk_servicing,
@@ -1908,6 +1950,7 @@ def prepare_pipeline(
         gn_version=pins["gn_version"],
         ninja_package=pins["ninja_package"],
         ninja_version=pins["ninja_version"],
+        cpython3_version=pins["cpython3_version"],
         clang_revision=clang_revision,
         sdk_family=requirements.sdk_family,
         sdk_servicing=sdk_servicing,
@@ -2225,6 +2268,7 @@ def package_build(
         ("gn_version", state.gn_version),
         ("ninja_package", state.ninja_package),
         ("ninja_version", state.ninja_version),
+        ("cpython3_version", state.cpython3_version),
         ("depot_tools_revision", state.depot_tools_revision),
         ("windows_sdk_family", state.sdk_family),
         ("windows_sdk_servicing", state.sdk_servicing),

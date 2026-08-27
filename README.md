@@ -92,7 +92,7 @@ Windows compatibility preflight
   ├─ derive Visual Studio + SDK requirements from build/vs_toolchain.py
   ├─ install a missing Microsoft.WindowsSDK.<family> package, including x86 libs
   │  and Windows Desktop Debuggers
-  ├─ install Chromium-pinned depot_tools, GN, Ninja, Clang, and rc.exe
+  ├─ install Chromium-pinned depot_tools, GN, Ninja, CPython, Clang, and rc.exe
   └─ generate/query the chrome and mini_installer GN targets
           │
           ▼
