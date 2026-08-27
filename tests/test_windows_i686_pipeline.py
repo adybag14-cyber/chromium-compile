@@ -4,6 +4,8 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import urllib.error
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).parents[1]
 PATH = ROOT / "scripts" / "chromium_windows_pipeline.py"
@@ -17,6 +19,37 @@ SPEC.loader.exec_module(pipeline)
 
 
 class WindowsI686PipelineTests(unittest.TestCase):
+    def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return "https://chromium.googlesource.com/chromium/src/+show/refs/tags/153.0.8010.12/docs/windows_build_instructions.md?format=TEXT"
+
+            def read(self, _limit):
+                import base64
+
+                return base64.b64encode(b"proof")
+
+        transient = urllib.error.HTTPError(
+            "https://chromium.googlesource.com/", 400, "transient", {}, None
+        )
+        with mock.patch.object(
+            pipeline.urllib.request, "urlopen", side_effect=[transient, Response()]
+        ) as opener, mock.patch.object(pipeline.time, "sleep") as sleep:
+            self.assertEqual(
+                pipeline._fetch_gitiles_bytes(
+                    "153.0.8010.12", "docs/windows_build_instructions.md"
+                ),
+                b"proof",
+            )
+        self.assertIn("/+show/refs/tags/", opener.call_args.args[0].full_url)
+        sleep.assert_called_once_with(1)
+
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
         vs_toolchain = """
 TOOLCHAIN_HASH = 'abc'

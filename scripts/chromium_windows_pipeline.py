@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -433,18 +434,43 @@ def _write_source_stats(
 def _fetch_gitiles_bytes(version: str, relative: str) -> bytes:
     quoted = "/".join(urllib.parse.quote(part, safe="") for part in relative.split("/"))
     url = (
-        f"https://{GITILES_HOST}/chromium/src/+/refs/tags/{version}/{quoted}?format=TEXT"
+        f"https://{GITILES_HOST}/chromium/src/+show/refs/tags/{version}/{quoted}?format=TEXT"
     )
     request = urllib.request.Request(url, headers={"User-Agent": "chromium-windows-i686/1"})
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            effective = response.geturl()
-            validate_effective_https_host(effective, GITILES_HOST)
-            encoded = response.read(64 * 1024 * 1024 + 1)
-    except Exception as exc:  # noqa: BLE001 - retain transport context.
+    last_error: BaseException | None = None
+    encoded = b""
+    for attempt in range(1, 6):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                effective = response.geturl()
+                validate_effective_https_host(effective, GITILES_HOST)
+                encoded = response.read(64 * 1024 * 1024 + 1)
+            last_error = None
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise WindowsPipelineError(
+                    f"Authoritative Chromium tag {version} lacks critical file {relative}"
+                ) from exc
+            last_error = exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+        except ValueError:
+            # A redirect outside the trusted Gitiles host is deterministic and
+            # must never be retried against the untrusted endpoint.
+            raise
+        if attempt < 5:
+            delay = min(2 ** (attempt - 1), 8)
+            print(
+                f"::warning::Gitiles proof fetch for {relative} failed on attempt "
+                f"{attempt}/5 ({last_error}); retrying in {delay}s"
+            )
+            time.sleep(delay)
+    if last_error is not None:
         raise InfrastructureError(
-            f"Could not fetch authoritative Chromium {version} {relative}: {exc}"
-        ) from exc
+            f"Could not fetch authoritative Chromium {version} {relative} after bounded retries: "
+            f"{last_error}"
+        ) from last_error
     if len(encoded) > 64 * 1024 * 1024:
         raise WindowsPipelineError(f"Gitiles proof unexpectedly exceeds 64 MiB: {relative}")
     try:
