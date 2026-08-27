@@ -35,6 +35,11 @@ REQUIRED_BASENAMES = frozenset(
         "mini_installer.exe",
     )
 )
+WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 class WindowsRuntimeError(RuntimeError):
@@ -70,6 +75,13 @@ def _safe_member_name(name: str, *, expected_root: str | None = None) -> str:
         raise WindowsRuntimeError(f"Unsafe archive member path: {name!r}")
     if re.match(r"^[A-Za-z]:", path.as_posix()):
         raise WindowsRuntimeError(f"Drive-qualified archive member path: {name!r}")
+    for part in path.parts:
+        if any(ord(character) < 32 for character in part):
+            raise WindowsRuntimeError(f"Control character in archive member path: {name!r}")
+        if ":" in part or part.endswith((" ", ".")):
+            raise WindowsRuntimeError(f"Windows-ambiguous archive member path: {name!r}")
+        if part.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+            raise WindowsRuntimeError(f"Windows device-name archive member path: {name!r}")
     normal = path.as_posix()
     if normal in {"", "."}:
         raise WindowsRuntimeError(f"Empty archive member path: {name!r}")
@@ -146,6 +158,7 @@ def validate_release_zip(
         raise WindowsRuntimeError(f"Release ZIP is not a regular file: {path}")
 
     seen: set[str] = set()
+    seen_casefold: set[str] = set()
     basenames: set[str] = set()
     locale_present = False
     pe_count = 0
@@ -163,7 +176,13 @@ def validate_release_zip(
             name = _safe_member_name(info.filename, expected_root=expected_root)
             if name in seen:
                 raise WindowsRuntimeError(f"Duplicate release ZIP member: {name}")
+            folded = name.casefold()
+            if folded in seen_casefold:
+                raise WindowsRuntimeError(
+                    f"Case-insensitive duplicate release ZIP member: {name}"
+                )
             seen.add(name)
+            seen_casefold.add(folded)
             if info.flag_bits & 0x1:
                 raise WindowsRuntimeError(f"Encrypted release ZIP member is forbidden: {name}")
             if _zip_member_is_link(info):
@@ -285,6 +304,7 @@ def list_7z_runtime(
     if not records:
         raise WindowsRuntimeError("Chromium runtime 7z listing is empty")
     seen: set[str] = set()
+    seen_casefold: set[str] = set()
     unpacked = 0
     for index, record in enumerate(records, 1):
         if index > max_members:
@@ -292,7 +312,15 @@ def list_7z_runtime(
         name = _safe_member_name(record["Path"])
         if name in seen:
             raise WindowsRuntimeError(f"Duplicate runtime 7z member: {name}")
+        folded = name.casefold()
+        if folded in seen_casefold:
+            raise WindowsRuntimeError(
+                f"Case-insensitive duplicate runtime 7z member: {name}"
+            )
         seen.add(name)
+        seen_casefold.add(folded)
+        if record.get("Anti", "-") not in {"", "-"}:
+            raise WindowsRuntimeError(f"Runtime 7z contains an anti-item: {name}")
         if any(key in record for key in ("Symbolic Link", "Hard Link", "Alternate Stream")):
             raise WindowsRuntimeError(f"Runtime 7z contains a link/stream member: {name}")
         raw_size = record.get("Size", "0")

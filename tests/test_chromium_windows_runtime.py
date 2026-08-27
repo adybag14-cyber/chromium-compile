@@ -103,9 +103,29 @@ class WindowsRuntimeTests(unittest.TestCase):
         self.assertEqual(records[0]["Size"], "7")
 
     def test_safe_member_rejects_windows_drive_and_backslash(self):
-        for value in ("C:/escape.exe", "folder\\escape.exe", "/escape.exe"):
+        for value in (
+            "C:/escape.exe",
+            "folder\\escape.exe",
+            "/escape.exe",
+            "folder/NUL.txt",
+            "folder/trailing. ",
+            "folder/file.txt:stream",
+        ):
             with self.subTest(value=value), self.assertRaises(runtime.WindowsRuntimeError):
                 runtime._safe_member_name(value)
+
+    def test_release_zip_rejects_case_insensitive_collisions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive = pathlib.Path(temp) / "release.zip"
+            root = runtime.release_root(VERSION)
+            self._write_release(
+                archive,
+                extra={f"{root}/Chrome-bin/{VERSION}/CHROME.DLL": pe_bytes()},
+            )
+            with self.assertRaisesRegex(
+                runtime.WindowsRuntimeError, "Case-insensitive duplicate"
+            ):
+                runtime.validate_release_zip(archive, VERSION)
 
 
 if __name__ == "__main__":
