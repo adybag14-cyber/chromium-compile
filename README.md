@@ -95,6 +95,7 @@ Windows compatibility preflight
   ├─ install Chromium-pinned depot_tools, GN, Ninja, CPython, Clang, and rc.exe
   ├─ generation/size/SHA-pin DEPS clang-format, Node, Rust, and libclang objects
   ├─ install exact DEPS TypeScript, DevTools esbuild, and rollup CIPD packages
+  ├─ run DevTools' pinned Rollup sync hook and execute its native CLI probe
   ├─ fetch exact Windows gperf, DirectX, WebAuthn, and Perl Git revisions
   ├─ reject unsafe, linked, oversized, duplicate, or Windows-aliasing tool archives
   └─ generate/query and dry-run the complete chrome + mini_installer Ninja graph
