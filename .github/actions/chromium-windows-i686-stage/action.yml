@@ -1,0 +1,351 @@
+name: Chromium Windows i686 staged build attempt
+description: Runs one resumable Chromium Windows x86 compiler slice with trusted checkpoints.
+inputs:
+  stage:
+    description: Stage number.
+    required: true
+  attempt:
+    description: Attempt label, such as primary or recovery-1.
+    required: true
+  version:
+    description: Exact Chromium version.
+    required: true
+  lineage-sha:
+    description: Immutable workflow/build lineage SHA.
+    required: true
+  expected-ref:
+    description: Trusted checkpoint producer branch.
+    required: true
+  preferred-checkpoint-run-id:
+    description: Run ID containing a same-stage partial checkpoint.
+    required: false
+    default: ""
+  fallback-checkpoint-run-id:
+    description: Run ID containing the previous completed stage checkpoint.
+    required: false
+    default: ""
+  final-stage:
+    description: Fail after checkpointing if this is the final allowed incomplete stage.
+    required: false
+    default: "false"
+outputs:
+  complete:
+    description: Whether Chromium and mini_installer completed.
+    value: ${{ steps.compile.outputs.complete }}
+  failure_class:
+    description: deterministic_build, runtime_environment, or infrastructure.
+    value: ${{ steps.final_recovery_upload_failure.outputs.failure_class || steps.checkpoint_upload_failure.outputs.failure_class || steps.compile.outputs.failure_class || steps.prepare.outputs.failure_class || steps.package.outputs.failure_class || steps.checkpoint.outputs.failure_class || steps.final_recovery.outputs.failure_class || steps.select_root.outputs.failure_class }}
+
+runs:
+  using: composite
+  steps:
+    - name: Mark Windows job start
+      id: job_start
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        "CHROMIUM_WINDOWS_JOB_STARTED_AT=$started" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Select short high-capacity Windows build root
+      id: select_root
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        & python scripts/chromium_windows_pipeline.py select-root --minimum-free-gib 70
+        $status = $LASTEXITCODE
+        if ($status -ne 0) {
+          $failureClass = if ($status -eq 75) { 'infrastructure' } else { 'deterministic_build' }
+          "failure_class=$failureClass" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          exit $status
+        }
+
+    - name: Log initial Windows runner capacity
+      shell: pwsh
+      run: |
+        Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, OSArchitecture | Format-List
+        Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free, Root | Format-Table -AutoSize
+        Get-ComputerInfo -Property CsTotalPhysicalMemory,CsNumberOfLogicalProcessors | Format-List
+
+    - name: Resolve authoritative Chromium source cache identity
+      id: source_cache_identity
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $metadata = Join-Path $env:RUNNER_TEMP 'chromium-windows-source-object.json'
+        $cacheKey = & python scripts/chromium_source_object.py `
+          --version '${{ inputs.version }}' `
+          --metadata-out $metadata `
+          --cache-key-only
+        if ($LASTEXITCODE -eq 0 -and $cacheKey) {
+          "resolved=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "cache_key=$($cacheKey.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        } else {
+          Write-Warning 'Source cache identity could not be resolved; source preparation retains its own bounded retries.'
+          "resolved=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "cache_key=" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        }
+
+    - name: Restore exact Chromium source object cache
+      id: source_cache
+      if: ${{ steps.source_cache_identity.outputs.resolved == 'true' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      continue-on-error: true
+      with:
+        path: ${{ github.workspace }}/.chromium-source-cache
+        key: ${{ steps.source_cache_identity.outputs.cache_key }}
+
+    - name: Prepare source, exact Windows toolchain, checkpoint, and GN graph
+      id: prepare
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_STAGE: ${{ inputs.stage }}
+        INPUT_EXPECTED_REF: ${{ inputs.expected-ref }}
+        INPUT_LINEAGE_SHA: ${{ inputs.lineage-sha }}
+        INPUT_PREFERRED_RUN_ID: ${{ inputs.preferred-checkpoint-run-id }}
+        INPUT_FALLBACK_RUN_ID: ${{ inputs.fallback-checkpoint-run-id }}
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $cache = Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache'
+        & python scripts/chromium_windows_pipeline.py prepare `
+          --version $env:INPUT_VERSION `
+          --work-root $env:CHROMIUM_WINDOWS_ROOT `
+          --cache-dir $cache `
+          --repository-root $env:GITHUB_WORKSPACE `
+          --stage $env:INPUT_STAGE `
+          --repository $env:GITHUB_REPOSITORY `
+          --expected-ref $env:INPUT_EXPECTED_REF `
+          --expected-sha $env:INPUT_LINEAGE_SHA `
+          --preferred-run-id "$env:INPUT_PREFERRED_RUN_ID" `
+          --fallback-run-id "$env:INPUT_FALLBACK_RUN_ID"
+        $status = $LASTEXITCODE
+        if ($status -ne 0) {
+          $failureClass = if ($status -eq 75) { 'infrastructure' } else { 'deterministic_build' }
+          "failure_class=$failureClass" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          exit $status
+        }
+
+    - name: Resolve prepared source cache identity
+      id: prepared_source_cache_identity
+      if: ${{ always() && steps.prepare.outcome == 'success' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $metadata = Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache/chromium-${{ inputs.version }}.source-object.json'
+        if (-not (Test-Path -LiteralPath $metadata -PathType Leaf)) {
+          Write-Warning 'Prepared source metadata is unavailable; skipping cache save.'
+          "cache_key=" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          exit 0
+        }
+        $cacheKey = & python scripts/chromium_source_object.py `
+          --version '${{ inputs.version }}' `
+          --metadata-in $metadata `
+          --cache-key-only
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        "cache_key=$($cacheKey.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Save exact Chromium source object cache
+      if: >-
+        ${{
+          always() &&
+          steps.prepare.outcome == 'success' &&
+          steps.prepared_source_cache_identity.outputs.cache_key != '' &&
+          steps.source_cache.outputs.cache-hit != 'true'
+        }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      continue-on-error: true
+      with:
+        path: ${{ github.workspace }}/.chromium-source-cache
+        key: ${{ steps.prepared_source_cache_identity.outputs.cache_key }}
+
+    - name: Remove expendable source archive after cache handoff
+      if: ${{ steps.prepare.outcome == 'success' }}
+      shell: pwsh
+      run: |
+        & python scripts/chromium_windows_pipeline.py cleanup-source-archive `
+          --cache-dir (Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache') `
+          --version '${{ inputs.version }}'
+
+    - name: Log Windows storage before compile
+      if: ${{ steps.prepare.outcome == 'success' }}
+      shell: pwsh
+      run: Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free, Root | Format-Table -AutoSize
+
+    - name: Compile until bounded checkpoint
+      id: compile
+      if: ${{ steps.prepare.outcome == 'success' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $resultFile = Join-Path $env:CHROMIUM_WINDOWS_ROOT 'build-result.json'
+        & python scripts/chromium_windows_pipeline.py build `
+          --work-root $env:CHROMIUM_WINDOWS_ROOT `
+          --result-file $resultFile `
+          --job-started-at $env:CHROMIUM_WINDOWS_JOB_STARTED_AT `
+          --checkpoint-minutes '${{ env.JOB_CHECKPOINT_MINUTES }}' `
+          --stall-minutes '${{ env.CHROMIUM_WINDOWS_I686_NINJA_STALL_MINUTES }}' `
+          --jobs '${{ env.CHROMIUM_WINDOWS_I686_JOBS }}'
+        $status = $LASTEXITCODE
+        if (Test-Path -LiteralPath $resultFile -PathType Leaf) {
+          $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
+          "complete=$($result.complete.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "failure_class=$($result.failure_class)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "no_progress_streak=$($result.no_progress_streak)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        } else {
+          $failureClass = if ($status -eq 75) { 'infrastructure' } else { 'deterministic_build' }
+          "complete=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "failure_class=$failureClass" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "no_progress_streak=0" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        }
+        exit $status
+
+    - name: Log Windows storage after compile
+      if: ${{ always() }}
+      shell: pwsh
+      run: Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free, Root | Format-Table -AutoSize
+
+    - name: Create stable Windows stage checkpoint
+      id: checkpoint
+      if: ${{ always() && steps.prepare.outcome == 'success' && steps.compile.outputs.complete != 'true' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $destination = Join-Path $env:GITHUB_WORKSPACE 'checkpoints-windows'
+        & python scripts/chromium_windows_pipeline.py checkpoint `
+          --work-root $env:CHROMIUM_WINDOWS_ROOT `
+          --repository-root $env:GITHUB_WORKSPACE `
+          --destination $destination `
+          --stage '${{ inputs.stage }}' `
+          --no-progress-streak '${{ steps.compile.outputs.no_progress_streak || steps.prepare.outputs.checkpoint_no_progress_streak || '0' }}'
+        $status = $LASTEXITCODE
+        if ($status -ne 0) {
+          $failureClass = if ($status -eq 75) { 'infrastructure' } else { 'deterministic_build' }
+          "failure_class=$failureClass" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          exit $status
+        }
+
+    - name: Upload stable Windows stage checkpoint
+      id: checkpoint_upload
+      if: ${{ always() && steps.checkpoint.outcome == 'success' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: chromium-windows-i686-out-stage-${{ inputs.stage }}
+        path: |
+          ${{ github.workspace }}/checkpoints-windows/out-Release_x86_win.tar.zst
+          ${{ github.workspace }}/checkpoints-windows/out-Release_x86_win.tar.zst.sha256
+          ${{ github.workspace }}/checkpoints-windows/checkpoint-manifest.json
+        retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+        compression-level: 0
+        overwrite: true
+        if-no-files-found: error
+
+    - name: Classify checkpoint upload failure
+      id: checkpoint_upload_failure
+      if: ${{ always() && steps.checkpoint.outcome == 'success' && steps.checkpoint_upload.outcome == 'failure' }}
+      shell: pwsh
+      run: |
+        "failure_class=infrastructure" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Package and smoke-test Windows i686 runtime
+      id: package
+      if: ${{ steps.compile.outputs.complete == 'true' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        & python scripts/chromium_windows_pipeline.py package `
+          --version '${{ inputs.version }}' `
+          --work-root $env:CHROMIUM_WINDOWS_ROOT `
+          --repository-root $env:GITHUB_WORKSPACE `
+          --destination $env:GITHUB_WORKSPACE `
+          --smoke-timeout-seconds 120
+        $status = $LASTEXITCODE
+        if ($status -ne 0) {
+          $failureClass = if ($status -eq 75) { 'infrastructure' } else { 'deterministic_build' }
+          "failure_class=$failureClass" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          exit $status
+        }
+
+    - name: Upload Windows i686 build artifact
+      id: build_artifact
+      if: ${{ success() && steps.compile.outputs.complete == 'true' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: chromium-${{ inputs.version }}-windows-i686
+        path: |
+          ${{ github.workspace }}/chromium-${{ inputs.version }}-windows-i686.zip
+          ${{ github.workspace }}/chromium-${{ inputs.version }}-windows-i686.zip.sha256
+          ${{ github.workspace }}/chromium-${{ inputs.version }}-windows-i686-manifest.txt
+        compression-level: 0
+        if-no-files-found: error
+
+    - name: Preserve completed output after packaging or artifact failure
+      id: final_recovery
+      if: >-
+        ${{
+          failure() &&
+          steps.prepare.outcome == 'success' &&
+          steps.compile.outputs.complete == 'true' &&
+          (steps.package.outcome == 'failure' || steps.build_artifact.outcome == 'failure')
+        }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $destination = Join-Path $env:GITHUB_WORKSPACE 'checkpoints-windows'
+        & python scripts/chromium_windows_pipeline.py checkpoint `
+          --work-root $env:CHROMIUM_WINDOWS_ROOT `
+          --repository-root $env:GITHUB_WORKSPACE `
+          --destination $destination `
+          --stage '${{ inputs.stage }}' `
+          --no-progress-streak '${{ steps.compile.outputs.no_progress_streak || '0' }}'
+        $status = $LASTEXITCODE
+        if ($status -ne 0) {
+          $failureClass = if ($status -eq 75) { 'infrastructure' } else { 'deterministic_build' }
+          "failure_class=$failureClass" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          exit $status
+        }
+        if ('${{ steps.build_artifact.outcome }}' -eq 'failure') {
+          "failure_class=infrastructure" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        }
+
+    - name: Upload final-output recovery checkpoint
+      id: final_recovery_upload
+      if: ${{ always() && steps.final_recovery.outcome == 'success' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: chromium-windows-i686-out-stage-${{ inputs.stage }}
+        path: |
+          ${{ github.workspace }}/checkpoints-windows/out-Release_x86_win.tar.zst
+          ${{ github.workspace }}/checkpoints-windows/out-Release_x86_win.tar.zst.sha256
+          ${{ github.workspace }}/checkpoints-windows/checkpoint-manifest.json
+        retention-days: ${{ env.CHECKPOINT_RETENTION_DAYS }}
+        compression-level: 0
+        overwrite: true
+        if-no-files-found: error
+
+    - name: Classify final recovery upload failure
+      id: final_recovery_upload_failure
+      if: ${{ always() && steps.final_recovery.outcome == 'success' && steps.final_recovery_upload.outcome == 'failure' }}
+      shell: pwsh
+      run: |
+        "failure_class=infrastructure" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Write Windows stage summary
+      if: ${{ always() }}
+      shell: pwsh
+      run: |
+        $root = if ($env:CHROMIUM_WINDOWS_ROOT) { $env:CHROMIUM_WINDOWS_ROOT } else { $env:GITHUB_WORKSPACE }
+        & python scripts/chromium_windows_pipeline.py summary `
+          --work-root $root `
+          --version '${{ inputs.version }}' `
+          --stage '${{ inputs.stage }}' `
+          --attempt '${{ inputs.attempt }}' `
+          --result-file (Join-Path $root 'build-result.json')
+
+    - name: Fail when final Windows stage is still incomplete
+      if: ${{ always() && inputs.final-stage == 'true' && steps.prepare.outcome == 'success' && steps.compile.outputs.complete != 'true' }}
+      shell: pwsh
+      run: |
+        Write-Error 'Chromium Windows i686 is incomplete after the final configured stage; the latest checkpoint was preserved.'
+        exit 1

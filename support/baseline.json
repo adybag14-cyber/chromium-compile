@@ -1,6 +1,9 @@
 {
   "schema": 1,
   "minimum_version": "150.0.7871.186",
+  "windows_minimum_version": "153.0.8010.12",
+  "windows_legacy_mutable_releases": [],
+  "windows_verified_builds": [],
   "legacy_mutable_releases": [
     "150.0.7871.186",
     "151.0.7922.71",

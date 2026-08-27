@@ -8,9 +8,10 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 TIMEOUT_EXIT_CODE = 124
 WATCHDOG_ERROR_EXIT_CODE = 85
@@ -46,7 +47,22 @@ def _signal_child(proc: subprocess.Popen[bytes], signum: int) -> None:
         if os.name == "posix":
             os.killpg(proc.pid, signum)
         else:
-            proc.terminate()
+            # A Windows compiler slice is rooted at cmd.exe/autoninja and owns a
+            # large descendant tree. Target only that exact root PID, but include
+            # its descendants so a checkpoint never races orphaned clang/link
+            # processes that are still mutating the Ninja output directory.
+            try:
+                result = subprocess.run(
+                    ["taskkill.exe", "/PID", str(proc.pid), "/T"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                result = None
+            if (result is None or result.returncode != 0) and proc.poll() is None:
+                proc.terminate()
     except ProcessLookupError:
         pass
 
@@ -58,7 +74,18 @@ def _kill_child(proc: subprocess.Popen[bytes]) -> None:
         if os.name == "posix":
             os.killpg(proc.pid, signal.SIGKILL)
         else:
-            proc.kill()
+            try:
+                result = subprocess.run(
+                    ["taskkill.exe", "/PID", str(proc.pid), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                result = None
+            if (result is None or result.returncode != 0) and proc.poll() is None:
+                proc.kill()
     except ProcessLookupError:
         pass
 
@@ -75,7 +102,10 @@ def terminate_child(proc: subprocess.Popen[bytes], grace_seconds: int) -> None:
     try:
         proc.wait(timeout=max(grace_seconds, 1))
     except subprocess.TimeoutExpired as exc:
-        raise WatchdogError("stalled compiler process tree did not terminate after SIGKILL") from exc
+        action = "forced process-tree termination" if os.name == "nt" else "SIGKILL"
+        raise WatchdogError(
+            f"stalled compiler process tree did not terminate after {action}"
+        ) from exc
 
 
 def write_stall_marker(path: Path) -> None:
@@ -146,6 +176,9 @@ def run_with_watchdog(
     stall_marker: Path,
     timeout_seconds: int | None = None,
     timeout_kill_grace_seconds: int = 120,
+    output_log: Path | None = None,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> int:
     if not command:
         raise WatchdogError("a child command is required")
@@ -165,10 +198,43 @@ def run_with_watchdog(
     popen_kwargs: dict[str, object] = {}
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
+    if cwd is not None:
+        popen_kwargs["cwd"] = cwd
+    if env is not None:
+        popen_kwargs["env"] = dict(env)
+    if output_log is not None:
+        popen_kwargs["stdout"] = subprocess.PIPE
+        popen_kwargs["stderr"] = subprocess.STDOUT
     try:
         proc = subprocess.Popen(list(command), **popen_kwargs)
     except OSError as exc:
         raise WatchdogError(f"could not start compiler command: {exc}") from exc
+
+    pump_errors: list[BaseException] = []
+    pump_thread: threading.Thread | None = None
+    if output_log is not None:
+        assert proc.stdout is not None
+
+        def pump_output() -> None:
+            try:
+                output_log.parent.mkdir(parents=True, exist_ok=True)
+                with output_log.open("ab") as log_handle:
+                    while chunk := proc.stdout.read(64 * 1024):
+                        log_handle.write(chunk)
+                        log_handle.flush()
+                        try:
+                            sys.stdout.buffer.write(chunk)
+                            sys.stdout.buffer.flush()
+                        except AttributeError:
+                            sys.stdout.write(chunk.decode("utf-8", "replace"))
+                            sys.stdout.flush()
+            except BaseException as exc:  # noqa: BLE001 - surfaced on controller thread.
+                pump_errors.append(exc)
+
+        pump_thread = threading.Thread(
+            target=pump_output, name="ninja-output-pump", daemon=True
+        )
+        pump_thread.start()
 
     last_fingerprint = progress_fingerprint(progress_log)
     started = time.monotonic()
@@ -188,8 +254,19 @@ def run_with_watchdog(
 
     try:
         while True:
+            if pump_errors:
+                terminate_child(proc, kill_grace_seconds)
+                raise WatchdogError(f"could not persist compiler output: {pump_errors[0]}")
             returncode = proc.poll()
             if returncode is not None:
+                if pump_thread is not None:
+                    pump_thread.join(timeout=30)
+                    if pump_thread.is_alive():
+                        raise WatchdogError("compiler output pump did not terminate")
+                    if pump_errors:
+                        raise WatchdogError(
+                            f"could not persist compiler output: {pump_errors[0]}"
+                        )
                 if forwarded_signal is not None:
                     return 128 + forwarded_signal
                 if returncode < 0:
@@ -233,6 +310,8 @@ def run_with_watchdog(
             signal.signal(signum, handler)
         if proc.poll() is None:
             terminate_child(proc, kill_grace_seconds)
+        if pump_thread is not None:
+            pump_thread.join(timeout=30)
 
 
 def main() -> int:

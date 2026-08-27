@@ -58,6 +58,27 @@ class FakeProcess:
 
 
 class CheckpointArchiveTests(unittest.TestCase):
+    def test_accepts_explicit_windows_output_root_without_weakening_default(self):
+        def members():
+            return [
+                directory("Release_x86_win"),
+                regular("Release_x86_win/build.ninja"),
+                regular("Release_x86_win/args.gn"),
+            ]
+
+        with mock.patch.object(
+            validator.subprocess, "Popen", return_value=FakeProcess(tar_bytes(members()))
+        ):
+            stats = validator.validate_checkpoint(
+                pathlib.Path("checkpoint.tar.zst"), root="Release_x86_win"
+            )
+        self.assertEqual(stats["member_count"], 3)
+        with mock.patch.object(
+            validator.subprocess, "Popen", return_value=FakeProcess(tar_bytes(members()))
+        ):
+            with self.assertRaises(ValueError):
+                validator.validate_checkpoint(pathlib.Path("checkpoint.tar.zst"))
+
     def _validate(self, members, rc=0):
         fake = FakeProcess(tar_bytes(members), rc=rc)
         with mock.patch.object(validator.subprocess, "Popen", return_value=fake):

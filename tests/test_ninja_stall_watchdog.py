@@ -3,6 +3,7 @@ import pathlib
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -15,6 +16,25 @@ SPEC.loader.exec_module(watchdog)
 
 
 class NinjaStallWatchdogTests(unittest.TestCase):
+    def test_windows_termination_targets_only_exact_compiler_tree(self):
+        proc = mock.Mock()
+        proc.pid = 4242
+        proc.poll.return_value = None
+        with mock.patch.object(watchdog.os, "name", "nt"), mock.patch.object(
+            watchdog.subprocess,
+            "run",
+            return_value=types.SimpleNamespace(returncode=0),
+        ) as run:
+            watchdog._kill_child(proc)
+        run.assert_called_once_with(
+            ["taskkill.exe", "/PID", "4242", "/T", "/F"],
+            check=False,
+            stdout=watchdog.subprocess.DEVNULL,
+            stderr=watchdog.subprocess.DEVNULL,
+            timeout=30,
+        )
+        proc.kill.assert_not_called()
+
     def test_cli_stall_policy_matches_workflow_bounds(self):
         self.assertEqual(
             watchdog.validate_compiler_stall_seconds(90 * 60),

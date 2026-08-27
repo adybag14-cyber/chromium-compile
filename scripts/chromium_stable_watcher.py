@@ -49,6 +49,68 @@ DEFAULT_API = (
 )
 
 
+@dataclass(frozen=True)
+class LaneConfig:
+    key: str
+    target_os: str
+    version_platform: str
+    workflows: tuple[str, ...]
+    tag_suffix: str
+    package_suffix: str
+    issue_prefix: str
+    preflight_workflow: str
+    preflight_title_prefix: str
+    summary_title: str
+    minimum_key: str
+    verified_key: str
+    legacy_mutable_key: str
+
+    @property
+    def api_url(self) -> str:
+        return (
+            "https://versionhistory.googleapis.com/v1/"
+            f"chrome/platforms/{self.version_platform}/channels/stable/versions"
+        )
+
+
+LINUX_LANE = LaneConfig(
+    key="linux",
+    target_os="linux",
+    version_platform="linux",
+    workflows=PORT_WORKFLOWS,
+    tag_suffix="linux-i686",
+    package_suffix="linux-i686.tar.xz",
+    issue_prefix="i686-port",
+    preflight_workflow="chromium-i686-preflight.yml",
+    preflight_title_prefix="Chromium i686 preflight",
+    summary_title="Chromium i686 stable watcher",
+    minimum_key="minimum_version",
+    verified_key="verified_builds",
+    legacy_mutable_key="legacy_mutable_releases",
+)
+WINDOWS_LANE = LaneConfig(
+    key="windows",
+    target_os="win",
+    version_platform="win",
+    workflows=(
+        "chromium-windows-i686-preflight.yml",
+        "chromium-windows-i686.yml",
+        "publish-windows-i686-release-handoff.yml",
+        "publish-windows-i686-release.yml",
+    ),
+    tag_suffix="windows-i686",
+    package_suffix="windows-i686.zip",
+    issue_prefix="windows-i686-port",
+    preflight_workflow="chromium-windows-i686-preflight.yml",
+    preflight_title_prefix="Chromium Windows i686 preflight",
+    summary_title="Chromium Windows i686 stable watcher",
+    minimum_key="windows_minimum_version",
+    verified_key="windows_verified_builds",
+    legacy_mutable_key="windows_legacy_mutable_releases",
+)
+LANES = {lane.key: lane for lane in (LINUX_LANE, WINDOWS_LANE)}
+
+
 class WatcherError(RuntimeError):
     """Raised when stable-version discovery cannot safely continue."""
 
@@ -59,16 +121,18 @@ def version_key(version: str) -> tuple[int, int, int, int]:
     return tuple(int(part) for part in version.split("."))  # type: ignore[return-value]
 
 
-def load_baseline(path: Path) -> tuple[str, set[str], set[str]]:
+def load_baseline(
+    path: Path, lane: LaneConfig = LINUX_LANE
+) -> tuple[str, set[str], set[str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    minimum = data["minimum_version"]
+    minimum = data[lane.minimum_key]
     version_key(minimum)
     known = {
         entry["version"]
-        for entry in data.get("verified_builds", [])
+        for entry in data.get(lane.verified_key, [])
         if VERSION_RE.fullmatch(entry.get("version", ""))
     }
-    raw_legacy_mutable = data.get("legacy_mutable_releases", [])
+    raw_legacy_mutable = data.get(lane.legacy_mutable_key, [])
     if not isinstance(raw_legacy_mutable, list):
         raise ValueError("legacy_mutable_releases must be a JSON list")
     legacy_mutable: set[str] = set()
@@ -196,7 +260,10 @@ def gh_resource_text(
 
 
 def read_release_manifest_build_sha(
-    repository: str, version: str, asset: dict[str, object]
+    repository: str,
+    version: str,
+    asset: dict[str, object],
+    lane: LaneConfig = LINUX_LANE,
 ) -> str:
     asset_id = asset.get("id")
     size = asset.get("size")
@@ -254,16 +321,20 @@ def read_release_manifest_build_sha(
         raise ValueError(
             f"release manifest version does not match tag version: {fields.get('version')!r} != {version!r}"
         )
-    if fields.get("target_cpu") != "x86" or fields.get("target_os") != "linux":
-        raise ValueError("release manifest does not describe the Linux x86 target")
+    if fields.get("target_cpu") != "x86" or fields.get("target_os") != lane.target_os:
+        raise ValueError(
+            f"release manifest does not describe the {lane.target_os} x86 target"
+        )
     build_sha = str(fields.get("github_sha", "")).lower()
     if not SHA1_RE.fullmatch(build_sha):
         raise ValueError(f"release manifest github_sha is missing or malformed: {build_sha!r}")
     return build_sha
 
 
-def read_release_tag_commit(repository: str, version: str) -> str:
-    tag = f"chromium-{version}-linux-i686"
+def read_release_tag_commit(
+    repository: str, version: str, lane: LaneConfig = LINUX_LANE
+) -> str:
+    tag = f"chromium-{version}-{lane.tag_suffix}"
     encoded_tag = urllib.parse.quote(tag, safe="")
     text = gh_resource_text(
         ["api", f"repos/{repository}/commits/{encoded_tag}"],
@@ -282,10 +353,15 @@ def read_release_tag_commit(repository: str, version: str) -> str:
 
 
 def verify_release_provenance(
-    repository: str, version: str, manifest_asset: dict[str, object]
+    repository: str,
+    version: str,
+    manifest_asset: dict[str, object],
+    lane: LaneConfig = LINUX_LANE,
 ) -> None:
-    manifest_sha = read_release_manifest_build_sha(repository, version, manifest_asset)
-    tag_sha = read_release_tag_commit(repository, version)
+    manifest_sha = read_release_manifest_build_sha(
+        repository, version, manifest_asset, lane
+    )
+    tag_sha = read_release_tag_commit(repository, version, lane)
     if tag_sha != manifest_sha:
         raise ValueError(
             f"release tag resolves to {tag_sha}, but release manifest records build {manifest_sha}"
@@ -415,12 +491,16 @@ def list_rest_items(
 
 
 def list_release_health(
-    repository: str, legacy_mutable_versions: set[str] | frozenset[str] = frozenset()
+    repository: str,
+    legacy_mutable_versions: set[str] | frozenset[str] = frozenset(),
+    lane: LaneConfig = LINUX_LANE,
 ) -> tuple[set[str], set[str]]:
     releases = list_rest_items(repository, "releases")
     healthy: set[str] = set()
     broken: set[str] = set()
-    pattern = re.compile(r"^chromium-(\d+\.\d+\.\d+\.\d+)-linux-i686$")
+    pattern = re.compile(
+        rf"^chromium-(\d+\.\d+\.\d+\.\d+)-{re.escape(lane.tag_suffix)}$"
+    )
     digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
     for release in releases:
         match = pattern.fullmatch(str(release.get("tag_name", "")))
@@ -428,9 +508,9 @@ def list_release_health(
             continue
         version = match.group(1)
         expected_assets = {
-            f"chromium-{version}-linux-i686.tar.xz",
-            f"chromium-{version}-linux-i686.tar.xz.sha256",
-            f"chromium-{version}-linux-i686-manifest.txt",
+            f"chromium-{version}-{lane.package_suffix}",
+            f"chromium-{version}-{lane.package_suffix}.sha256",
+            f"chromium-{version}-{lane.tag_suffix}-manifest.txt",
         }
         assets = release.get("assets", [])
         asset_map: dict[str, dict[str, object]] = {}
@@ -464,9 +544,11 @@ def list_release_health(
             or not immutable_ok
         )
         if healthy_candidate:
-            manifest_name = f"chromium-{version}-linux-i686-manifest.txt"
+            manifest_name = f"chromium-{version}-{lane.tag_suffix}-manifest.txt"
             try:
-                verify_release_provenance(repository, version, asset_map[manifest_name])
+                verify_release_provenance(
+                    repository, version, asset_map[manifest_name], lane
+                )
             except ValueError as exc:
                 print(f"Release provenance rejected for Chromium {version}: {exc}", file=sys.stderr)
                 healthy_candidate = False
@@ -478,16 +560,21 @@ def list_release_health(
 
 
 def list_release_versions(
-    repository: str, legacy_mutable_versions: set[str] | frozenset[str] = frozenset()
+    repository: str,
+    legacy_mutable_versions: set[str] | frozenset[str] = frozenset(),
+    lane: LaneConfig = LINUX_LANE,
 ) -> set[str]:
-    return list_release_health(repository, legacy_mutable_versions)[0]
+    return list_release_health(repository, legacy_mutable_versions, lane)[0]
 
 
-def list_blocked_versions(repository: str) -> set[str]:
+def list_blocked_versions(
+    repository: str, lane: LaneConfig = LINUX_LANE
+) -> set[str]:
     issues = list_rest_items(repository, "issues?state=open")
     found: set[str] = set()
     pattern = re.compile(
-        r"^\[i686-port\] Chromium (\d+\.\d+\.\d+\.\d+) requires maintenance$"
+        rf"^\[{re.escape(lane.issue_prefix)}\] Chromium "
+        r"(\d+\.\d+\.\d+\.\d+) requires maintenance$"
     )
     for issue in issues:
         if "pull_request" in issue:
@@ -499,7 +586,9 @@ def list_blocked_versions(repository: str) -> set[str]:
 
 
 def list_port_run_state(
-    repository: str, production_ref: str | None = None
+    repository: str,
+    production_ref: str | None = None,
+    lane: LaneConfig = LINUX_LANE,
 ) -> tuple[set[str], set[str]]:
     active: set[str] = set()
     quarantined: set[str] = set()
@@ -534,7 +623,7 @@ def list_port_run_state(
             if head_branch == production_ref:
                 quarantined.add(version)
 
-    for workflow in PORT_WORKFLOWS:
+    for workflow in lane.workflows:
         for state in sorted(ACTIVE_RUN_STATES):
             for run in list_workflow_runs(
                 repository, workflow, created_after=cutoff, status_filter=state
@@ -548,12 +637,16 @@ def list_port_run_state(
     return active, quarantined
 
 
-def list_active_versions(repository: str) -> set[str]:
-    return list_port_run_state(repository)[0]
+def list_active_versions(
+    repository: str, lane: LaneConfig = LINUX_LANE
+) -> set[str]:
+    return list_port_run_state(repository, lane=lane)[0]
 
 
-def list_quarantined_run_versions(repository: str) -> set[str]:
-    return list_port_run_state(repository)[1]
+def list_quarantined_run_versions(
+    repository: str, lane: LaneConfig = LINUX_LANE
+) -> set[str]:
+    return list_port_run_state(repository, lane=lane)[1]
 
 
 @dataclass(frozen=True)
@@ -612,12 +705,13 @@ def dispatch_preflight(
     version: str,
     dry_run: bool,
     expected_head_sha: str | None = None,
+    lane: LaneConfig = LINUX_LANE,
 ) -> None:
-    display_title = f"Chromium i686 preflight {version}"
+    display_title = f"{lane.preflight_title_prefix} {version}"
     inputs = [f"version={version}", "dispatch_build=true"]
     if dry_run:
         printable = (
-            f"gh workflow run chromium-i686-preflight.yml --repo {repository} "
+            f"gh workflow run {lane.preflight_workflow} --repo {repository} "
             f"--ref {ref} -f version={version} -f dispatch_build=true"
         )
         print(f"DRY RUN: {printable}")
@@ -629,7 +723,7 @@ def dispatch_preflight(
             dispatch_kwargs["expected_head_sha"] = expected_head_sha
         result = dispatch_once(
             repository,
-            "chromium-i686-preflight.yml",
+            lane.preflight_workflow,
             ref,
             display_title,
             inputs,
@@ -643,7 +737,7 @@ def dispatch_preflight(
     elif result == "accepted-after-client-error":
         print(f"Dispatch client failed but Chromium {version} preflight is visible in Actions; treating dispatch as accepted.")
     else:
-        print(f"Dispatched Chromium {version} i686 compatibility preflight.")
+        print(f"Dispatched Chromium {version} {lane.key} i686 compatibility preflight.")
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -655,7 +749,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional immutable workflow commit that the dispatch ref must still resolve to",
     )
     parser.add_argument("--baseline", type=Path, default=Path("support/baseline.json"))
-    parser.add_argument("--api-url", default=DEFAULT_API)
+    parser.add_argument("--lane", choices=tuple(LANES), default="linux")
+    parser.add_argument("--api-url", default="")
     parser.add_argument("--max-new-builds", type=int, default=1)
     parser.add_argument("--force-version", default="")
     parser.add_argument("--dry-run", action="store_true")
@@ -664,7 +759,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    minimum, known, legacy_mutable_releases = load_baseline(args.baseline)
+    lane = LANES[args.lane]
+    minimum, known, legacy_mutable_releases = load_baseline(args.baseline, lane)
     state = PortState(known=known, released=set(), blocked=set(), active=set())
     issue_blocked: set[str] = set()
     run_quarantined: set[str] = set()
@@ -673,8 +769,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.force_version:
         version_key(args.force_version)
         versions = [args.force_version]
-        active, _run_quarantine = list_port_run_state(args.repository, args.ref)
-        released, broken_releases = list_release_health(args.repository, legacy_mutable_releases)
+        active, _run_quarantine = list_port_run_state(
+            args.repository, args.ref, lane
+        )
+        released, broken_releases = list_release_health(
+            args.repository, legacy_mutable_releases, lane
+        )
         unattended_broken = broken_releases - active
         if unattended_broken:
             formatted = ", ".join(sorted(unattended_broken, key=version_key))
@@ -704,10 +804,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             candidates = [args.force_version]
     else:
-        versions = fetch_stable_versions(args.api_url, minimum)
-        issue_blocked = list_blocked_versions(args.repository)
-        active, run_quarantined = list_port_run_state(args.repository, args.ref)
-        released, broken_releases = list_release_health(args.repository, legacy_mutable_releases)
+        versions = fetch_stable_versions(args.api_url or lane.api_url, minimum)
+        issue_blocked = list_blocked_versions(args.repository, lane)
+        active, run_quarantined = list_port_run_state(
+            args.repository, args.ref, lane
+        )
+        released, broken_releases = list_release_health(
+            args.repository, legacy_mutable_releases, lane
+        )
         superseded_run_quarantines = run_quarantined & released
         run_quarantined = run_quarantined - released
         unattended_broken = broken_releases - active
@@ -761,10 +865,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             version,
             args.dry_run,
             args.expected_head_sha or None,
+            lane,
         )
 
     summary = [
-        "## Chromium i686 stable watcher",
+        f"## {lane.summary_title}",
         "",
         f"- Baseline: `{minimum}`",
         f"- Stable versions above baseline observed: `{len(versions)}`",

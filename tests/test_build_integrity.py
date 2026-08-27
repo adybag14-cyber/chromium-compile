@@ -36,6 +36,8 @@ class ToolPinTests(unittest.TestCase):
                 """
 vars = {
   'gn_version': 'git_revision:0123456789abcdef0123456789abcdef01234567',
+  'ninja_package': 'infra/3pp/tools/ninja/',
+  'ninja_version': 'version:3@1.12.1.chromium.4',
 }
 
 deps = {
@@ -51,6 +53,8 @@ deps = {
                 {
                     "gn_version": "git_revision:0123456789abcdef0123456789abcdef01234567",
                     "depot_tools_revision": "0123456789abcdef0123456789abcdef01234567",
+                    "ninja_package": "infra/3pp/tools/ninja/",
+                    "ninja_version": "version:3@1.12.1.chromium.4",
                 },
             )
 

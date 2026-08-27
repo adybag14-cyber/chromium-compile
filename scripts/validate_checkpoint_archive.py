@@ -6,19 +6,27 @@ import argparse
 import json
 import os
 import posixpath
+import re
 import subprocess
 import tarfile
 from pathlib import Path, PurePosixPath
 
 ROOT = "Release_x86"
-REQUIRED_REGULAR = {f"{ROOT}/build.ninja", f"{ROOT}/args.gn"}
+ROOT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 DEFAULT_MAX_UNPACKED_GIB = 40
 DEFAULT_MAX_MEMBERS = 2_000_000
 HARD_MAX_UNPACKED_GIB = 80
 HARD_MAX_MEMBERS = 4_000_000
 
 
-def _normalise_member(name: str) -> str:
+def _validate_root(root: str) -> str:
+    if not ROOT_RE.fullmatch(root) or root in {".", ".."}:
+        raise ValueError(f"Unsafe checkpoint root: {root!r}")
+    return root
+
+
+def _normalise_member(name: str, root: str = ROOT) -> str:
+    root = _validate_root(root)
     if not name or "\x00" in name or "\\" in name:
         raise ValueError(f"Unsafe checkpoint member name: {name!r}")
     path = PurePosixPath(name)
@@ -28,12 +36,19 @@ def _normalise_member(name: str) -> str:
     if normal in {".", ""}:
         raise ValueError(f"Empty checkpoint member path: {name!r}")
     parts = PurePosixPath(normal).parts
-    if not parts or parts[0] != ROOT or ".." in parts:
-        raise ValueError(f"Checkpoint member escapes {ROOT}: {name!r}")
+    if not parts or parts[0] != root or ".." in parts:
+        raise ValueError(f"Checkpoint member escapes {root}: {name!r}")
     return normal
 
 
-def _normalise_link(member_name: str, link_name: str, *, symlink: bool) -> str:
+def _normalise_link(
+    member_name: str,
+    link_name: str,
+    *,
+    symlink: bool,
+    root: str = ROOT,
+) -> str:
+    root = _validate_root(root)
     if not link_name or "\x00" in link_name or "\\" in link_name:
         raise ValueError(f"Unsafe checkpoint link target: {member_name!r} -> {link_name!r}")
     target = PurePosixPath(link_name)
@@ -42,8 +57,8 @@ def _normalise_link(member_name: str, link_name: str, *, symlink: bool) -> str:
     base = posixpath.dirname(member_name) if symlink else ""
     normal = posixpath.normpath(posixpath.join(base, link_name))
     parts = PurePosixPath(normal).parts
-    if not parts or parts[0] != ROOT or ".." in parts:
-        raise ValueError(f"Checkpoint link escapes {ROOT}: {member_name!r} -> {link_name!r}")
+    if not parts or parts[0] != root or ".." in parts:
+        raise ValueError(f"Checkpoint link escapes {root}: {member_name!r} -> {link_name!r}")
     return normal
 
 
@@ -60,7 +75,9 @@ def _positive_int_env(name: str, default: int, hard_max: int) -> int:
     return value
 
 
-def validate_checkpoint(path: Path) -> dict[str, int]:
+def validate_checkpoint(path: Path, *, root: str = ROOT) -> dict[str, int]:
+    root = _validate_root(root)
+    required_regular = {f"{root}/build.ninja", f"{root}/args.gn"}
     seen: set[str] = set()
     regular: set[str] = set()
     links: list[tuple[str, str]] = []
@@ -93,7 +110,7 @@ def validate_checkpoint(path: Path) -> dict[str, int]:
                         "Checkpoint archive declares more than the configured "
                         f"{max_unpacked // 1024**3} GiB unpacked limit"
                     )
-                name = _normalise_member(member.name)
+                name = _normalise_member(member.name, root)
                 if name in seen:
                     raise ValueError(f"Duplicate checkpoint archive member: {name}")
                 seen.add(name)
@@ -102,9 +119,23 @@ def validate_checkpoint(path: Path) -> dict[str, int]:
                 elif member.isdir():
                     pass
                 elif member.issym():
-                    links.append((name, _normalise_link(name, member.linkname, symlink=True)))
+                    links.append(
+                        (
+                            name,
+                            _normalise_link(
+                                name, member.linkname, symlink=True, root=root
+                            ),
+                        )
+                    )
                 elif member.islnk():
-                    links.append((name, _normalise_link(name, member.linkname, symlink=False)))
+                    links.append(
+                        (
+                            name,
+                            _normalise_link(
+                                name, member.linkname, symlink=False, root=root
+                            ),
+                        )
+                    )
                 else:
                     raise ValueError(
                         f"Unsupported special checkpoint member {name!r} (type {member.type!r})"
@@ -122,7 +153,7 @@ def validate_checkpoint(path: Path) -> dict[str, int]:
     status = proc.wait(timeout=30)
     if status != 0:
         raise ValueError(f"zstd failed while validating checkpoint archive: {stderr.strip()}")
-    missing = sorted(REQUIRED_REGULAR - regular)
+    missing = sorted(required_regular - regular)
     if missing:
         raise ValueError(f"Checkpoint archive lacks required regular files: {', '.join(missing)}")
     # A contained link still must resolve to an archive member. This rejects broken
@@ -136,9 +167,10 @@ def validate_checkpoint(path: Path) -> dict[str, int]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive", type=Path)
+    parser.add_argument("--root", default=ROOT)
     parser.add_argument("--stats-file", type=Path)
     args = parser.parse_args()
-    stats = validate_checkpoint(args.archive)
+    stats = validate_checkpoint(args.archive, root=args.root)
     if args.stats_file:
         args.stats_file.write_text(json.dumps(stats, sort_keys=True) + "\n", encoding="utf-8")
     print(

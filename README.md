@@ -1,8 +1,10 @@
-# Chromium Linux i686 — Unofficial Port
+# Chromium i686 — Unofficial Linux and Windows Builds
 
-A resumable GitHub Actions pipeline for maintaining unofficial 32-bit Linux (`i686`) builds of current Chromium stable releases.
+A pair of independent, resumable GitHub Actions pipelines for maintaining unofficial 32-bit Linux and Windows (`i686` / `x86`) builds of current Chromium stable releases.
 
 Chromium upstream no longer supports or tests desktop Linux i686. This repository therefore treats each stable release as a downstream-port compatibility event: detect it, run a fast preflight, apply maintained patches, compile through resumable stages, validate the resulting ELF32 binary, and publish or record the failure.
+
+Windows x86 remains source-supported by Chromium, but current Chromium revisions move faster than hosted-runner SDK images. The Windows lane therefore treats the exact source tag—not a fixed runner image—as the toolchain authority, derives its Visual Studio and Windows SDK requirements from that source, installs a missing official SDK family, and validates every packaged executable and DLL as PE32 Intel i386 before publication.
 
 ## Proven baseline
 
@@ -76,6 +78,60 @@ Failures after automatic retries create or update an issue named:
 [i686-port] Chromium <version> requires maintenance
 ```
 
+## Parallel Windows i686 lane
+
+The Windows path is intentionally independent from the proven Linux queue. A Windows SDK, Visual Studio image, compile, checkpoint, smoke, or publisher failure cannot cancel or serialize the Linux lane, and its state uses separate workflow names, concurrency groups, artifacts, release tags, and maintenance issues.
+
+```text
+Chrome Windows stable feed
+          │
+          ▼
+Windows compatibility preflight
+  ├─ verify the exact GCS source object and Gitiles-critical files
+  ├─ prove upstream still declares target_os="win" / target_cpu="x86"
+  ├─ derive Visual Studio + SDK requirements from build/vs_toolchain.py
+  ├─ install a missing Microsoft.WindowsSDK.<family> package, including x86 libs
+  │  and Windows Desktop Debuggers
+  ├─ install Chromium-pinned depot_tools, GN, Ninja, Clang, and rc.exe
+  └─ generate/query the chrome and mini_installer GN targets
+          │
+          ▼
+Resumable Windows staged build
+  ├─ compile chrome + mini_installer for a bounded 325-minute slice
+  ├─ stop only the exact Ninja process tree on timeout/stall
+  ├─ preserve out/Release_x86_win with PAX/subsecond metadata
+  ├─ accept checkpoints only from the same repo/ref/SHA/version/stage/toolchain
+  └─ retain two generations and retry only runner/environment failures
+          │
+          ▼
+Trusted Windows release workflow
+  ├─ validate the exact successful build run and three-file artifact
+  ├─ reject unsafe/duplicate ZIP paths and verify every EXE/DLL as PE32 i386
+  ├─ extract and launch a local headless DOM smoke on a fresh Windows runner
+  └─ create or resume a draft-first, digest-identical immutable release
+```
+
+Windows failures use a separate exact-version issue:
+
+```text
+[windows-i686-port] Chromium <version> requires maintenance
+```
+
+The initial Windows watcher baseline is `153.0.8010.12`. Run **Chromium Windows i686 Compatibility Preflight** manually for that baseline; the scheduled Windows watcher independently handles later Windows stable versions whose authoritative source object is ready.
+
+Optional Windows repository variables are bounded before heavyweight work:
+
+```text
+CHROMIUM_WINDOWS_I686_RUNNER=windows-2025-vs2026
+CHROMIUM_WINDOWS_I686_MAX_STAGES=20
+CHROMIUM_WINDOWS_I686_CHECKPOINT_MINUTES=325
+CHROMIUM_WINDOWS_I686_NINJA_STALL_MINUTES=90
+CHROMIUM_WINDOWS_I686_JOBS=4
+CHROMIUM_WINDOWS_RUNNER_RETRIES=2
+```
+
+Production runner selection accepts only `windows-2025-vs2026` or the explicitly reviewed `windows-2025` alias. `windows-latest` is deliberately rejected so an image migration cannot silently change the production compiler environment. Within that reviewed runner family, Chromium's source-declared SDK family is still dynamic: for example Chromium 152 uses SDK `10.0.26100.0`, while Chromium 153 requires `10.0.28000.0`. The preflight installs the matching official Microsoft package only when the family is absent and proves its servicing version meets Chromium's documented minimum.
+
 ## Why checkpoint restoration works
 
 A normal archive was not sufficient. Ninja initially restarted at approximately `[1/57146]` after every runner change because restored outputs appeared stale.
@@ -102,7 +158,9 @@ The restored/generated build tools are checked with `file` and `ldd`; missing ho
 
 ```text
 .github/
-├── actions/chromium-i686-stage/action.yml
+├── actions/
+│   ├── chromium-i686-stage/action.yml
+│   └── chromium-windows-i686-stage/action.yml
 ├── scripts/
 │   ├── chromium_i686_common.sh
 │   ├── chromium_i686_port.sh
@@ -111,16 +169,23 @@ The restored/generated build tools are checked with `file` and `ldd`; missing ho
 └── workflows/
     ├── chromium-i686-preflight.yml
     ├── chromium-i686.yml
+    ├── chromium-windows-i686-preflight.yml
+    ├── chromium-windows-i686.yml
     ├── publish-i686-release.yml
+    ├── publish-windows-i686-release.yml
     ├── report-i686-build-failure.yml
     ├── validate-port-infrastructure.yml
-    └── watch-chromium-stable.yml
+    ├── watch-chromium-stable.yml
+    └── watch-chromium-windows-stable.yml
 
 patches/
 ├── common/
 └── versions/<major>/
 
 scripts/chromium_stable_watcher.py
+scripts/chromium_windows_pipeline.py
+scripts/chromium_windows_runtime.py
+scripts/github_immutable_release.py
 support/baseline.json
 tests/
 docs/MAINTENANCE.md
@@ -258,7 +323,7 @@ This is an unofficial downstream port:
 
 ## Project goal
 
-> Continue attempting every future Chromium stable release for Linux i686, publish every successful validated port, and make every upstream incompatibility visible and maintainable.
+> Continue attempting every future Chromium stable release through independent Linux and Windows i686 lanes, publish every successful validated build, and make every upstream or hosted-toolchain incompatibility visible and maintainable.
 
 
 ## Pipeline resilience hardening

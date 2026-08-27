@@ -41,6 +41,11 @@ on:
         required: false
         default: ""
         type: string
+      windows_full_version:
+        description: "Optional exact Chromium version for a full source/SDK/VS/GN Windows i686 proof"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "23 6 * * 1"
 
@@ -54,6 +59,34 @@ jobs:
     uses: ./.github/workflows/resolve-i686-production-runner.yml
     with:
       requested_runner: ${{ vars.CHROMIUM_I686_RUNNER }}
+
+  resolve_windows_production_runner:
+    name: Resolve tested production Windows i686 runner
+    permissions: {}
+    uses: ./.github/workflows/resolve-windows-i686-production-runner.yml
+    with:
+      requested_runner: ${{ vars.CHROMIUM_WINDOWS_I686_RUNNER }}
+
+  validate_windows_host_contracts:
+    name: Validate Windows i686 helpers on Windows
+    needs: resolve_windows_production_runner
+    if: ${{ needs.resolve_windows_production_runner.outputs.valid == 'true' }}
+    permissions:
+      contents: read
+    runs-on: ${{ needs.resolve_windows_production_runner.outputs.label }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout immutable test subject
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run Windows-specific static and unit contracts
+        shell: pwsh
+        run: |
+          python -m compileall -q scripts tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest tests.test_chromium_windows_runtime tests.test_windows_i686_pipeline tests.test_ninja_stall_watchdog -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   validate:
     runs-on: ubuntu-latest
@@ -810,3 +843,84 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --title "${title}" \
             --body-file "${body_file}"
+
+  validate_windows_full_source_preflight:
+    name: Full Chromium Windows i686 compatibility proof
+    needs: resolve_windows_production_runner
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_full_version != '' && needs.resolve_windows_production_runner.outputs.valid == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ${{ needs.resolve_windows_production_runner.outputs.label }}
+    timeout-minutes: 240
+    env:
+      CHROMIUM_WINDOWS_VALIDATION_VERSION: ${{ inputs.windows_full_version }}
+    steps:
+      - name: Checkout immutable Windows preflight subject
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate exact Windows preflight version
+        shell: pwsh
+        run: |
+          if ($env:CHROMIUM_WINDOWS_VALIDATION_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') {
+            Write-Error 'windows_full_version must be an exact four-part Chromium version.'
+            exit 2
+          }
+      - name: Select short high-capacity Windows root
+        shell: pwsh
+        run: python scripts/chromium_windows_pipeline.py select-root --minimum-free-gib 70
+      - name: Resolve exact source cache identity
+        id: windows_cache_identity
+        shell: pwsh
+        run: |
+          $metadata = Join-Path $env:RUNNER_TEMP 'chromium-windows-validation-source.json'
+          $key = & python scripts/chromium_source_object.py --version $env:CHROMIUM_WINDOWS_VALIDATION_VERSION --metadata-out $metadata --cache-key-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "key=$($key.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Restore exact source object cache
+        id: windows_source_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ${{ github.workspace }}/.chromium-source-cache
+          key: ${{ steps.windows_cache_identity.outputs.key }}
+      - name: Prove source-derived Windows SDK, VS, GN, and x86 targets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'windows-i686-full-preflight-evidence'
+          python scripts/chromium_windows_pipeline.py prepare `
+            --version $env:CHROMIUM_WINDOWS_VALIDATION_VERSION `
+            --work-root $env:CHROMIUM_WINDOWS_ROOT `
+            --cache-dir (Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache') `
+            --repository-root $env:GITHUB_WORKSPACE `
+            --stage 1 `
+            --repository $env:GITHUB_REPOSITORY `
+            --expected-ref '${{ github.ref_name }}' `
+            --expected-sha '${{ github.sha }}' `
+            --evidence-dir $evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Resolve prepared source cache identity
+        id: windows_prepared_cache
+        shell: pwsh
+        run: |
+          $metadata = Join-Path $env:GITHUB_WORKSPACE ".chromium-source-cache/chromium-$env:CHROMIUM_WINDOWS_VALIDATION_VERSION.source-object.json"
+          $key = & python scripts/chromium_source_object.py --version $env:CHROMIUM_WINDOWS_VALIDATION_VERSION --metadata-in $metadata --cache-key-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "key=$($key.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Save exact source object cache
+        if: ${{ steps.windows_source_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ${{ github.workspace }}/.chromium-source-cache
+          key: ${{ steps.windows_prepared_cache.outputs.key }}
+      - name: Upload full Windows preflight evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chromium-${{ inputs.windows_full_version }}-windows-i686-full-preflight
+          path: ${{ github.workspace }}/windows-i686-full-preflight-evidence
+          retention-days: 14
+          if-no-files-found: error
