@@ -94,7 +94,7 @@ Windows compatibility preflight
   │  and Windows Desktop Debuggers
   ├─ install Chromium-pinned depot_tools, GN, Ninja, CPython, Clang, and rc.exe
   ├─ generation/size/SHA-pin DEPS clang-format, Node, Rust, and libclang objects
-  ├─ install the exact DEPS-declared Windows TypeScript CIPD package
+  ├─ install exact DEPS TypeScript, DevTools esbuild, and rollup CIPD packages
   ├─ reject unsafe, linked, oversized, duplicate, or Windows-aliasing tool archives
   └─ generate/query and dry-run the complete chrome + mini_installer Ninja graph
           │

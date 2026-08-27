@@ -109,6 +109,7 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
         "cmd.exe",
         "curl",
         "curl.exe",
+        "esbuild.exe",
         "gh",
         "gh.exe",
         "git",
@@ -1423,7 +1424,12 @@ def install_windows_cipd_tools(
     depot_tools: Path,
     env: Mapping[str, str],
 ) -> tuple[str, tuple[CipdPackagePin, ...]]:
-    pins = resolve_windows_cipd_tool_pins(source / "DEPS")
+    devtools_deps = source / "third_party/devtools-frontend/src/DEPS"
+    if not devtools_deps.is_file() or devtools_deps.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium source lacks a regular nested DevTools DEPS file"
+        )
+    pins = resolve_windows_cipd_tool_pins(source / "DEPS", devtools_deps)
     descriptor_sha = windows_cipd_tool_descriptor_sha256(pins)
     cipd = depot_tools / "cipd.bat"
     resolved_source = source.resolve()
@@ -1476,6 +1482,30 @@ def install_windows_cipd_tools(
             "Chromium-pinned Windows TypeScript CIPD package omitted lib/tsc.exe"
         )
     _run([str(tsc), "--version"], cwd=source, env=env, timeout=120)
+    esbuild = (
+        source
+        / "third_party/devtools-frontend/src/third_party/esbuild/esbuild.exe"
+    )
+    if not esbuild.is_file() or esbuild.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium-pinned DevTools esbuild CIPD package omitted esbuild.exe"
+        )
+    _run([str(esbuild), "--version"], cwd=source, env=env, timeout=120)
+    rollup_root = (
+        source
+        / "third_party/devtools-frontend/src/third_party/rollup_libs"
+    )
+    rollup_files = [
+        path
+        for path in rollup_root.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and path.name not in {".cipd", ".chromium-windows-i686-cipd.json"}
+    ]
+    if not rollup_files:
+        raise WindowsPipelineError(
+            "Chromium-pinned DevTools rollup libraries package is empty"
+        )
     print(
         "Validated source-declared Windows CIPD tool descriptors: "
         f"SHA-256 {descriptor_sha}"

@@ -29,6 +29,27 @@ archive_validator = load_module("validate_release_archive", "scripts/validate_re
 
 
 class ToolPinTests(unittest.TestCase):
+    DEVTOOLS_CIPD_DEPS = """
+deps = {
+  'third_party/esbuild': {
+    'packages': [{
+      'package': 'infra/3pp/tools/esbuild/${{platform}}',
+      'version': 'version:3@0.25.1.chromium.2',
+    }],
+    'dep_type': 'cipd',
+    'condition': 'non_git_source',
+  },
+  'third_party/rollup_libs': {
+    'packages': [{
+      'package': 'infra/3pp/tools/rollup_libs/${{platform}}',
+      'version': 'version:3@4.60.4',
+    }],
+    'dep_type': 'cipd',
+    'condition': 'non_git_source',
+  },
+}
+"""
+
     WINDOWS_GCS_DEPS = """
   'src/buildtools/win-format': {
     'bucket': 'chromium-clang-format',
@@ -201,13 +222,23 @@ deps = {
             self.assertEqual(pins[3].size_bytes, 414479372)
             digest = tool_pins.windows_gcs_tool_descriptor_sha256(pins)
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
-            cipd = tool_pins.resolve_windows_cipd_tool_pins(deps)
-            self.assertEqual(len(cipd), 1)
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            cipd = tool_pins.resolve_windows_cipd_tool_pins(deps, devtools)
+            self.assertEqual(len(cipd), 3)
             self.assertEqual(
                 cipd[0].package,
                 "chromium/third_party/typescript/windows-amd64",
             )
             self.assertEqual(cipd[0].version, "version:2@7.0.2")
+            self.assertEqual(
+                cipd[1].package,
+                "infra/3pp/tools/esbuild/windows-amd64",
+            )
+            self.assertEqual(
+                cipd[2].package,
+                "infra/3pp/tools/rollup_libs/windows-amd64",
+            )
             self.assertRegex(
                 tool_pins.windows_cipd_tool_descriptor_sha256(cipd),
                 r"^[0-9a-f]{64}$",
@@ -253,8 +284,10 @@ deps = {
                 + "}\n",
                 encoding="utf-8",
             )
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
-                tool_pins.resolve_windows_cipd_tool_pins(deps)
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools)
 
 
 

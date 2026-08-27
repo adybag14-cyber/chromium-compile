@@ -51,7 +51,32 @@ WINDOWS_GCS_OUTPUT_FILES = {
 }
 WINDOWS_CIPD_TOOL_DEPENDENCIES = (
     "src/third_party/typescript/windows-amd64/src",
+    "src/third_party/devtools-frontend/src/third_party/esbuild",
+    "src/third_party/devtools-frontend/src/third_party/rollup_libs",
 )
+WINDOWS_CIPD_TOOL_POLICIES = {
+    "src/third_party/typescript/windows-amd64/src": {
+        "mapping": "src/third_party/typescript/windows-amd64/src",
+        "package_template": "chromium/third_party/typescript/windows-amd64",
+        "package": "chromium/third_party/typescript/windows-amd64",
+        "conditions": {
+            "checkout_win and non_git_source",
+            "non_git_source and checkout_win",
+        },
+    },
+    "src/third_party/devtools-frontend/src/third_party/esbuild": {
+        "mapping": "third_party/esbuild",
+        "package_template": "infra/3pp/tools/esbuild/${{platform}}",
+        "package": "infra/3pp/tools/esbuild/windows-amd64",
+        "conditions": {"non_git_source"},
+    },
+    "src/third_party/devtools-frontend/src/third_party/rollup_libs": {
+        "mapping": "third_party/rollup_libs",
+        "package_template": "infra/3pp/tools/rollup_libs/${{platform}}",
+        "package": "infra/3pp/tools/rollup_libs/windows-amd64",
+        "conditions": {"non_git_source"},
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +93,7 @@ class GcsObjectPin:
 @dataclass(frozen=True)
 class CipdPackagePin:
     dependency: str
+    package_template: str
     package: str
     version: str
 
@@ -156,7 +182,7 @@ def _integer_field(mapping: str, field: str) -> int:
 def _dependency_mapping(text: str, dependency: str) -> str:
     matches = list(
         re.finditer(
-            rf"(?m)^\s{{2}}(['\"]){re.escape(dependency)}\1\s*:\s*\{{",
+            rf"(?m)^[ \t]+(['\"]){re.escape(dependency)}\1\s*:\s*\{{",
             text,
         )
     )
@@ -299,16 +325,14 @@ def windows_gcs_tool_descriptor_sha256(pins: tuple[GcsObjectPin, ...]) -> str:
 def resolve_windows_cipd_package(path: Path, dependency: str) -> CipdPackagePin:
     if dependency not in WINDOWS_CIPD_TOOL_DEPENDENCIES:
         raise ValueError(f"Unsupported Windows CIPD tool dependency: {dependency!r}")
+    policy = WINDOWS_CIPD_TOOL_POLICIES[dependency]
     text = path.read_text(encoding="utf-8")
-    mapping = _dependency_mapping(text, dependency)
+    mapping = _dependency_mapping(text, str(policy["mapping"]))
     if _literal_field(mapping, "dep_type") != "cipd":
         raise ValueError(f"Chromium dependency {dependency!r} is no longer CIPD")
     condition = _literal_field(mapping, "condition")
     normalized_condition = re.sub(r"\s+", " ", condition).strip()
-    if normalized_condition not in {
-        "checkout_win and non_git_source",
-        "non_git_source and checkout_win",
-    }:
+    if normalized_condition not in policy["conditions"]:
         raise ValueError(
             f"Windows CIPD dependency {dependency!r} has an unexpected condition: "
             f"{condition!r}"
@@ -332,22 +356,35 @@ def resolve_windows_cipd_package(path: Path, dependency: str) -> CipdPackagePin:
             f"Expected exactly one CIPD package for {dependency!r}, "
             f"found {len(package_mappings)}"
         )
-    package = _literal_field(package_mappings[0], "package")
+    package_template = _literal_field(package_mappings[0], "package")
     version = _literal_field(package_mappings[0], "version")
-    if package != "chromium/third_party/typescript/windows-amd64":
-        raise ValueError(f"Unexpected Windows TypeScript CIPD package: {package!r}")
+    if package_template != policy["package_template"]:
+        raise ValueError(
+            f"Unexpected Windows CIPD package for {dependency!r}: {package_template!r}"
+        )
     if not re.fullmatch(r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+", version):
         raise ValueError(f"Mutable or malformed Windows TypeScript CIPD pin: {version!r}")
     return CipdPackagePin(
         dependency=dependency,
-        package=package,
+        package_template=package_template,
+        package=str(policy["package"]),
         version=version,
     )
 
 
-def resolve_windows_cipd_tool_pins(path: Path) -> tuple[CipdPackagePin, ...]:
+def resolve_windows_cipd_tool_pins(
+    root_deps: Path,
+    devtools_deps: Path,
+) -> tuple[CipdPackagePin, ...]:
     return tuple(
-        resolve_windows_cipd_package(path, dependency)
+        resolve_windows_cipd_package(
+            (
+                devtools_deps
+                if dependency.startswith("src/third_party/devtools-frontend/src/")
+                else root_deps
+            ),
+            dependency,
+        )
         for dependency in WINDOWS_CIPD_TOOL_DEPENDENCIES
     )
 
