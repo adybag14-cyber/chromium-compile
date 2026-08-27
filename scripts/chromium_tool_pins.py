@@ -29,11 +29,26 @@ DEPOT_RE = re.compile(
 )
 
 WINDOWS_GCS_TOOL_DEPENDENCIES = (
+    "src/buildtools/win-format",
+    "src/third_party/node/win",
+    "src/third_party/node/node_modules",
     "src/third_party/rust-toolchain",
     "src/third_party/llvm-libclang",
 )
 GCS_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-GCS_OBJECT_RE = re.compile(r"^[A-Za-z0-9._+/-]+\.tar\.xz$")
+GCS_OBJECT_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
+WINDOWS_GCS_BUCKETS = {
+    "src/buildtools/win-format": "chromium-clang-format",
+    "src/third_party/node/win": "chromium-nodejs",
+    "src/third_party/node/node_modules": "chromium-nodejs",
+    "src/third_party/rust-toolchain": "chromium-browser-clang",
+    "src/third_party/llvm-libclang": "chromium-browser-clang",
+}
+WINDOWS_GCS_OUTPUT_FILES = {
+    "src/buildtools/win-format": "clang-format.exe",
+    "src/third_party/node/win": "node.exe",
+    "src/third_party/node/node_modules": "node_modules.tar.gz",
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +59,7 @@ class GcsObjectPin:
     sha256: str
     size_bytes: int
     generation: str
+    output_file: str
 
 
 def _balanced_region(text: str, start: int, opener: str, closer: str) -> str:
@@ -151,7 +167,8 @@ def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
     if _literal_field(mapping, "dep_type") != "gcs":
         raise ValueError(f"Chromium dependency {dependency!r} is no longer first-class GCS")
     bucket = _literal_field(mapping, "bucket")
-    if bucket != "chromium-browser-clang" or not GCS_BUCKET_RE.fullmatch(bucket):
+    expected_bucket = WINDOWS_GCS_BUCKETS[dependency]
+    if bucket != expected_bucket or not GCS_BUCKET_RE.fullmatch(bucket):
         raise ValueError(f"Unsupported GCS bucket for {dependency!r}: {bucket!r}")
 
     objects_match = re.search(r"['\"]objects['\"]\s*:\s*\[", mapping)
@@ -172,23 +189,54 @@ def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
     selected: list[GcsObjectPin] = []
     for item in object_mappings:
         object_name = _literal_field(item, "object_name")
-        if not object_name.startswith("Win/"):
-            continue
-        condition = _literal_field(item, "condition")
-        if not re.fullmatch(r"host_os\s*==\s*(['\"])win\1", condition):
-            raise ValueError(
-                f"Windows object for {dependency!r} has an unexpected condition: {condition!r}"
+        output_file = ""
+        if dependency in WINDOWS_GCS_OUTPUT_FILES:
+            mapping_head = mapping[:objects_match.start()]
+            condition = _literal_field(mapping_head, "condition")
+            normalized_condition = re.sub(r"\s+", " ", condition).strip()
+            windows_non_git_conditions = {
+                'host_os == "win" and non_git_source',
+                "host_os == 'win' and non_git_source",
+                'non_git_source and host_os == "win"',
+                "non_git_source and host_os == 'win'",
+            }
+            allowed_conditions = (
+                {"non_git_source"}
+                if dependency == "src/third_party/node/node_modules"
+                else windows_non_git_conditions
             )
+            if normalized_condition not in allowed_conditions:
+                raise ValueError(
+                    f"Windows object for {dependency!r} has an unexpected condition: "
+                    f"{condition!r}"
+                )
+            output_file = _literal_field(item, "output_file")
+            if output_file != WINDOWS_GCS_OUTPUT_FILES[dependency]:
+                raise ValueError(
+                    f"Windows GCS tool output path changed in Chromium DEPS: "
+                    f"{output_file!r}"
+                )
+        else:
+            if not object_name.startswith("Win/"):
+                continue
+            condition = _literal_field(item, "condition")
+            if not re.fullmatch(r"host_os\s*==\s*(['\"])win\1", condition):
+                raise ValueError(
+                    f"Windows object for {dependency!r} has an unexpected condition: "
+                    f"{condition!r}"
+                )
         sha256 = _literal_field(item, "sha256sum").lower()
         size_bytes = _integer_field(item, "size_bytes")
         generation = str(_integer_field(item, "generation"))
         object_path = PurePosixPath(object_name)
+        expected_parts = 1 if output_file else 2
         if (
             not GCS_OBJECT_RE.fullmatch(object_name)
             or object_path.is_absolute()
-            or object_path.parts[:1] != ("Win",)
-            or len(object_path.parts) != 2
+            or len(object_path.parts) != expected_parts
             or ".." in object_path.parts
+            or (not output_file and object_path.parts[:1] != ("Win",))
+            or (not output_file and not object_name.endswith(".tar.xz"))
         ):
             raise ValueError(f"Unsafe Windows GCS object name: {object_name!r}")
         if not re.fullmatch(r"[0-9a-f]{64}", sha256):
@@ -207,6 +255,7 @@ def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
                 sha256=sha256,
                 size_bytes=size_bytes,
                 generation=generation,
+                output_file=output_file,
             )
         )
     if len(selected) != 1:

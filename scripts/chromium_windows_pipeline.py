@@ -102,6 +102,7 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
         "bindgen.exe",
         "cargo.exe",
         "clang-cl.exe",
+        "clang-format.exe",
         "cmd.exe",
         "curl",
         "curl.exe",
@@ -111,6 +112,7 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
         "git.exe",
         "gn.exe",
         "ninja.exe",
+        "node.exe",
         "powershell.exe",
         "pwsh",
         "pwsh.exe",
@@ -1092,7 +1094,9 @@ def _download_gcs_tool_archive(pin: GcsObjectPin, work_root: Path) -> Path:
     archive_dir = work_root / "gcs-tool-archives"
     archive_dir.mkdir(exist_ok=True)
     safe_stem = pin.dependency.rsplit("/", 1)[-1]
-    archive = archive_dir / f"{safe_stem}-{pin.sha256[:16]}.tar.xz"
+    source_name = pin.output_file or PurePosixPath(pin.object_name).name
+    suffix = "".join(Path(source_name).suffixes) or ".object"
+    archive = archive_dir / f"{safe_stem}-{pin.sha256[:16]}{suffix}"
     partial = archive.with_suffix(archive.suffix + ".partial")
     for candidate in (archive, partial):
         if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
@@ -1219,10 +1223,10 @@ def _extract_gcs_tool_archive(
     max_unpacked_bytes = DEFAULT_TOOL_MAX_UNPACKED_GIB * 1024**3
     try:
         try:
-            tar = tarfile.open(archive, mode="r:xz")
+            tar = tarfile.open(archive, mode="r:*")
         except tarfile.TarError as exc:
             raise WindowsPipelineError(
-                f"Source-declared Windows tool object is not a valid xz tar archive: {archive.name}"
+                f"Source-declared Windows tool object is not a valid tar archive: {archive.name}"
             ) from exc
         with tar:
             for member in tar:
@@ -1297,7 +1301,43 @@ def install_windows_gcs_tools(
         relative = PurePosixPath(pin.dependency).relative_to("src")
         destination = source.joinpath(*relative.parts)
         archive = _download_gcs_tool_archive(pin, work_root)
-        _extract_gcs_tool_archive(archive, destination, source_root=source)
+        if pin.output_file:
+            resolved_source = source.resolve()
+            resolved_parent = destination.parent.resolve()
+            if (
+                resolved_parent != resolved_source
+                and resolved_source not in resolved_parent.parents
+            ):
+                raise WindowsPipelineError(
+                    f"Windows GCS file destination escapes source: {destination}"
+                )
+            if destination.is_symlink() or (
+                destination.exists() and not destination.is_dir()
+            ):
+                raise WindowsPipelineError(
+                    f"Windows GCS file destination is unsafe: {destination}"
+                )
+            is_archive = pin.output_file.endswith((".tar.gz", ".tar.xz"))
+            if is_archive:
+                _extract_gcs_tool_archive(
+                    archive,
+                    destination,
+                    source_root=source,
+                )
+                output = destination / pin.output_file
+                shutil.copy2(archive, output)
+            else:
+                if destination.exists():
+                    shutil.rmtree(destination)
+                destination.mkdir(parents=True)
+                output = destination / pin.output_file
+                shutil.copy2(archive, output)
+            if output.is_symlink() or sha256_file(output) != pin.sha256:
+                raise InfrastructureError(
+                    f"Could not materialize exact Windows GCS file {pin.dependency}"
+                )
+        else:
+            _extract_gcs_tool_archive(archive, destination, source_root=source)
         marker = destination / ".chromium-windows-i686-gcs.json"
         marker.write_text(
             json.dumps(asdict(pin), indent=2, sort_keys=True) + "\n",
@@ -1305,6 +1345,26 @@ def install_windows_gcs_tools(
         )
 
     rust_root = source / "third_party/rust-toolchain"
+    clang_format = source / "buildtools/win-format/clang-format.exe"
+    if not clang_format.is_file() or clang_format.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium-pinned Windows clang-format object is incomplete"
+        )
+    _run([str(clang_format), "--version"], cwd=source, env=env, timeout=120)
+    node = source / "third_party/node/win/node.exe"
+    if not node.is_file() or node.is_symlink():
+        raise WindowsPipelineError("Chromium-pinned Windows Node object is incomplete")
+    _run([str(node), "--version"], cwd=source, env=env, timeout=120)
+    node_modules = source / "third_party/node/node_modules"
+    package_manifests = [
+        path
+        for path in node_modules.rglob("package.json")
+        if path.is_file() and not path.is_symlink()
+    ]
+    if len(package_manifests) < 10:
+        raise WindowsPipelineError(
+            "Chromium-pinned Node modules payload is structurally incomplete"
+        )
     required_rust = (
         rust_root / "VERSION",
         rust_root / "bin/bindgen.exe",

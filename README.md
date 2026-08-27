@@ -93,7 +93,7 @@ Windows compatibility preflight
   ├─ install a missing Microsoft.WindowsSDK.<family> package, including x86 libs
   │  and Windows Desktop Debuggers
   ├─ install Chromium-pinned depot_tools, GN, Ninja, CPython, Clang, and rc.exe
-  ├─ generation/size/SHA-pin the DEPS-declared Windows Rust + libclang objects
+  ├─ generation/size/SHA-pin DEPS clang-format, Node, Rust, and libclang objects
   ├─ reject unsafe, linked, oversized, duplicate, or Windows-aliasing tool archives
   └─ generate/query and dry-run the complete chrome + mini_installer Ninja graph
           │
