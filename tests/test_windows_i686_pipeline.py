@@ -235,34 +235,53 @@ class WindowsI686PipelineTests(unittest.TestCase):
                         identity,
                     )
 
-    def test_generated_ninja_graph_binds_every_windows_linker_timestamp(self):
-        with tempfile.TemporaryDirectory() as temp:
-            out = pathlib.Path(temp)
-            (out / "build.ninja").write_text(
-                "command = lld-link /TIMESTAMP:1785646800 one.obj\n",
-                encoding="utf-8",
+    def test_generated_chrome_linker_timestamp_resolves_renamed_executable(self):
+        timestamp = "1785646800"
+
+        def run(command, **_kwargs):
+            if "deps" in command:
+                stdout = (
+                    "//chrome:renamed_browser_executable\n"
+                    "//chrome:setup_helper\n"
+                )
+            elif command[-1] == "outputs" and command[-2].endswith(
+                ":renamed_browser_executable"
+            ):
+                stdout = "//out/Release_x86_win/initialexe/chrome.exe\n"
+            elif command[-1] == "outputs":
+                stdout = "//out/Release_x86_win/setup_helper.exe\n"
+            elif command[-1] == "ldflags":
+                stdout = f"/MACHINE:X86\n/TIMESTAMP:{timestamp}\n"
+            else:
+                self.fail(f"Unexpected GN command: {command}")
+            return pipeline.subprocess.CompletedProcess(command, 0, stdout, "")
+
+        with mock.patch.object(pipeline, "_run", side_effect=run):
+            stats = pipeline.validate_generated_chrome_linker_timestamp(
+                pathlib.Path("src"),
+                pathlib.Path("out"),
+                pathlib.Path("gn.exe"),
+                {},
+                1_785_646_800,
             )
-            nested = out / "obj/chrome"
-            nested.mkdir(parents=True)
-            edge = nested / "chrome.ninja"
-            edge.write_text(
-                "ldflags = /MACHINE:X86 /TIMESTAMP:1785646800\n",
-                encoding="utf-8",
-            )
-            stats = pipeline.validate_generated_windows_linker_timestamps(
-                out, 1_785_646_800
-            )
-            self.assertEqual(stats["ninja_file_count"], 2)
-            self.assertEqual(stats["timestamp_occurrences"], 2)
-            edge.write_text(
-                "ldflags = /TIMESTAMP:-2142000\n",
-                encoding="utf-8",
-            )
+        self.assertEqual(stats["chrome_executable_dependency_count"], 2)
+        self.assertEqual(
+            stats["chrome_executable_label"],
+            "//chrome:renamed_browser_executable",
+        )
+        self.assertEqual(stats["timestamp_occurrences"], 1)
+
+        timestamp = "-2142000"
+        with mock.patch.object(pipeline, "_run", side_effect=run):
             with self.assertRaisesRegex(
                 pipeline.WindowsPipelineError, "observed=.*-2142000"
             ):
-                pipeline.validate_generated_windows_linker_timestamps(
-                    out, 1_785_646_800
+                pipeline.validate_generated_chrome_linker_timestamp(
+                    pathlib.Path("src"),
+                    pathlib.Path("out"),
+                    pathlib.Path("gn.exe"),
+                    {},
+                    1_785_646_800,
                 )
 
     def test_prepared_state_and_checkpoint_bind_tag_and_linker_timestamps(self):
@@ -580,8 +599,8 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('args_gn.write_text(WINDOWS_GN_ARGS', block)
         self.assertIn('[str(gn), "gen", str(out)]', block)
         self.assertNotIn("--args=", block)
-        self.assertIn("validate_generated_windows_linker_timestamps(", block)
-        self.assertIn("out, windows_build_timestamp", block)
+        self.assertIn("validate_generated_chrome_linker_timestamp(", block)
+        self.assertIn("source, out, gn, env, windows_build_timestamp", block)
 
     def test_prepare_traverses_full_ninja_input_graph_before_dispatch(self):
         source = (ROOT / "scripts" / "chromium_windows_pipeline.py").read_text(

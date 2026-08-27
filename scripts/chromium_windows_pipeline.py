@@ -77,6 +77,9 @@ BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 CHROMIUM_COMMIT_POSITION_RE = re.compile(
     r"^refs/(?:heads/main|branch-heads/[1-9][0-9]*)@\{#[1-9][0-9]*\}$"
 )
+GN_TARGET_LABEL_RE = re.compile(
+    r"^//[A-Za-z0-9_./+-]+:[A-Za-z0-9_.+-]+$"
+)
 OUT_NAME = "Release_x86_win"
 CHECKPOINT_CONTRACT_VERSION = 5
 CHECKPOINT_MANIFEST_SCHEMA = 5
@@ -2089,64 +2092,117 @@ def compute_port_config_sha256(repository_root: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_generated_windows_linker_timestamps(
-    out: Path, expected_timestamp: int
-) -> dict[str, int]:
+def _validate_windows_linker_timestamp_text(
+    text: str, expected_timestamp: int, label: str
+) -> int:
     expected_timestamp = validate_chromium_timestamp(
-        expected_timestamp, "expected generated Windows linker timestamp"
+        expected_timestamp, "expected Windows linker timestamp"
     )
-    ninja_files = sorted(out.rglob("*.ninja"))
-    if not ninja_files or len(ninja_files) > 200_000:
+    marker_count = text.lower().count("/timestamp:")
+    matches = re.findall(r"(?i)/TIMESTAMP:([^\s\"']{1,100})", text)
+    if len(matches) != marker_count:
         raise WindowsPipelineError(
-            "Generated Ninja graph has an implausible linker-proof file count"
+            f"{label} contains a malformed Windows /TIMESTAMP token"
         )
-    bytes_scanned = 0
-    timestamp_occurrences = 0
-    timestamps: set[bytes] = set()
-    for path in ninja_files:
-        if not path.is_file() or path.is_symlink():
-            raise WindowsPipelineError(
-                f"Generated Ninja graph contains an unsafe file: {path}"
-            )
-        size = path.stat().st_size
-        if size > 256 * 1024**2:
-            raise WindowsPipelineError(
-                f"Generated Ninja file exceeds the 256 MiB proof limit: {path}"
-            )
-        bytes_scanned += size
-        if bytes_scanned > 2 * 1024**3:
-            raise WindowsPipelineError(
-                "Generated Ninja graph exceeds the 2 GiB linker-proof limit"
-            )
-        contents = path.read_bytes()
-        marker_count = contents.lower().count(b"/timestamp:")
-        matches = re.findall(rb"(?i)/TIMESTAMP:([^\s\"']{1,100})", contents)
-        if len(matches) != marker_count:
-            raise WindowsPipelineError(
-                f"Generated Ninja graph contains a malformed /TIMESTAMP token: {path}"
-            )
-        timestamps.update(matches)
-        timestamp_occurrences += marker_count
-    expected = str(expected_timestamp).encode("ascii")
-    if timestamps != {expected}:
-        rendered = sorted(
-            value.decode("ascii", errors="backslashreplace")[:100]
-            for value in timestamps
-        )
+    timestamps = set(matches)
+    if timestamps != {str(expected_timestamp)}:
+        rendered = sorted(value[:100] for value in timestamps)
         raise WindowsPipelineError(
-            "Generated Ninja graph does not contain only the validated Windows "
+            f"{label} does not contain only the validated Windows "
             f"/TIMESTAMP:{expected_timestamp}; observed={rendered}"
         )
+    return marker_count
+
+
+def validate_generated_chrome_linker_timestamp(
+    source: Path,
+    out: Path,
+    gn: Path,
+    env: Mapping[str, str],
+    expected_timestamp: int,
+) -> dict[str, int | str]:
+    expected_timestamp = validate_chromium_timestamp(
+        expected_timestamp, "expected generated Chrome linker timestamp"
+    )
+    dependency_result = _run(
+        [
+            str(gn),
+            "desc",
+            str(out),
+            "//chrome",
+            "deps",
+            "--type=executable",
+            "--as=label",
+            "--default-toolchain",
+        ],
+        cwd=source,
+        env=env,
+        timeout=600,
+        capture=True,
+    )
+    labels = sorted(
+        {
+            line.strip()
+            for line in (dependency_result.stdout or "").splitlines()
+            if line.strip()
+        }
+    )
+    if not labels or len(labels) > 32:
+        raise WindowsPipelineError(
+            "Chrome group has no bounded direct executable dependency set"
+        )
+    for label in labels:
+        if (
+            not GN_TARGET_LABEL_RE.fullmatch(label)
+            or ".." in label
+            or "//" in label[2:]
+        ):
+            raise WindowsPipelineError(
+                f"GN returned an unsafe Chrome executable dependency label: {label!r}"
+            )
+    chrome_outputs: list[tuple[str, str]] = []
+    for label in labels:
+        output_result = _run(
+            [str(gn), "desc", str(out), label, "outputs"],
+            cwd=source,
+            env=env,
+            timeout=600,
+            capture=True,
+        )
+        for raw_output in (output_result.stdout or "").splitlines():
+            output = raw_output.strip()
+            normalized = output.replace("\\", "/").lower()
+            if normalized == "chrome.exe" or normalized.endswith("/chrome.exe"):
+                chrome_outputs.append((label, output))
+    if len(chrome_outputs) != 1:
+        raise WindowsPipelineError(
+            "Could not resolve exactly one Chrome executable from the generated "
+            f"group dependencies: {chrome_outputs}"
+        )
+    chrome_label, chrome_output = chrome_outputs[0]
+    flags_result = _run(
+        [str(gn), "desc", str(out), chrome_label, "ldflags"],
+        cwd=source,
+        env=env,
+        timeout=600,
+        capture=True,
+    )
+    timestamp_occurrences = _validate_windows_linker_timestamp_text(
+        flags_result.stdout or "",
+        expected_timestamp,
+        f"generated linker flags for {chrome_label}",
+    )
     stats = {
-        "ninja_file_count": len(ninja_files),
-        "ninja_bytes_scanned": bytes_scanned,
+        "chrome_executable_dependency_count": len(labels),
+        "chrome_executable_label": chrome_label,
+        "chrome_executable_output": chrome_output,
         "timestamp_occurrences": timestamp_occurrences,
         "windows_build_timestamp": expected_timestamp,
     }
     print(
-        "Validated every generated Windows linker timestamp: "
-        f"{timestamp_occurrences} occurrences of /TIMESTAMP:{expected_timestamp} "
-        f"across {len(ninja_files)} Ninja files"
+        "Resolved the generated Chrome executable without a target-name assumption "
+        f"({chrome_label} -> {chrome_output}) and validated "
+        f"/TIMESTAMP:{expected_timestamp}"
     )
     return stats
 
@@ -2196,8 +2252,8 @@ def configure_gn(
         if not (result.stdout or "").strip():
             raise WindowsPipelineError(f"GN graph lacks required target {label}")
         queries[label] = result.stdout
-    timestamp_stats = validate_generated_windows_linker_timestamps(
-        out, windows_build_timestamp
+    timestamp_stats = validate_generated_chrome_linker_timestamp(
+        source, out, gn, env, windows_build_timestamp
     )
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
