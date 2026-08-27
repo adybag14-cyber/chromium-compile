@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import re
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 
 GN_RE = re.compile(r'[\'"]gn_version[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]')
 NINJA_PACKAGE_RE = re.compile(r'[\'"]ninja_package[\'"]\s*:\s*[\'"]([^\'"]+)[\'"]')
@@ -23,6 +27,214 @@ DEPOT_RE = re.compile(
     """,
     re.VERBOSE,
 )
+
+WINDOWS_GCS_TOOL_DEPENDENCIES = (
+    "src/third_party/rust-toolchain",
+    "src/third_party/llvm-libclang",
+)
+GCS_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+GCS_OBJECT_RE = re.compile(r"^[A-Za-z0-9._+/-]+\.tar\.xz$")
+
+
+@dataclass(frozen=True)
+class GcsObjectPin:
+    dependency: str
+    bucket: str
+    object_name: str
+    sha256: str
+    size_bytes: int
+    generation: str
+
+
+def _balanced_region(text: str, start: int, opener: str, closer: str) -> str:
+    """Return one balanced DEPS mapping/list without evaluating the DEPS file."""
+    if start < 0 or start >= len(text) or text[start] != opener:
+        raise ValueError(f"Expected {opener!r} at DEPS offset {start}")
+    depth = 0
+    quote = ""
+    escaped = False
+    comment = False
+    for index in range(start, len(text)):
+        character = text[index]
+        if comment:
+            if character == "\n":
+                comment = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = ""
+            continue
+        if character == "#":
+            comment = True
+        elif character in "'\"":
+            quote = character
+        elif character == opener:
+            depth += 1
+        elif character == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+            if depth < 0:
+                break
+    raise ValueError(f"Unbalanced {opener}{closer} region in Chromium DEPS")
+
+
+def _literal_field(mapping: str, field: str) -> str:
+    matches = list(re.finditer(rf"['\"]{re.escape(field)}['\"]\s*:\s*", mapping))
+    values: list[str] = []
+    for match in matches:
+        start = match.end()
+        if start >= len(mapping) or mapping[start] not in "'\"":
+            continue
+        quote = mapping[start]
+        escaped = False
+        for end in range(start + 1, len(mapping)):
+            character = mapping[end]
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                try:
+                    value = ast.literal_eval(mapping[start : end + 1])
+                except (SyntaxError, ValueError) as exc:
+                    raise ValueError(
+                        f"Malformed literal {field!r} field in Chromium DEPS"
+                    ) from exc
+                if not isinstance(value, str) or not value:
+                    raise ValueError(
+                        f"Chromium DEPS {field!r} must be a non-empty string"
+                    )
+                values.append(value)
+                break
+    if len(values) != 1:
+        raise ValueError(
+            f"Expected exactly one literal {field!r} field in Chromium DEPS"
+        )
+    return values[0]
+
+
+def _integer_field(mapping: str, field: str) -> int:
+    matches = re.findall(rf"['\"]{re.escape(field)}['\"]\s*:\s*([0-9]+)", mapping)
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one integer {field!r} field in Chromium DEPS"
+        )
+    return int(matches[0])
+
+
+def _dependency_mapping(text: str, dependency: str) -> str:
+    matches = list(
+        re.finditer(
+            rf"(?m)^\s{{2}}(['\"]){re.escape(dependency)}\1\s*:\s*\{{",
+            text,
+        )
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one {dependency!r} dependency mapping in Chromium DEPS"
+        )
+    brace = text.find("{", matches[0].start())
+    return _balanced_region(text, brace, "{", "}")
+
+
+def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
+    """Resolve one exact Windows first-class GCS object from Chromium DEPS."""
+    if dependency not in WINDOWS_GCS_TOOL_DEPENDENCIES:
+        raise ValueError(f"Unsupported Windows GCS tool dependency: {dependency!r}")
+    text = path.read_text(encoding="utf-8")
+    mapping = _dependency_mapping(text, dependency)
+    if _literal_field(mapping, "dep_type") != "gcs":
+        raise ValueError(f"Chromium dependency {dependency!r} is no longer first-class GCS")
+    bucket = _literal_field(mapping, "bucket")
+    if bucket != "chromium-browser-clang" or not GCS_BUCKET_RE.fullmatch(bucket):
+        raise ValueError(f"Unsupported GCS bucket for {dependency!r}: {bucket!r}")
+
+    objects_match = re.search(r"['\"]objects['\"]\s*:\s*\[", mapping)
+    if not objects_match:
+        raise ValueError(f"Chromium dependency {dependency!r} lacks a GCS objects list")
+    list_start = mapping.find("[", objects_match.start())
+    objects_region = _balanced_region(mapping, list_start, "[", "]")
+    object_mappings: list[str] = []
+    index = 1
+    while index < len(objects_region) - 1:
+        if objects_region[index] == "{":
+            item = _balanced_region(objects_region, index, "{", "}")
+            object_mappings.append(item)
+            index += len(item)
+        else:
+            index += 1
+
+    selected: list[GcsObjectPin] = []
+    for item in object_mappings:
+        object_name = _literal_field(item, "object_name")
+        if not object_name.startswith("Win/"):
+            continue
+        condition = _literal_field(item, "condition")
+        if not re.fullmatch(r"host_os\s*==\s*(['\"])win\1", condition):
+            raise ValueError(
+                f"Windows object for {dependency!r} has an unexpected condition: {condition!r}"
+            )
+        sha256 = _literal_field(item, "sha256sum").lower()
+        size_bytes = _integer_field(item, "size_bytes")
+        generation = str(_integer_field(item, "generation"))
+        object_path = PurePosixPath(object_name)
+        if (
+            not GCS_OBJECT_RE.fullmatch(object_name)
+            or object_path.is_absolute()
+            or object_path.parts[:1] != ("Win",)
+            or len(object_path.parts) != 2
+            or ".." in object_path.parts
+        ):
+            raise ValueError(f"Unsafe Windows GCS object name: {object_name!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValueError(f"Mutable or malformed GCS SHA-256 for {dependency!r}")
+        if not 1 <= size_bytes <= 2 * 1024**3:
+            raise ValueError(
+                f"GCS object size is outside the 2 GiB hard bound: {size_bytes}"
+            )
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", generation):
+            raise ValueError(f"Malformed GCS generation for {dependency!r}: {generation!r}")
+        selected.append(
+            GcsObjectPin(
+                dependency=dependency,
+                bucket=bucket,
+                object_name=object_name,
+                sha256=sha256,
+                size_bytes=size_bytes,
+                generation=generation,
+            )
+        )
+    if len(selected) != 1:
+        raise ValueError(
+            f"Expected exactly one unconditional Windows GCS object for {dependency!r}, "
+            f"found {len(selected)}"
+        )
+    return selected[0]
+
+
+def resolve_windows_gcs_tool_pins(path: Path) -> tuple[GcsObjectPin, ...]:
+    return tuple(
+        resolve_windows_gcs_object(path, dependency)
+        for dependency in WINDOWS_GCS_TOOL_DEPENDENCIES
+    )
+
+
+def windows_gcs_tool_descriptor_sha256(pins: tuple[GcsObjectPin, ...]) -> str:
+    if tuple(pin.dependency for pin in pins) != WINDOWS_GCS_TOOL_DEPENDENCIES:
+        raise ValueError(
+            "Windows GCS tool descriptors are missing or out of canonical order"
+        )
+    payload = json.dumps(
+        [asdict(pin) for pin in pins],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 

@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.parse
 import urllib.error
@@ -36,7 +37,12 @@ from chromium_source_object import (
     write_marker,
 )
 from chromium_source_object import fetch_metadata as fetch_source_metadata
-from chromium_tool_pins import resolve_pins
+from chromium_tool_pins import (
+    GcsObjectPin,
+    resolve_pins,
+    resolve_windows_gcs_tool_pins,
+    windows_gcs_tool_descriptor_sha256,
+)
 from chromium_windows_runtime import (
     WindowsRuntimeError,
     extract_7z_runtime,
@@ -62,9 +68,9 @@ RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 OUT_NAME = "Release_x86_win"
-CHECKPOINT_CONTRACT_VERSION = 1
-CHECKPOINT_MANIFEST_SCHEMA = 1
-PREPARED_STATE_SCHEMA = 1
+CHECKPOINT_CONTRACT_VERSION = 2
+CHECKPOINT_MANIFEST_SCHEMA = 2
+PREPARED_STATE_SCHEMA = 2
 PORT_CONFIG_HASH_SCHEMA = 1
 MAX_NO_PROGRESS_STREAK = 2
 DEFAULT_MIN_WORK_GIB = 70
@@ -73,12 +79,15 @@ DEFAULT_CHECKPOINT_RESERVE_GIB = 12
 DEFAULT_SOURCE_MAX_MEMBERS = 2_000_000
 DEFAULT_SOURCE_MAX_UNPACKED_GIB = 80
 DEFAULT_CHECKPOINT_MAX_UNPACKED_GIB = 80
+DEFAULT_TOOL_MAX_MEMBERS = 500_000
+DEFAULT_TOOL_MAX_UNPACKED_GIB = 8
 DEFAULT_NETWORK_TIMEOUT_SECONDS = 7200
 DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS = 3600
 DEFAULT_ARCHIVE_TIMEOUT_SECONDS = 1800
 DEFAULT_REMOVE_TIMEOUT_SECONDS = 900
 GITILES_HOST = "chromium.googlesource.com"
 SOURCE_DOWNLOAD_HOST = "commondatastorage.googleapis.com"
+WINDOWS_GCS_TOOL_DOWNLOAD_HOST = "commondatastorage.googleapis.com"
 WINDOWS_KITS_ROOT = Path(r"C:\Program Files (x86)\Windows Kits\10")
 WINDOWS_SYSTEM_DRIVE_ROOT = Path("C:\\")
 TRUSTED_BUILD_WORKFLOW = ".github/workflows/chromium-windows-i686.yml"
@@ -90,6 +99,8 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
     (
         "7z",
         "7z.exe",
+        "bindgen.exe",
+        "cargo.exe",
         "clang-cl.exe",
         "cmd.exe",
         "curl",
@@ -107,12 +118,20 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
         "python.exe",
         "python3",
         "python3.exe",
+        "rustc.exe",
+        "rustfmt.exe",
         "tar",
         "tar.exe",
         "winget",
         "winget.exe",
         "vswhere.exe",
     )
+)
+
+WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
 )
 
 WINDOWS_GN_ARGS = """\
@@ -181,6 +200,7 @@ class PreparedState:
     ninja_package: str
     ninja_version: str
     cpython3_version: str
+    windows_gcs_tools_sha256: str
     clang_revision: str
     sdk_family: str
     sdk_servicing: str
@@ -581,7 +601,12 @@ def _download_source_object(
         source_download_url(version),
     ]
     result = _run(command, timeout=timeout_seconds + 120, capture=True)
-    effective = (result.stdout or "").strip().splitlines()[-1]
+    effective_lines = (result.stdout or "").strip().splitlines()
+    if not effective_lines:
+        raise InfrastructureError(
+            f"curl omitted its effective URL for Windows GCS tool {pin.dependency}"
+        )
+    effective = effective_lines[-1]
     validate_effective_https_host(effective, SOURCE_DOWNLOAD_HOST)
 
 
@@ -1047,13 +1072,287 @@ def _depot_python(depot_tools: Path) -> Path:
     return depot_tools / Path(*PurePosixPath(relative).parts) / "python3.exe"
 
 
+def _gcs_tool_download_url(pin: GcsObjectPin) -> str:
+    bucket = urllib.parse.quote(pin.bucket, safe="")
+    object_name = urllib.parse.quote(pin.object_name, safe="/._+-")
+    return (
+        f"https://{WINDOWS_GCS_TOOL_DOWNLOAD_HOST}/{bucket}/{object_name}"
+        f"?generation={pin.generation}"
+    )
+
+
+def _download_gcs_tool_archive(pin: GcsObjectPin, work_root: Path) -> Path:
+    archive_dir = work_root / "gcs-tool-archives"
+    archive_dir.mkdir(exist_ok=True)
+    safe_stem = pin.dependency.rsplit("/", 1)[-1]
+    archive = archive_dir / f"{safe_stem}-{pin.sha256[:16]}.tar.xz"
+    partial = archive.with_suffix(archive.suffix + ".partial")
+    for candidate in (archive, partial):
+        if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
+            raise WindowsPipelineError(
+                f"Windows GCS tool cache path is not a regular file: {candidate}"
+            )
+    if archive.is_file():
+        if archive.stat().st_size != pin.size_bytes or sha256_file(archive) != pin.sha256:
+            raise WindowsPipelineError(
+                f"Cached Windows GCS tool archive does not match Chromium DEPS: {archive.name}"
+            )
+        print(f"Reusing verified Windows GCS tool archive {archive.name}")
+        return archive
+    if partial.exists() and partial.stat().st_size > pin.size_bytes:
+        partial.unlink()
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise InfrastructureError("curl is unavailable for source-declared Windows GCS tools")
+    result = _run(
+        [
+            curl,
+            "--fail",
+            "--location",
+            "--retry",
+            "6",
+            "--retry-all-errors",
+            "--retry-delay",
+            "10",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            str(DEFAULT_NETWORK_TIMEOUT_SECONDS),
+            "--continue-at",
+            "-",
+            "--output",
+            str(partial),
+            "--write-out",
+            "%{url_effective}",
+            _gcs_tool_download_url(pin),
+        ],
+        timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS + 120,
+        capture=True,
+    )
+    effective = (result.stdout or "").strip().splitlines()[-1]
+    validate_effective_https_host(effective, WINDOWS_GCS_TOOL_DOWNLOAD_HOST)
+    actual_size = partial.stat().st_size if partial.is_file() else -1
+    if actual_size != pin.size_bytes:
+        raise InfrastructureError(
+            f"Windows GCS tool download length mismatch for {pin.dependency}: "
+            f"expected {pin.size_bytes}, got {actual_size}"
+        )
+    actual_sha = sha256_file(partial)
+    if actual_sha != pin.sha256:
+        raise WindowsPipelineError(
+            f"Windows GCS tool SHA-256 mismatch for {pin.dependency}: "
+            f"expected {pin.sha256}, got {actual_sha}"
+        )
+    os.replace(partial, archive)
+    print(
+        f"Downloaded exact {pin.dependency} GCS generation {pin.generation}: "
+        f"{pin.size_bytes} bytes, SHA-256 {pin.sha256}"
+    )
+    return archive
+
+
+def _safe_tool_member_name(name: str) -> str | None:
+    if not name or "\x00" in name or "\\" in name:
+        raise WindowsPipelineError(f"Unsafe Windows tool archive member: {name!r}")
+    while name.startswith("./"):
+        name = name[2:]
+    if name.rstrip("/") in {"", "."}:
+        return None
+    path = PurePosixPath(name.rstrip("/"))
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise WindowsPipelineError(f"Unsafe Windows tool archive path: {name!r}")
+    if re.match(r"^[A-Za-z]:", path.as_posix()):
+        raise WindowsPipelineError(f"Drive-qualified Windows tool archive path: {name!r}")
+    for part in path.parts:
+        if any(ord(character) < 32 for character in part):
+            raise WindowsPipelineError(
+                f"Control character in Windows tool archive path: {name!r}"
+            )
+        if ":" in part or part.endswith((" ", ".")):
+            raise WindowsPipelineError(
+                f"Windows-ambiguous tool archive path: {name!r}"
+            )
+        if part.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+            raise WindowsPipelineError(
+                f"Windows device-name tool archive path: {name!r}"
+            )
+    return path.as_posix()
+
+
+def _extract_gcs_tool_archive(
+    archive: Path,
+    destination: Path,
+    *,
+    source_root: Path,
+) -> dict[str, int]:
+    source_root = source_root.resolve()
+    resolved_parent = destination.parent.resolve()
+    if source_root != resolved_parent and source_root not in resolved_parent.parents:
+        raise WindowsPipelineError(
+            f"Windows GCS tool destination escapes source: {destination}"
+        )
+    if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+        raise WindowsPipelineError(
+            f"Windows GCS tool destination is not a regular directory: {destination}"
+        )
+    staging = destination.with_name(f".{destination.name}.partial-{uuid.uuid4().hex}")
+    if staging.exists() or staging.is_symlink():
+        raise InfrastructureError(
+            f"Generated Windows tool staging path already exists: {staging}"
+        )
+    staging.mkdir(parents=False)
+    seen: set[str] = set()
+    seen_casefold: set[str] = set()
+    member_count = 0
+    unpacked_bytes = 0
+    max_unpacked_bytes = DEFAULT_TOOL_MAX_UNPACKED_GIB * 1024**3
+    try:
+        try:
+            tar = tarfile.open(archive, mode="r:xz")
+        except tarfile.TarError as exc:
+            raise WindowsPipelineError(
+                f"Source-declared Windows tool object is not a valid xz tar archive: {archive.name}"
+            ) from exc
+        with tar:
+            for member in tar:
+                member_count += 1
+                if member_count > DEFAULT_TOOL_MAX_MEMBERS:
+                    raise WindowsPipelineError(
+                        f"Windows tool archive exceeds member limit {DEFAULT_TOOL_MAX_MEMBERS}"
+                    )
+                name = _safe_tool_member_name(member.name)
+                if name is None:
+                    continue
+                folded = name.casefold()
+                if name in seen or folded in seen_casefold:
+                    raise WindowsPipelineError(
+                        f"Duplicate or case-aliasing Windows tool archive member: {name}"
+                    )
+                seen.add(name)
+                seen_casefold.add(folded)
+                if not (member.isfile() or member.isdir()):
+                    raise WindowsPipelineError(
+                        f"Windows tool archive contains a link or special file: {name}"
+                    )
+                target = staging.joinpath(*PurePosixPath(name).parts)
+                resolved_target = target.resolve()
+                resolved_staging = staging.resolve()
+                if (
+                    resolved_target != resolved_staging
+                    and resolved_staging not in resolved_target.parents
+                ):
+                    raise WindowsPipelineError(
+                        f"Windows tool archive extraction escaped staging: {name}"
+                    )
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if member.size < 0 or member.size > max_unpacked_bytes - unpacked_bytes:
+                    raise WindowsPipelineError(
+                        f"Windows tool archive exceeds {DEFAULT_TOOL_MAX_UNPACKED_GIB} GiB unpacked bound"
+                    )
+                unpacked_bytes += member.size
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = tar.extractfile(member)
+                if source is None:
+                    raise WindowsPipelineError(
+                        f"Could not read regular Windows tool archive member: {name}"
+                    )
+                with source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=8 * 1024 * 1024)
+        if destination.exists():
+            shutil.rmtree(destination)
+        os.replace(staging, destination)
+    except Exception:
+        if staging.is_dir() and not staging.is_symlink():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    print(
+        f"Safely extracted {archive.name}: members={member_count}; "
+        f"unpacked_bytes={unpacked_bytes}; destination={destination}"
+    )
+    return {"member_count": member_count, "unpacked_bytes": unpacked_bytes}
+
+
+def install_windows_gcs_tools(
+    source: Path,
+    work_root: Path,
+    depot_tools: Path,
+    env: Mapping[str, str],
+) -> tuple[str, tuple[GcsObjectPin, ...]]:
+    pins = resolve_windows_gcs_tool_pins(source / "DEPS")
+    descriptor_sha = windows_gcs_tool_descriptor_sha256(pins)
+    for pin in pins:
+        relative = PurePosixPath(pin.dependency).relative_to("src")
+        destination = source.joinpath(*relative.parts)
+        archive = _download_gcs_tool_archive(pin, work_root)
+        _extract_gcs_tool_archive(archive, destination, source_root=source)
+        marker = destination / ".chromium-windows-i686-gcs.json"
+        marker.write_text(
+            json.dumps(asdict(pin), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    rust_root = source / "third_party/rust-toolchain"
+    required_rust = (
+        rust_root / "VERSION",
+        rust_root / "bin/bindgen.exe",
+        rust_root / "bin/cargo.exe",
+        rust_root / "bin/rustc.exe",
+        rust_root / "bin/rustfmt.exe",
+    )
+    missing = [
+        str(path)
+        for path in required_rust
+        if not path.is_file() or path.is_symlink()
+    ]
+    if missing:
+        raise WindowsPipelineError(
+            "Chromium-pinned Windows Rust toolchain is incomplete: " + ", ".join(missing)
+        )
+    libclang_root = source / "third_party/llvm-libclang"
+    libclang = [
+        path
+        for path in libclang_root.rglob("libclang.dll")
+        if path.is_file() and not path.is_symlink()
+    ]
+    if len(libclang) != 1:
+        raise WindowsPipelineError(
+            f"Chromium-pinned Windows libclang payload must contain exactly one libclang.dll; "
+            f"found {len(libclang)}"
+        )
+    for executable in required_rust[1:]:
+        _run([str(executable), "--version"], cwd=source, env=env, timeout=120)
+    depot_python = _depot_python(depot_tools)
+    _run(
+        [
+            str(depot_python),
+            str(source / "tools/rust/update_rust.py"),
+            "--print-revision",
+            "validate",
+        ],
+        cwd=source,
+        env=env,
+        timeout=120,
+    )
+    print(
+        "Validated source-declared Windows Rust/libclang GCS descriptors: "
+        f"SHA-256 {descriptor_sha}"
+    )
+    return descriptor_sha, pins
+
+
 def install_source_declared_tools(
     source: Path,
     work_root: Path,
     depot_tools: Path,
     pins: Mapping[str, str],
     env: Mapping[str, str],
-) -> tuple[Path, Path, str]:
+) -> tuple[Path, Path, str, str, tuple[GcsObjectPin, ...]]:
     cipd = depot_tools / "cipd.bat"
     gn_root = work_root / "gn"
     gn_root.mkdir(exist_ok=True)
@@ -1155,6 +1454,10 @@ def install_source_declared_tools(
         )
     _run([str(target_python), "--version"], env=env, timeout=60)
 
+    windows_gcs_tools_sha256, windows_gcs_pins = install_windows_gcs_tools(
+        source, work_root, depot_tools, env
+    )
+
     depot_python = _depot_python(depot_tools)
     _run(
         [str(depot_python), str(source / "tools/clang/scripts/update.py")],
@@ -1198,10 +1501,11 @@ def install_source_declared_tools(
         encoding="utf-8",
     )
     (util / "LASTCHANGE.committime").write_text("0\n", encoding="utf-8")
-    return gn, ninja, clang_revision
+    return gn, ninja, clang_revision, windows_gcs_tools_sha256, windows_gcs_pins
 
 
 PORT_CONFIG_FILES = (
+    "scripts/chromium_tool_pins.py",
     "scripts/chromium_windows_pipeline.py",
     "scripts/chromium_windows_runtime.py",
     "scripts/ninja_stall_watchdog.py",
@@ -1304,6 +1608,10 @@ def read_prepared_state(work_root: Path) -> PreparedState:
         raise WindowsPipelineError(f"Unsupported prepared state schema: {state.schema}")
     validate_version(state.version)
     validate_sha256(state.source_sha256, "prepared source SHA-256")
+    validate_sha256(
+        state.windows_gcs_tools_sha256,
+        "prepared Windows GCS tool descriptor SHA-256",
+    )
     validate_sha256(state.port_config_sha256, "prepared port configuration SHA-256")
     bounded_int(
         state.checkpoint_no_progress_streak,
@@ -1547,7 +1855,7 @@ def validate_release_bundle(
         raise WindowsPipelineError("Release checksum sidecar is malformed or inconsistent")
     fields = _parse_release_manifest(manifest_path)
     exact = {
-        "manifest_schema": "1",
+        "manifest_schema": "2",
         "version": version,
         "target_cpu": "x86",
         "target_os": "win",
@@ -1566,6 +1874,7 @@ def validate_release_bundle(
     for key in (
         "source_tar_sha256",
         "port_config_sha256",
+        "windows_gcs_tools_sha256",
     ):
         validate_sha256(fields.get(key, ""), f"manifest {key}")
     if not re.fullmatch(r"git_revision:[0-9a-f]{40}", fields.get("gn_version", "")):
@@ -1618,6 +1927,7 @@ def _checkpoint_manifest_matches_state(
         "ninja_package": state.ninja_package,
         "ninja_version": state.ninja_version,
         "cpython3_version": state.cpython3_version,
+        "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "visual_studio_year": state.visual_studio_year,
@@ -1883,6 +2193,7 @@ def create_checkpoint(
         "ninja_package": state.ninja_package,
         "ninja_version": state.ninja_version,
         "cpython3_version": state.cpython3_version,
+        "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "sdk_servicing": state.sdk_servicing,
@@ -1953,7 +2264,13 @@ def prepare_pipeline(
         env=env,
         timeout=DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS,
     )
-    gn, ninja, clang_revision = install_source_declared_tools(
+    (
+        gn,
+        ninja,
+        clang_revision,
+        windows_gcs_tools_sha256,
+        windows_gcs_pins,
+    ) = install_source_declared_tools(
         source, work_root, depot_tools, pins, env
     )
     port_hash = compute_port_config_sha256(repository_root)
@@ -1966,6 +2283,7 @@ def prepare_pipeline(
         ninja_package=pins["ninja_package"],
         ninja_version=pins["ninja_version"],
         cpython3_version=pins["cpython3_version"],
+        windows_gcs_tools_sha256=windows_gcs_tools_sha256,
         clang_revision=clang_revision,
         sdk_family=requirements.sdk_family,
         sdk_servicing=sdk_servicing,
@@ -2011,6 +2329,15 @@ def prepare_pipeline(
         )
         (evidence_dir / "prepared-state.json").write_text(
             json.dumps(asdict(state), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (evidence_dir / "windows-gcs-tools.json").write_text(
+            json.dumps(
+                [asdict(pin) for pin in windows_gcs_pins],
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -2270,7 +2597,7 @@ def package_build(
         raise WindowsPipelineError("GITHUB_RUN_ID is missing or malformed during packaging")
     packaged_files = _zip_member_names(package)
     fields = (
-        ("manifest_schema", "1"),
+        ("manifest_schema", "2"),
         ("version", version),
         ("target_cpu", "x86"),
         ("target_os", "win"),
@@ -2284,6 +2611,7 @@ def package_build(
         ("ninja_package", state.ninja_package),
         ("ninja_version", state.ninja_version),
         ("cpython3_version", state.cpython3_version),
+        ("windows_gcs_tools_sha256", state.windows_gcs_tools_sha256),
         ("depot_tools_revision", state.depot_tools_revision),
         ("windows_sdk_family", state.sdk_family),
         ("windows_sdk_servicing", state.sdk_servicing),

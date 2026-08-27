@@ -29,6 +29,40 @@ archive_validator = load_module("validate_release_archive", "scripts/validate_re
 
 
 class ToolPinTests(unittest.TestCase):
+    WINDOWS_GCS_DEPS = """
+  'src/third_party/rust-toolchain': {
+    'dep_type': 'gcs',
+    'bucket': 'chromium-browser-clang',
+    'objects': [
+      {
+        'object_name': 'Linux_x64/rust-toolchain-source-pin.tar.xz',
+        'sha256sum': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'size_bytes': 123,
+        'generation': 111,
+        'condition': 'host_os == "linux" and non_git_source',
+      },
+      {
+        'condition': 'host_os == "win"',
+        'generation': 1786821099612317,
+        'size_bytes': 414479372,
+        'sha256sum': '14bc9cea5e00cb191f58204ef44d68a6794f856a76f885c50298a12d052035bc',
+        'object_name': 'Win/rust-toolchain-source-pin.tar.xz',
+      },
+    ],
+  },
+  'src/third_party/llvm-libclang': {
+    'bucket': 'chromium-browser-clang',
+    'objects': [{
+      'object_name': 'Win/rust-libclang-source-pin.tar.xz',
+      'sha256sum': '75033b0243acf7c25227f6015c60797724b98d1de5514e9e1a374735ef76aa4e',
+      'size_bytes': 21534908,
+      'generation': 1786821101319840,
+      'condition': 'host_os == "win"',
+    }],
+    'dep_type': 'gcs',
+  },
+"""
+
     def test_cpython_pin_is_optional_for_pre_cpython_chromium_deps(self):
         with tempfile.TemporaryDirectory() as tmp:
             deps = pathlib.Path(tmp) / "DEPS"
@@ -105,6 +139,52 @@ deps = {
             )
             with self.assertRaises(ValueError):
                 tool_pins.resolve_pins(deps)
+
+    def test_resolves_exact_windows_gcs_tool_objects_without_evaluating_deps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text("deps = {\n" + self.WINDOWS_GCS_DEPS + "}\n", encoding="utf-8")
+            pins = tool_pins.resolve_windows_gcs_tool_pins(deps)
+            self.assertEqual(
+                [pin.dependency for pin in pins],
+                list(tool_pins.WINDOWS_GCS_TOOL_DEPENDENCIES),
+            )
+            self.assertEqual(pins[0].object_name, "Win/rust-toolchain-source-pin.tar.xz")
+            self.assertEqual(pins[0].generation, "1786821099612317")
+            self.assertEqual(pins[0].size_bytes, 414479372)
+            digest = tool_pins.windows_gcs_tool_descriptor_sha256(pins)
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_windows_gcs_tool_pin_rejects_broadened_host_condition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace(
+                    "'condition': 'host_os == \"win\"',",
+                    "'condition': 'host_os == \"win\" or checkout_win',",
+                    1,
+                )
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unexpected condition"):
+                tool_pins.resolve_windows_gcs_tool_pins(deps)
+
+    def test_windows_gcs_tool_pin_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace(
+                    "Win/rust-toolchain-source-pin.tar.xz",
+                    "Win/../rust-toolchain-source-pin.tar.xz",
+                )
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unsafe Windows GCS object"):
+                tool_pins.resolve_windows_gcs_tool_pins(deps)
 
 
 

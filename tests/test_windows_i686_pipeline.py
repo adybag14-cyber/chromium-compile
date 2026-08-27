@@ -1,7 +1,9 @@
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+import tarfile
 import tempfile
 import unittest
 import urllib.error
@@ -19,6 +21,14 @@ SPEC.loader.exec_module(pipeline)
 
 
 class WindowsI686PipelineTests(unittest.TestCase):
+    @staticmethod
+    def _write_xz_tar(path: pathlib.Path, members: list[tuple[str, bytes]]) -> None:
+        with tarfile.open(path, "w:xz") as archive:
+            for name, payload in members:
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+
     def test_runner_command_files_are_scoped_to_runner_temp(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
@@ -229,6 +239,53 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('target_python = cpython_target / "bin/python3"', tool_block)
         self.assertIn("shutil.copy2(target_python_exe, target_python)", tool_block)
         self.assertIn("sha256_file(target_python)", tool_block)
+        self.assertIn("install_windows_gcs_tools(", tool_block)
+        self.assertIn('rust_root / "bin/bindgen.exe"', source)
+        self.assertIn('source / "third_party/llvm-libclang"', source)
+        self.assertIn('"--print-revision",', source)
+        self.assertIn('"validate",', source)
+
+    def test_windows_gcs_tool_archive_extracts_regular_members_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            source = root / "src"
+            destination = source / "third_party/rust-toolchain"
+            destination.parent.mkdir(parents=True)
+            archive = root / "tool.tar.xz"
+            self._write_xz_tar(
+                archive,
+                [
+                    ("VERSION", b"rustc fixture\n"),
+                    ("bin/bindgen.exe", b"MZfixture"),
+                ],
+            )
+            stats = pipeline._extract_gcs_tool_archive(
+                archive, destination, source_root=source
+            )
+            self.assertEqual(stats["member_count"], 2)
+            self.assertEqual((destination / "VERSION").read_bytes(), b"rustc fixture\n")
+            self.assertEqual((destination / "bin/bindgen.exe").read_bytes(), b"MZfixture")
+
+    def test_windows_gcs_tool_archive_rejects_traversal_and_case_aliases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            source = root / "src"
+            destination = source / "third_party/rust-toolchain"
+            destination.parent.mkdir(parents=True)
+            traversal = root / "traversal.tar.xz"
+            self._write_xz_tar(traversal, [("../escape", b"bad")])
+            with self.assertRaisesRegex(pipeline.WindowsPipelineError, "Unsafe"):
+                pipeline._extract_gcs_tool_archive(
+                    traversal, destination, source_root=source
+                )
+            self.assertFalse((root / "escape").exists())
+
+            alias = root / "alias.tar.xz"
+            self._write_xz_tar(alias, [("bin/Tool.exe", b"one"), ("bin/tool.exe", b"two")])
+            with self.assertRaisesRegex(pipeline.WindowsPipelineError, "case-aliasing"):
+                pipeline._extract_gcs_tool_archive(
+                    alias, destination, source_root=source
+                )
 
     def test_gn_args_use_trusted_file_not_multiline_command_argument(self):
         source = (ROOT / "scripts/chromium_windows_pipeline.py").read_text(
