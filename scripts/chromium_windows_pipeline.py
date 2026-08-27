@@ -965,6 +965,10 @@ def _depot_environment(
 
 def install_depot_tools(source: Path, work_root: Path) -> tuple[Path, dict[str, str]]:
     pins = resolve_pins(source / "DEPS")
+    if "cpython3_version" not in pins:
+        raise WindowsPipelineError(
+            "Windows Chromium DEPS lacks an immutable cpython3_version required by early GN scripts"
+        )
     revision = pins["depot_tools_revision"]
     depot = work_root / "depot_tools"
     if depot.exists():

@@ -39,8 +39,6 @@ def resolve_pins(path: Path) -> dict[str, str]:
         raise ValueError(f"Could not resolve depot_tools revision from {path}")
     if not ninja_package or not ninja_version:
         raise ValueError(f"Could not resolve Ninja CIPD pin from {path}")
-    if not cpython3_version:
-        raise ValueError(f"Could not resolve CPython 3 CIPD pin from {path}")
     gn_version = gn.group(1)
     if not re.fullmatch(r"git_revision:[0-9a-f]{40}", gn_version):
         raise ValueError(f"Unsupported or mutable gn_version in {path}: {gn_version!r}")
@@ -54,21 +52,23 @@ def resolve_pins(path: Path) -> dict[str, str]:
         raise ValueError(
             f"Unsupported or mutable ninja_version in {path}: {resolved_ninja_version!r}"
         )
-    resolved_cpython3_version = cpython3_version.group(1)
-    if not re.fullmatch(
-        r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+", resolved_cpython3_version
-    ):
-        raise ValueError(
-            f"Unsupported or mutable cpython3_version in {path}: "
-            f"{resolved_cpython3_version!r}"
-        )
-    return {
+    result = {
         "gn_version": gn_version,
         "depot_tools_revision": depot.group(1),
         "ninja_package": resolved_ninja_package,
         "ninja_version": resolved_ninja_version,
-        "cpython3_version": resolved_cpython3_version,
     }
+    if cpython3_version:
+        resolved_cpython3_version = cpython3_version.group(1)
+        if not re.fullmatch(
+            r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+", resolved_cpython3_version
+        ):
+            raise ValueError(
+                f"Unsupported or mutable cpython3_version in {path}: "
+                f"{resolved_cpython3_version!r}"
+            )
+        result["cpython3_version"] = resolved_cpython3_version
+    return result
 
 
 def main() -> int:
@@ -87,6 +87,8 @@ def main() -> int:
     args = parser.parse_args()
     pins = resolve_pins(args.deps)
     if args.field:
+        if args.field not in pins:
+            raise ValueError(f"Could not resolve {args.field} from {args.deps}")
         print(pins[args.field])
     else:
         print(json.dumps(pins, sort_keys=True))
