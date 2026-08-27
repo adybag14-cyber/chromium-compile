@@ -29,6 +29,121 @@ archive_validator = load_module("validate_release_archive", "scripts/validate_re
 
 
 class ToolPinTests(unittest.TestCase):
+    DEVTOOLS_CIPD_DEPS = """
+deps = {
+  'third_party/esbuild': {
+    'packages': [{
+      'package': 'infra/3pp/tools/esbuild/${{platform}}',
+      'version': 'version:3@0.25.1.chromium.2',
+    }],
+    'dep_type': 'cipd',
+    'condition': 'non_git_source',
+  },
+  'third_party/rollup_libs': {
+    'packages': [{
+      'package': 'infra/3pp/tools/rollup_libs/${{platform}}',
+      'version': 'version:3@4.60.4',
+    }],
+    'dep_type': 'cipd',
+    'condition': 'non_git_source',
+  },
+}
+"""
+
+    WINDOWS_GCS_DEPS = """
+  'src/buildtools/win-format': {
+    'bucket': 'chromium-clang-format',
+    'condition': 'host_os == "win" and non_git_source',
+    'dep_type': 'gcs',
+    'objects': [{
+      'object_name': 'fb0bcaf406ad6f0bd6b4a6347d2abe78a94fb13e',
+      'sha256sum': 'ee7a1f89733de23daf8ee035f8aebafa52410c9f4dd1f05ee12a95ce517a0953',
+      'size_bytes': 3799552,
+      'generation': 1779297371701340,
+      'output_file': 'clang-format.exe',
+    }],
+  },
+  'src/third_party/node/win': {
+    'dep_type': 'gcs',
+    'condition': 'host_os == "win" and non_git_source',
+    'bucket': 'chromium-nodejs',
+    'objects': [{
+      'object_name': '2f710ced2db2beb7c3debf6097196c35ee5adb74',
+      'sha256sum': '2ffe3acc0458fdde999f50d11809bbe7c9b7ef204dcf17094e325d26ace101d8',
+      'size_bytes': 89935872,
+      'generation': 1767604839180114,
+      'output_file': 'node.exe',
+    }],
+  },
+  'src/third_party/node/node_modules': {
+    'bucket': 'chromium-nodejs',
+    'dep_type': 'gcs',
+    'condition': 'non_git_source',
+    'objects': [{
+      'object_name': 'faaf73cc8ff7b0b2f0d984d6cedcf758e006f57a',
+      'sha256sum': 'a298af5fafd358179d6aec9a42f667902dbcdb03a42ee4a87a1bff83515e96b9',
+      'size_bytes': 11320770,
+      'generation': 1781805676756361,
+      'output_file': 'node_modules.tar.gz',
+    }],
+  },
+  'src/third_party/rust-toolchain': {
+    'dep_type': 'gcs',
+    'bucket': 'chromium-browser-clang',
+    'objects': [
+      {
+        'object_name': 'Linux_x64/rust-toolchain-source-pin.tar.xz',
+        'sha256sum': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'size_bytes': 123,
+        'generation': 111,
+        'condition': 'host_os == "linux" and non_git_source',
+      },
+      {
+        'condition': 'host_os == "win"',
+        'generation': 1786821099612317,
+        'size_bytes': 414479372,
+        'sha256sum': '14bc9cea5e00cb191f58204ef44d68a6794f856a76f885c50298a12d052035bc',
+        'object_name': 'Win/rust-toolchain-source-pin.tar.xz',
+      },
+    ],
+  },
+  'src/third_party/llvm-libclang': {
+    'bucket': 'chromium-browser-clang',
+    'objects': [{
+      'object_name': 'Win/rust-libclang-source-pin.tar.xz',
+      'sha256sum': '75033b0243acf7c25227f6015c60797724b98d1de5514e9e1a374735ef76aa4e',
+      'size_bytes': 21534908,
+      'generation': 1786821101319840,
+      'condition': 'host_os == "win"',
+    }],
+    'dep_type': 'gcs',
+  },
+  'src/third_party/typescript/windows-amd64/src': {
+    'dep_type': 'cipd',
+    'condition': 'checkout_win and non_git_source',
+    'packages': [{
+      'package': 'chromium/third_party/typescript/windows-amd64',
+      'version': 'version:2@7.0.2',
+    }],
+  },
+  'src/third_party/gperf': {
+    'url': Var('chromium_git') + '/chromium/deps/gperf.git' + '@' + 'e9eeea862a18e77b945d98eff7e1bf065d3daf8e',
+    'condition': 'checkout_win',
+  },
+  'src/third_party/microsoft_dxheaders/src': {
+    'url': Var('chromium_git') + '/external/github.com/microsoft/DirectX-Headers.git' + '@' + '07b94cba474be6cdfd934febdbd0b21ca0524187',
+    'condition': 'checkout_win',
+  },
+  'src/third_party/microsoft_webauthn/src': {
+    'url': Var('chromium_git') + '/external/github.com/microsoft/webauthn.git' + '@' + 'ef82c157125a0490e05f6ea82a7adb1b8e1bad08',
+    'condition': 'checkout_win',
+  },
+  'src/third_party/perl': {
+    'url': Var('chromium_git') + '/chromium/deps/perl.git' + '@' + 'a2bd4470d3485e6eda532eee416a71d16db2d7ba',
+    'condition': 'checkout_win',
+  },
+"""
+
     def test_cpython_pin_is_optional_for_pre_cpython_chromium_deps(self):
         with tempfile.TemporaryDirectory() as tmp:
             deps = pathlib.Path(tmp) / "DEPS"
@@ -105,6 +220,115 @@ deps = {
             )
             with self.assertRaises(ValueError):
                 tool_pins.resolve_pins(deps)
+
+    def test_resolves_exact_windows_gcs_tool_objects_without_evaluating_deps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text("deps = {\n" + self.WINDOWS_GCS_DEPS + "}\n", encoding="utf-8")
+            pins = tool_pins.resolve_windows_gcs_tool_pins(deps)
+            self.assertEqual(
+                [pin.dependency for pin in pins],
+                list(tool_pins.WINDOWS_GCS_TOOL_DEPENDENCIES),
+            )
+            self.assertEqual(pins[0].output_file, "clang-format.exe")
+            self.assertEqual(pins[1].output_file, "node.exe")
+            self.assertEqual(pins[2].output_file, "node_modules.tar.gz")
+            self.assertEqual(pins[3].object_name, "Win/rust-toolchain-source-pin.tar.xz")
+            self.assertEqual(pins[3].generation, "1786821099612317")
+            self.assertEqual(pins[3].size_bytes, 414479372)
+            digest = tool_pins.windows_gcs_tool_descriptor_sha256(pins)
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            cipd = tool_pins.resolve_windows_cipd_tool_pins(deps, devtools)
+            self.assertEqual(len(cipd), 3)
+            self.assertEqual(
+                cipd[0].package,
+                "chromium/third_party/typescript/windows-amd64",
+            )
+            self.assertEqual(cipd[0].version, "version:2@7.0.2")
+            self.assertEqual(
+                cipd[1].package,
+                "infra/3pp/tools/esbuild/windows-amd64",
+            )
+            self.assertEqual(
+                cipd[2].package,
+                "infra/3pp/tools/rollup_libs/windows-amd64",
+            )
+            self.assertRegex(
+                tool_pins.windows_cipd_tool_descriptor_sha256(cipd),
+                r"^[0-9a-f]{64}$",
+            )
+            git_pins = tool_pins.resolve_windows_git_tool_pins(deps)
+            self.assertEqual(len(git_pins), 4)
+            self.assertEqual(
+                git_pins[0].revision,
+                "e9eeea862a18e77b945d98eff7e1bf065d3daf8e",
+            )
+            self.assertRegex(
+                tool_pins.windows_git_tool_descriptor_sha256(git_pins),
+                r"^[0-9a-f]{64}$",
+            )
+
+    def test_windows_gcs_tool_pin_rejects_broadened_host_condition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace(
+                    "'condition': 'host_os == \"win\"',",
+                    "'condition': 'host_os == \"win\" or checkout_win',",
+                    1,
+                )
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unexpected condition"):
+                tool_pins.resolve_windows_gcs_tool_pins(deps)
+
+    def test_windows_gcs_tool_pin_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace(
+                    "Win/rust-toolchain-source-pin.tar.xz",
+                    "Win/../rust-toolchain-source-pin.tar.xz",
+                )
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unsafe Windows GCS object"):
+                tool_pins.resolve_windows_gcs_tool_pins(deps)
+
+    def test_windows_typescript_cipd_pin_rejects_mutable_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace("version:2@7.0.2", "latest")
+                + "}\n",
+                encoding="utf-8",
+            )
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools)
+
+    def test_windows_git_tool_rejects_repository_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace(
+                    "/chromium/deps/gperf.git",
+                    "/attacker/gperf.git",
+                )
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "moved repositories"):
+                tool_pins.resolve_windows_git_tool_pins(deps)
 
 
 
