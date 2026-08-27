@@ -1025,18 +1025,6 @@ def install_depot_tools(source: Path, work_root: Path) -> tuple[Path, dict[str, 
         env=bootstrap_env,
         timeout=300,
     )
-    _run(
-        [
-            "cmd.exe",
-            "/d",
-            "/c",
-            "call",
-            str(depot / "gclient.bat"),
-            "--version",
-        ],
-        env={**bootstrap_env, "PATH": str(depot) + os.pathsep + bootstrap_env.get("PATH", "")},
-        timeout=300,
-    )
     marker = depot / "python3_bin_reldir.txt"
     if not marker.is_file():
         raise WindowsPipelineError("Pinned depot_tools bootstrap omitted python3_bin_reldir.txt")
@@ -1194,14 +1182,15 @@ def configure_gn(
 ) -> Path:
     out = source / "out" / OUT_NAME
     out.mkdir(parents=True, exist_ok=True)
+    args_gn = out / "args.gn"
+    args_gn.write_text(WINDOWS_GN_ARGS, encoding="utf-8", newline="\n")
     _run(
-        [str(gn), "gen", str(out), f"--args={WINDOWS_GN_ARGS}"],
+        [str(gn), "gen", str(out)],
         cwd=source,
         env=env,
         timeout=DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS,
     )
     build_ninja = out / "build.ninja"
-    args_gn = out / "args.gn"
     if not build_ninja.is_file() or not args_gn.is_file():
         raise WindowsPipelineError("GN succeeded without build.ninja and args.gn")
     rendered = args_gn.read_text(encoding="utf-8")

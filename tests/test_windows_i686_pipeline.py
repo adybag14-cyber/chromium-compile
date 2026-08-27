@@ -224,6 +224,18 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('ninja_root = work_root / "ninja"', tool_block)
         self.assertNotIn('ninja_root = source / "third_party/ninja"', tool_block)
 
+    def test_gn_args_use_trusted_file_not_multiline_command_argument(self):
+        source = (ROOT / "scripts/chromium_windows_pipeline.py").read_text(
+            encoding="utf-8"
+        )
+        block = source[
+            source.index("def configure_gn(") : source.index(
+                "def _read_json_object(")
+        ]
+        self.assertIn('args_gn.write_text(WINDOWS_GN_ARGS', block)
+        self.assertIn('[str(gn), "gen", str(out)]', block)
+        self.assertNotIn("--args=", block)
+
 
 if __name__ == "__main__":
     unittest.main()
