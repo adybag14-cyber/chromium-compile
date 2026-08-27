@@ -1087,8 +1087,12 @@ def install_source_declared_tools(
         raise WindowsPipelineError("Chromium-pinned GN CIPD install omitted gn.exe")
     _run([str(gn), "--version"], env=env, timeout=60)
 
-    ninja_root = source / "third_party/ninja"
-    ninja_root.mkdir(parents=True, exist_ok=True)
+    # The official source tarball already contains a populated
+    # third_party/ninja directory, so it cannot become a fresh CIPD site root.
+    # Install the exact DEPS pin beside GN under the marked short work root and
+    # invoke that executable directly during every compiler slice.
+    ninja_root = work_root / "ninja"
+    ninja_root.mkdir(exist_ok=True)
     ninja_package = pins["ninja_package"] + "windows-amd64"
     _run(
         [
@@ -2043,7 +2047,7 @@ def run_build_slice(
     remaining = cutoff - now
     source = work_root / "src"
     out = source / "out" / OUT_NAME
-    ninja = source / "third_party/ninja/ninja.exe"
+    ninja = work_root / "ninja/ninja.exe"
     if not ninja.is_file():
         raise InfrastructureError(f"Prepared Ninja executable is unavailable: {ninja}")
     log = work_root / "windows-i686-build.log"

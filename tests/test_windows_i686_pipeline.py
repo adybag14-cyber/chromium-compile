@@ -221,6 +221,8 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
             self.assertIn('"call",', block)
             self.assertNotIn('"/s",', block)
             self.assertNotIn("f'call", block)
+        self.assertIn('ninja_root = work_root / "ninja"', tool_block)
+        self.assertNotIn('ninja_root = source / "third_party/ninja"', tool_block)
 
 
 if __name__ == "__main__":
