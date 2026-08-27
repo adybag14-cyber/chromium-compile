@@ -904,14 +904,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Resolve prepared source cache identity
         id: windows_prepared_cache
+        if: ${{ always() }}
         shell: pwsh
         run: |
-          $metadata = Join-Path $env:GITHUB_WORKSPACE ".chromium-source-cache/chromium-$env:CHROMIUM_WINDOWS_VALIDATION_VERSION.source-object.json"
-          $key = & python scripts/chromium_source_object.py --version $env:CHROMIUM_WINDOWS_VALIDATION_VERSION --metadata-in $metadata --cache-key-only
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "key=$($key.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $cache = Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache'
+          $key = & python scripts/chromium_windows_pipeline.py prepared-source-cache-key --version $env:CHROMIUM_WINDOWS_VALIDATION_VERSION --cache-dir $cache
+          if ($LASTEXITCODE -eq 0 -and $key) {
+            "key=$($key.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            Write-Warning 'No fully trusted source cache is available to save from this attempt.'
+            "key=" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
       - name: Save exact source object cache
-        if: ${{ steps.windows_source_cache.outputs.cache-hit != 'true' }}
+        if: ${{ always() && steps.windows_prepared_cache.outputs.key != '' && steps.windows_source_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:

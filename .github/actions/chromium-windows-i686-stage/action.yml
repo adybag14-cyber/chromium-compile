@@ -129,28 +129,24 @@ runs:
 
     - name: Resolve prepared source cache identity
       id: prepared_source_cache_identity
-      if: ${{ always() && steps.prepare.outcome == 'success' }}
+      if: ${{ always() }}
       shell: pwsh
       run: |
-        $ErrorActionPreference = 'Stop'
-        $metadata = Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache/chromium-${{ inputs.version }}.source-object.json'
-        if (-not (Test-Path -LiteralPath $metadata -PathType Leaf)) {
-          Write-Warning 'Prepared source metadata is unavailable; skipping cache save.'
-          "cache_key=" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          exit 0
-        }
-        $cacheKey = & python scripts/chromium_source_object.py `
+        $cache = Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache'
+        $cacheKey = & python scripts/chromium_windows_pipeline.py prepared-source-cache-key `
           --version '${{ inputs.version }}' `
-          --metadata-in $metadata `
-          --cache-key-only
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        "cache_key=$($cacheKey.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          --cache-dir $cache
+        if ($LASTEXITCODE -eq 0 -and $cacheKey) {
+          "cache_key=$($cacheKey.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        } else {
+          Write-Warning 'No fully trusted source cache is available to save from this attempt.'
+          "cache_key=" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        }
 
     - name: Save exact Chromium source object cache
       if: >-
         ${{
           always() &&
-          steps.prepare.outcome == 'success' &&
           steps.prepared_source_cache_identity.outputs.cache_key != '' &&
           steps.source_cache.outputs.cache-hit != 'true'
         }}

@@ -164,6 +164,8 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn("source publication", preflight)
         self.assertIn("--evidence-dir", preflight)
         self.assertIn("actions/cache/restore@55cc834", action)
+        self.assertIn("prepared-source-cache-key", action)
+        self.assertIn("if: ${{ always() }}", action)
         self.assertIn("out-Release_x86_win.tar.zst", action)
         self.assertIn("Preserve completed output after packaging or artifact failure", action)
         self.assertIn("windows-2025-vs2026", resolver)
@@ -201,6 +203,24 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn("OptionId.WindowsDesktopDebuggers", source)
         self.assertIn("Debuggers/x86/dbghelp.dll", source)
         self.assertIn("Lib/{sdk_family}/um/x86/kernel32.lib", source)
+
+    def test_windows_batch_tools_use_tokenized_cmd_call_without_s_requoting(self):
+        source = (ROOT / "scripts/chromium_windows_pipeline.py").read_text(
+            encoding="utf-8"
+        )
+        depot_block = source[
+            source.index("def install_depot_tools(") : source.index(
+                "def _depot_python(")
+        ]
+        tool_block = source[
+            source.index("def install_source_declared_tools(") : source.index(
+                "PORT_CONFIG_FILES =")
+        ]
+        for block in (depot_block, tool_block):
+            self.assertIn('"/c",', block)
+            self.assertIn('"call",', block)
+            self.assertNotIn('"/s",', block)
+            self.assertNotIn("f'call", block)
 
 
 if __name__ == "__main__":

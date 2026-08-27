@@ -28,6 +28,7 @@ from typing import Mapping, Sequence
 
 from chromium_source_object import (
     marker_matches,
+    source_cache_key,
     source_download_url,
     validate_effective_https_host,
     validate_source_metadata,
@@ -1015,17 +1016,24 @@ def install_depot_tools(source: Path, work_root: Path) -> tuple[Path, dict[str, 
     bootstrap_env = os.environ.copy()
     bootstrap_env["DEPOT_TOOLS_UPDATE"] = "0"
     _run(
-        ["cmd.exe", "/d", "/s", "/c", f'call "{bootstrap}"'],
+        ["cmd.exe", "/d", "/c", "call", str(bootstrap)],
         env=bootstrap_env,
         timeout=DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS,
     )
     _run(
-        ["cmd.exe", "/d", "/s", "/c", f'call "{depot / "cipd.bat"}" version'],
+        ["cmd.exe", "/d", "/c", "call", str(depot / "cipd.bat"), "version"],
         env=bootstrap_env,
         timeout=300,
     )
     _run(
-        ["cmd.exe", "/d", "/s", "/c", f'call "{depot / "gclient.bat"}" --version'],
+        [
+            "cmd.exe",
+            "/d",
+            "/c",
+            "call",
+            str(depot / "gclient.bat"),
+            "--version",
+        ],
         env={**bootstrap_env, "PATH": str(depot) + os.pathsep + bootstrap_env.get("PATH", "")},
         timeout=300,
     )
@@ -1060,9 +1068,16 @@ def install_source_declared_tools(
         [
             "cmd.exe",
             "/d",
-            "/s",
             "/c",
-            f'call "{cipd}" install gn/gn/windows-amd64 {pins["gn_version"]} -root "{gn_root}" -log-level warning',
+            "call",
+            str(cipd),
+            "install",
+            "gn/gn/windows-amd64",
+            pins["gn_version"],
+            "-root",
+            str(gn_root),
+            "-log-level",
+            "warning",
         ],
         env=env,
         timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS,
@@ -1079,9 +1094,16 @@ def install_source_declared_tools(
         [
             "cmd.exe",
             "/d",
-            "/s",
             "/c",
-            f'call "{cipd}" install {ninja_package} {pins["ninja_version"]} -root "{ninja_root}" -log-level warning',
+            "call",
+            str(cipd),
+            "install",
+            ninja_package,
+            pins["ninja_version"],
+            "-root",
+            str(ninja_root),
+            "-log-level",
+            "warning",
         ],
         env=env,
         timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS,
@@ -2248,6 +2270,44 @@ def cleanup_source_archive(cache_dir: Path, version: str) -> None:
             print(f"Removed expendable prepared source archive: {path}")
 
 
+def prepared_source_cache_key(cache_dir: Path, version: str) -> str:
+    version = validate_version(version)
+    tarball = cache_dir / f"chromium-{version}.tar.xz"
+    marker = cache_dir / f"chromium-{version}.validated.json"
+    metadata_path = cache_dir / f"chromium-{version}.source-object.json"
+    stats_path = cache_dir / f"chromium-{version}.source-archive-stats.json"
+    for path in (tarball, marker, metadata_path, stats_path):
+        if not path.is_file() or path.is_symlink():
+            raise WindowsPipelineError(
+                f"Prepared source cache lacks trusted regular file {path.name}"
+            )
+    metadata = _read_json_object(metadata_path, "prepared source metadata")
+    validate_source_metadata(version, metadata)
+    source_sha = validate_sha256(
+        str(metadata.get("sha256", "")), "prepared source SHA-256"
+    )
+    expected_bytes = metadata.get("content_length")
+    if not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool):
+        raise WindowsPipelineError("Prepared source metadata content length is malformed")
+    if tarball.stat().st_size != expected_bytes:
+        raise WindowsPipelineError("Prepared source tarball length changed before cache save")
+    if not marker_matches(
+        marker, version=version, metadata=metadata, sha256=source_sha
+    ):
+        raise WindowsPipelineError(
+            "Prepared source cache lacks exact safe-archive and Gitiles identity proof"
+        )
+    if not _source_stats_usable(
+        stats_path,
+        version=version,
+        source_sha256=source_sha,
+        max_members=DEFAULT_SOURCE_MAX_MEMBERS,
+        max_unpacked_gib=DEFAULT_SOURCE_MAX_UNPACKED_GIB,
+    ):
+        raise WindowsPipelineError("Prepared source archive stats are absent or stale")
+    return source_cache_key(version, metadata)
+
+
 def write_stage_summary(
     *,
     work_root: Path,
@@ -2353,6 +2413,10 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--cache-dir", type=Path, required=True)
     cleanup.add_argument("--version", required=True)
 
+    cache_key = subparsers.add_parser("prepared-source-cache-key")
+    cache_key.add_argument("--cache-dir", type=Path, required=True)
+    cache_key.add_argument("--version", required=True)
+
     classify = subparsers.add_parser("classify-log")
     classify.add_argument("path", type=Path)
 
@@ -2442,6 +2506,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     elif args.command == "cleanup-source-archive":
         cleanup_source_archive(args.cache_dir, args.version)
+    elif args.command == "prepared-source-cache-key":
+        print(prepared_source_cache_key(args.cache_dir, args.version))
     elif args.command == "classify-log":
         print(classify_build_log(args.path))
     elif args.command == "summary":
