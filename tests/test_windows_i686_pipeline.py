@@ -252,6 +252,11 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('source / "buildtools/win-format/clang-format.exe"', source)
         self.assertIn('source / "third_party/node/win/node.exe"', source)
         self.assertIn('source / "third_party/node/node_modules"', source)
+        self.assertIn("install_windows_cipd_tools(", tool_block)
+        self.assertIn(
+            'source / "third_party/typescript/windows-amd64/src/lib/tsc.exe"',
+            source,
+        )
         self.assertIn('rust_root / "bin/bindgen.exe"', source)
         self.assertIn('source / "third_party/llvm-libclang"', source)
         self.assertIn('"--print-revision",', source)

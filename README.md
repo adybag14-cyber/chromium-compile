@@ -94,6 +94,7 @@ Windows compatibility preflight
   │  and Windows Desktop Debuggers
   ├─ install Chromium-pinned depot_tools, GN, Ninja, CPython, Clang, and rc.exe
   ├─ generation/size/SHA-pin DEPS clang-format, Node, Rust, and libclang objects
+  ├─ install the exact DEPS-declared Windows TypeScript CIPD package
   ├─ reject unsafe, linked, oversized, duplicate, or Windows-aliasing tool archives
   └─ generate/query and dry-run the complete chrome + mini_installer Ninja graph
           │
@@ -103,7 +104,7 @@ Resumable Windows staged build
   ├─ stop only the exact Ninja process tree on timeout/stall
   ├─ preserve out/Release_x86_win with PAX/subsecond metadata
   ├─ accept checkpoints only from the same repo/ref/SHA/version/stage/toolchain,
-  │  including the canonical Rust/libclang GCS descriptor hash
+  │  including canonical GCS and CIPD host-tool descriptor hashes
   └─ retain two generations and retry only runner/environment failures
           │
           ▼

@@ -49,6 +49,9 @@ WINDOWS_GCS_OUTPUT_FILES = {
     "src/third_party/node/win": "node.exe",
     "src/third_party/node/node_modules": "node_modules.tar.gz",
 }
+WINDOWS_CIPD_TOOL_DEPENDENCIES = (
+    "src/third_party/typescript/windows-amd64/src",
+)
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,13 @@ class GcsObjectPin:
     size_bytes: int
     generation: str
     output_file: str
+
+
+@dataclass(frozen=True)
+class CipdPackagePin:
+    dependency: str
+    package: str
+    version: str
 
 
 def _balanced_region(text: str, start: int, opener: str, closer: str) -> str:
@@ -277,6 +287,75 @@ def windows_gcs_tool_descriptor_sha256(pins: tuple[GcsObjectPin, ...]) -> str:
     if tuple(pin.dependency for pin in pins) != WINDOWS_GCS_TOOL_DEPENDENCIES:
         raise ValueError(
             "Windows GCS tool descriptors are missing or out of canonical order"
+        )
+    payload = json.dumps(
+        [asdict(pin) for pin in pins],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def resolve_windows_cipd_package(path: Path, dependency: str) -> CipdPackagePin:
+    if dependency not in WINDOWS_CIPD_TOOL_DEPENDENCIES:
+        raise ValueError(f"Unsupported Windows CIPD tool dependency: {dependency!r}")
+    text = path.read_text(encoding="utf-8")
+    mapping = _dependency_mapping(text, dependency)
+    if _literal_field(mapping, "dep_type") != "cipd":
+        raise ValueError(f"Chromium dependency {dependency!r} is no longer CIPD")
+    condition = _literal_field(mapping, "condition")
+    normalized_condition = re.sub(r"\s+", " ", condition).strip()
+    if normalized_condition not in {
+        "checkout_win and non_git_source",
+        "non_git_source and checkout_win",
+    }:
+        raise ValueError(
+            f"Windows CIPD dependency {dependency!r} has an unexpected condition: "
+            f"{condition!r}"
+        )
+    packages_match = re.search(r"['\"]packages['\"]\s*:\s*\[", mapping)
+    if not packages_match:
+        raise ValueError(f"Chromium dependency {dependency!r} lacks a CIPD packages list")
+    list_start = mapping.find("[", packages_match.start())
+    packages_region = _balanced_region(mapping, list_start, "[", "]")
+    package_mappings: list[str] = []
+    index = 1
+    while index < len(packages_region) - 1:
+        if packages_region[index] == "{":
+            item = _balanced_region(packages_region, index, "{", "}")
+            package_mappings.append(item)
+            index += len(item)
+        else:
+            index += 1
+    if len(package_mappings) != 1:
+        raise ValueError(
+            f"Expected exactly one CIPD package for {dependency!r}, "
+            f"found {len(package_mappings)}"
+        )
+    package = _literal_field(package_mappings[0], "package")
+    version = _literal_field(package_mappings[0], "version")
+    if package != "chromium/third_party/typescript/windows-amd64":
+        raise ValueError(f"Unexpected Windows TypeScript CIPD package: {package!r}")
+    if not re.fullmatch(r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+", version):
+        raise ValueError(f"Mutable or malformed Windows TypeScript CIPD pin: {version!r}")
+    return CipdPackagePin(
+        dependency=dependency,
+        package=package,
+        version=version,
+    )
+
+
+def resolve_windows_cipd_tool_pins(path: Path) -> tuple[CipdPackagePin, ...]:
+    return tuple(
+        resolve_windows_cipd_package(path, dependency)
+        for dependency in WINDOWS_CIPD_TOOL_DEPENDENCIES
+    )
+
+
+def windows_cipd_tool_descriptor_sha256(pins: tuple[CipdPackagePin, ...]) -> str:
+    if tuple(pin.dependency for pin in pins) != WINDOWS_CIPD_TOOL_DEPENDENCIES:
+        raise ValueError(
+            "Windows CIPD tool descriptors are missing or out of canonical order"
         )
     payload = json.dumps(
         [asdict(pin) for pin in pins],

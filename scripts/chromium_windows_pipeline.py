@@ -38,9 +38,12 @@ from chromium_source_object import (
 )
 from chromium_source_object import fetch_metadata as fetch_source_metadata
 from chromium_tool_pins import (
+    CipdPackagePin,
     GcsObjectPin,
     resolve_pins,
+    resolve_windows_cipd_tool_pins,
     resolve_windows_gcs_tool_pins,
+    windows_cipd_tool_descriptor_sha256,
     windows_gcs_tool_descriptor_sha256,
 )
 from chromium_windows_runtime import (
@@ -68,9 +71,9 @@ RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 OUT_NAME = "Release_x86_win"
-CHECKPOINT_CONTRACT_VERSION = 2
-CHECKPOINT_MANIFEST_SCHEMA = 2
-PREPARED_STATE_SCHEMA = 2
+CHECKPOINT_CONTRACT_VERSION = 3
+CHECKPOINT_MANIFEST_SCHEMA = 3
+PREPARED_STATE_SCHEMA = 3
 PORT_CONFIG_HASH_SCHEMA = 1
 MAX_NO_PROGRESS_STREAK = 2
 DEFAULT_MIN_WORK_GIB = 70
@@ -124,6 +127,7 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
         "rustfmt.exe",
         "tar",
         "tar.exe",
+        "tsc.exe",
         "winget",
         "winget.exe",
         "vswhere.exe",
@@ -202,6 +206,7 @@ class PreparedState:
     ninja_package: str
     ninja_version: str
     cpython3_version: str
+    windows_cipd_tools_sha256: str
     windows_gcs_tools_sha256: str
     clang_revision: str
     sdk_family: str
@@ -1413,13 +1418,86 @@ def install_windows_gcs_tools(
     return descriptor_sha, pins
 
 
+def install_windows_cipd_tools(
+    source: Path,
+    depot_tools: Path,
+    env: Mapping[str, str],
+) -> tuple[str, tuple[CipdPackagePin, ...]]:
+    pins = resolve_windows_cipd_tool_pins(source / "DEPS")
+    descriptor_sha = windows_cipd_tool_descriptor_sha256(pins)
+    cipd = depot_tools / "cipd.bat"
+    resolved_source = source.resolve()
+    for pin in pins:
+        relative = PurePosixPath(pin.dependency).relative_to("src")
+        destination = source.joinpath(*relative.parts)
+        resolved_parent = destination.parent.resolve()
+        if (
+            resolved_parent != resolved_source
+            and resolved_source not in resolved_parent.parents
+        ):
+            raise WindowsPipelineError(
+                f"Windows CIPD destination escapes source: {destination}"
+            )
+        if destination.is_symlink() or (
+            destination.exists() and not destination.is_dir()
+        ):
+            raise WindowsPipelineError(
+                f"Windows CIPD destination is unsafe: {destination}"
+            )
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.mkdir(parents=True)
+        _run(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "call",
+                str(cipd),
+                "install",
+                pin.package,
+                pin.version,
+                "-root",
+                str(destination),
+                "-log-level",
+                "warning",
+            ],
+            env=env,
+            timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS,
+        )
+        marker = destination / ".chromium-windows-i686-cipd.json"
+        marker.write_text(
+            json.dumps(asdict(pin), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    tsc = source / "third_party/typescript/windows-amd64/src/lib/tsc.exe"
+    if not tsc.is_file() or tsc.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium-pinned Windows TypeScript CIPD package omitted lib/tsc.exe"
+        )
+    _run([str(tsc), "--version"], cwd=source, env=env, timeout=120)
+    print(
+        "Validated source-declared Windows CIPD tool descriptors: "
+        f"SHA-256 {descriptor_sha}"
+    )
+    return descriptor_sha, pins
+
+
 def install_source_declared_tools(
     source: Path,
     work_root: Path,
     depot_tools: Path,
     pins: Mapping[str, str],
     env: Mapping[str, str],
-) -> tuple[Path, Path, str, str, tuple[GcsObjectPin, ...]]:
+) -> tuple[
+    Path,
+    Path,
+    str,
+    str,
+    tuple[GcsObjectPin, ...],
+    str,
+    tuple[CipdPackagePin, ...],
+]:
     cipd = depot_tools / "cipd.bat"
     gn_root = work_root / "gn"
     gn_root.mkdir(exist_ok=True)
@@ -1524,6 +1602,9 @@ def install_source_declared_tools(
     windows_gcs_tools_sha256, windows_gcs_pins = install_windows_gcs_tools(
         source, work_root, depot_tools, env
     )
+    windows_cipd_tools_sha256, windows_cipd_pins = install_windows_cipd_tools(
+        source, depot_tools, env
+    )
 
     depot_python = _depot_python(depot_tools)
     _run(
@@ -1568,7 +1649,15 @@ def install_source_declared_tools(
         encoding="utf-8",
     )
     (util / "LASTCHANGE.committime").write_text("0\n", encoding="utf-8")
-    return gn, ninja, clang_revision, windows_gcs_tools_sha256, windows_gcs_pins
+    return (
+        gn,
+        ninja,
+        clang_revision,
+        windows_gcs_tools_sha256,
+        windows_gcs_pins,
+        windows_cipd_tools_sha256,
+        windows_cipd_pins,
+    )
 
 
 PORT_CONFIG_FILES = (
@@ -1675,6 +1764,10 @@ def read_prepared_state(work_root: Path) -> PreparedState:
         raise WindowsPipelineError(f"Unsupported prepared state schema: {state.schema}")
     validate_version(state.version)
     validate_sha256(state.source_sha256, "prepared source SHA-256")
+    validate_sha256(
+        state.windows_cipd_tools_sha256,
+        "prepared Windows CIPD tool descriptor SHA-256",
+    )
     validate_sha256(
         state.windows_gcs_tools_sha256,
         "prepared Windows GCS tool descriptor SHA-256",
@@ -1922,7 +2015,7 @@ def validate_release_bundle(
         raise WindowsPipelineError("Release checksum sidecar is malformed or inconsistent")
     fields = _parse_release_manifest(manifest_path)
     exact = {
-        "manifest_schema": "2",
+        "manifest_schema": "3",
         "version": version,
         "target_cpu": "x86",
         "target_os": "win",
@@ -1941,6 +2034,7 @@ def validate_release_bundle(
     for key in (
         "source_tar_sha256",
         "port_config_sha256",
+        "windows_cipd_tools_sha256",
         "windows_gcs_tools_sha256",
     ):
         validate_sha256(fields.get(key, ""), f"manifest {key}")
@@ -1994,6 +2088,7 @@ def _checkpoint_manifest_matches_state(
         "ninja_package": state.ninja_package,
         "ninja_version": state.ninja_version,
         "cpython3_version": state.cpython3_version,
+        "windows_cipd_tools_sha256": state.windows_cipd_tools_sha256,
         "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
@@ -2260,6 +2355,7 @@ def create_checkpoint(
         "ninja_package": state.ninja_package,
         "ninja_version": state.ninja_version,
         "cpython3_version": state.cpython3_version,
+        "windows_cipd_tools_sha256": state.windows_cipd_tools_sha256,
         "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
@@ -2337,6 +2433,8 @@ def prepare_pipeline(
         clang_revision,
         windows_gcs_tools_sha256,
         windows_gcs_pins,
+        windows_cipd_tools_sha256,
+        windows_cipd_pins,
     ) = install_source_declared_tools(
         source, work_root, depot_tools, pins, env
     )
@@ -2350,6 +2448,7 @@ def prepare_pipeline(
         ninja_package=pins["ninja_package"],
         ninja_version=pins["ninja_version"],
         cpython3_version=pins["cpython3_version"],
+        windows_cipd_tools_sha256=windows_cipd_tools_sha256,
         windows_gcs_tools_sha256=windows_gcs_tools_sha256,
         clang_revision=clang_revision,
         sdk_family=requirements.sdk_family,
@@ -2419,6 +2518,15 @@ def prepare_pipeline(
         (evidence_dir / "windows-gcs-tools.json").write_text(
             json.dumps(
                 [asdict(pin) for pin in windows_gcs_pins],
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (evidence_dir / "windows-cipd-tools.json").write_text(
+            json.dumps(
+                [asdict(pin) for pin in windows_cipd_pins],
                 indent=2,
                 sort_keys=True,
             )
@@ -2695,7 +2803,7 @@ def package_build(
         raise WindowsPipelineError("GITHUB_RUN_ID is missing or malformed during packaging")
     packaged_files = _zip_member_names(package)
     fields = (
-        ("manifest_schema", "2"),
+        ("manifest_schema", "3"),
         ("version", version),
         ("target_cpu", "x86"),
         ("target_os", "win"),
@@ -2709,6 +2817,7 @@ def package_build(
         ("ninja_package", state.ninja_package),
         ("ninja_version", state.ninja_version),
         ("cpython3_version", state.cpython3_version),
+        ("windows_cipd_tools_sha256", state.windows_cipd_tools_sha256),
         ("windows_gcs_tools_sha256", state.windows_gcs_tools_sha256),
         ("depot_tools_revision", state.depot_tools_revision),
         ("windows_sdk_family", state.sdk_family),

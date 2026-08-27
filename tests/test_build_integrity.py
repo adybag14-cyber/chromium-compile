@@ -97,6 +97,14 @@ class ToolPinTests(unittest.TestCase):
     }],
     'dep_type': 'gcs',
   },
+  'src/third_party/typescript/windows-amd64/src': {
+    'dep_type': 'cipd',
+    'condition': 'checkout_win and non_git_source',
+    'packages': [{
+      'package': 'chromium/third_party/typescript/windows-amd64',
+      'version': 'version:2@7.0.2',
+    }],
+  },
 """
 
     def test_cpython_pin_is_optional_for_pre_cpython_chromium_deps(self):
@@ -193,6 +201,17 @@ deps = {
             self.assertEqual(pins[3].size_bytes, 414479372)
             digest = tool_pins.windows_gcs_tool_descriptor_sha256(pins)
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            cipd = tool_pins.resolve_windows_cipd_tool_pins(deps)
+            self.assertEqual(len(cipd), 1)
+            self.assertEqual(
+                cipd[0].package,
+                "chromium/third_party/typescript/windows-amd64",
+            )
+            self.assertEqual(cipd[0].version, "version:2@7.0.2")
+            self.assertRegex(
+                tool_pins.windows_cipd_tool_descriptor_sha256(cipd),
+                r"^[0-9a-f]{64}$",
+            )
 
     def test_windows_gcs_tool_pin_rejects_broadened_host_condition(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -224,6 +243,18 @@ deps = {
             )
             with self.assertRaisesRegex(ValueError, "Unsafe Windows GCS object"):
                 tool_pins.resolve_windows_gcs_tool_pins(deps)
+
+    def test_windows_typescript_cipd_pin_rejects_mutable_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace("version:2@7.0.2", "latest")
+                + "}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
+                tool_pins.resolve_windows_cipd_tool_pins(deps)
 
 
 
