@@ -63,6 +63,15 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 pipeline._run(["attacker-controlled.exe", "argument"])
         run.assert_not_called()
 
+    def test_command_wrapper_can_quietly_discard_large_dry_run_output(self):
+        completed = pipeline.subprocess.CompletedProcess(["ninja.exe"], 0, None, "")
+        with mock.patch.object(
+            pipeline.subprocess, "run", return_value=completed
+        ) as run:
+            pipeline._run(["ninja.exe", "-n", "chrome"], discard_stdout=True)
+        self.assertIs(run.call_args.kwargs["stdout"], pipeline.subprocess.DEVNULL)
+        self.assertIs(run.call_args.kwargs["stderr"], pipeline.subprocess.PIPE)
+
     def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
         class Response:
             def __enter__(self):
@@ -298,6 +307,19 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('args_gn.write_text(WINDOWS_GN_ARGS', block)
         self.assertIn('[str(gn), "gen", str(out)]', block)
         self.assertNotIn("--args=", block)
+
+    def test_prepare_traverses_full_ninja_input_graph_before_dispatch(self):
+        source = (ROOT / "scripts" / "chromium_windows_pipeline.py").read_text(
+            encoding="utf-8"
+        )
+        block = source[
+            source.index("out = configure_gn(") : source.index("exports = {")
+        ]
+        self.assertIn('"-n",', block)
+        self.assertIn('"chrome",', block)
+        self.assertIn('"mini_installer",', block)
+        self.assertIn("discard_stdout=True", block)
+        self.assertIn("ninja-input-closure.json", block)
 
 
 if __name__ == "__main__":

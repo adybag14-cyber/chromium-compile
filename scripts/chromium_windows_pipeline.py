@@ -254,6 +254,7 @@ def _run(
     env: Mapping[str, str] | None = None,
     timeout: int = 600,
     capture: bool = False,
+    discard_stdout: bool = False,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     if not command:
@@ -269,6 +270,8 @@ def _run(
         raise WindowsPipelineError(
             f"Executable is outside the Windows pipeline allowlist: {executable_name!r}"
         )
+    if capture and discard_stdout:
+        raise WindowsPipelineError("Command output cannot be captured and discarded together")
     print("+ " + subprocess.list2cmdline(validated_command), flush=True)
     try:
         # The executable is selected from the fixed allowlist above, every call
@@ -282,8 +285,12 @@ def _run(
             text=True,
             encoding="utf-8",
             errors="replace",
-            stdout=subprocess.PIPE if capture else None,
-            stderr=subprocess.PIPE if capture else None,
+            stdout=(
+                subprocess.PIPE
+                if capture
+                else subprocess.DEVNULL if discard_stdout else None
+            ),
+            stderr=subprocess.PIPE if capture or discard_stdout else None,
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -2322,6 +2329,24 @@ def prepare_pipeline(
             write_prepared_state(work_root, state)
 
     out = configure_gn(source, gn, env, evidence_dir=evidence_dir)
+    _run(
+        [
+            str(ninja),
+            "-C",
+            str(out),
+            "-n",
+            "chrome",
+            "mini_installer",
+        ],
+        cwd=source,
+        env=env,
+        timeout=1200,
+        discard_stdout=True,
+    )
+    print(
+        "Ninja dry-run traversed the complete chrome + mini_installer graph "
+        "without missing source-declared inputs"
+    )
     if evidence_dir is not None:
         (evidence_dir / "requirements.json").write_text(
             json.dumps(asdict(requirements), indent=2, sort_keys=True) + "\n",
@@ -2334,6 +2359,19 @@ def prepare_pipeline(
         (evidence_dir / "windows-gcs-tools.json").write_text(
             json.dumps(
                 [asdict(pin) for pin in windows_gcs_pins],
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (evidence_dir / "ninja-input-closure.json").write_text(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "targets": ["chrome", "mini_installer"],
+                    "validated": True,
+                },
                 indent=2,
                 sort_keys=True,
             )

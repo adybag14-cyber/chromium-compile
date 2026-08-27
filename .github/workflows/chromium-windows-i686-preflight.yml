@@ -66,7 +66,7 @@ jobs:
       requested_runner: ${{ vars.CHROMIUM_WINDOWS_I686_RUNNER }}
 
   preflight:
-    name: Prove Windows x86 source, SDK, VS, Rust, GN, and package targets
+    name: Prove Windows x86 source, SDK, VS, Rust, GN, and Ninja closure
     needs: [source_ready, resolve_runner]
     if: ${{ needs.source_ready.outputs.ready == 'true' && needs.resolve_runner.outputs.valid == 'true' }}
     permissions:

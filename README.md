@@ -95,7 +95,7 @@ Windows compatibility preflight
   ├─ install Chromium-pinned depot_tools, GN, Ninja, CPython, Clang, and rc.exe
   ├─ generation/size/SHA-pin the DEPS-declared Windows Rust + libclang objects
   ├─ reject unsafe, linked, oversized, duplicate, or Windows-aliasing tool archives
-  └─ generate/query the chrome and mini_installer GN targets
+  └─ generate/query and dry-run the complete chrome + mini_installer Ninja graph
           │
           ▼
 Resumable Windows staged build
