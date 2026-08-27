@@ -235,6 +235,36 @@ class WindowsI686PipelineTests(unittest.TestCase):
                         identity,
                     )
 
+    def test_generated_ninja_graph_binds_every_windows_linker_timestamp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = pathlib.Path(temp)
+            (out / "build.ninja").write_text(
+                "command = lld-link /TIMESTAMP:1785646800 one.obj\n",
+                encoding="utf-8",
+            )
+            nested = out / "obj/chrome"
+            nested.mkdir(parents=True)
+            edge = nested / "chrome.ninja"
+            edge.write_text(
+                "ldflags = /MACHINE:X86 /TIMESTAMP:1785646800\n",
+                encoding="utf-8",
+            )
+            stats = pipeline.validate_generated_windows_linker_timestamps(
+                out, 1_785_646_800
+            )
+            self.assertEqual(stats["ninja_file_count"], 2)
+            self.assertEqual(stats["timestamp_occurrences"], 2)
+            edge.write_text(
+                "ldflags = /TIMESTAMP:-2142000\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError, "observed=.*-2142000"
+            ):
+                pipeline.validate_generated_windows_linker_timestamps(
+                    out, 1_785_646_800
+                )
+
     def test_prepared_state_and_checkpoint_bind_tag_and_linker_timestamps(self):
         state = pipeline.PreparedState(
             schema=pipeline.PREPARED_STATE_SCHEMA,
@@ -550,9 +580,8 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('args_gn.write_text(WINDOWS_GN_ARGS', block)
         self.assertIn('[str(gn), "gen", str(out)]', block)
         self.assertNotIn("--args=", block)
-        self.assertIn('"//chrome:chrome", "ldflags"', block)
-        self.assertIn("/TIMESTAMP:([0-9-]+)", block)
-        self.assertIn("str(windows_build_timestamp)", block)
+        self.assertIn("validate_generated_windows_linker_timestamps(", block)
+        self.assertIn("out, windows_build_timestamp", block)
 
     def test_prepare_traverses_full_ninja_input_graph_before_dispatch(self):
         source = (ROOT / "scripts" / "chromium_windows_pipeline.py").read_text(

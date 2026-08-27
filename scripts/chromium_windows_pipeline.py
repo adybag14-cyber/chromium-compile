@@ -2089,6 +2089,68 @@ def compute_port_config_sha256(repository_root: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_generated_windows_linker_timestamps(
+    out: Path, expected_timestamp: int
+) -> dict[str, int]:
+    expected_timestamp = validate_chromium_timestamp(
+        expected_timestamp, "expected generated Windows linker timestamp"
+    )
+    ninja_files = sorted(out.rglob("*.ninja"))
+    if not ninja_files or len(ninja_files) > 200_000:
+        raise WindowsPipelineError(
+            "Generated Ninja graph has an implausible linker-proof file count"
+        )
+    bytes_scanned = 0
+    timestamp_occurrences = 0
+    timestamps: set[bytes] = set()
+    for path in ninja_files:
+        if not path.is_file() or path.is_symlink():
+            raise WindowsPipelineError(
+                f"Generated Ninja graph contains an unsafe file: {path}"
+            )
+        size = path.stat().st_size
+        if size > 256 * 1024**2:
+            raise WindowsPipelineError(
+                f"Generated Ninja file exceeds the 256 MiB proof limit: {path}"
+            )
+        bytes_scanned += size
+        if bytes_scanned > 2 * 1024**3:
+            raise WindowsPipelineError(
+                "Generated Ninja graph exceeds the 2 GiB linker-proof limit"
+            )
+        contents = path.read_bytes()
+        marker_count = contents.lower().count(b"/timestamp:")
+        matches = re.findall(rb"(?i)/TIMESTAMP:([^\s\"']{1,100})", contents)
+        if len(matches) != marker_count:
+            raise WindowsPipelineError(
+                f"Generated Ninja graph contains a malformed /TIMESTAMP token: {path}"
+            )
+        timestamps.update(matches)
+        timestamp_occurrences += marker_count
+    expected = str(expected_timestamp).encode("ascii")
+    if timestamps != {expected}:
+        rendered = sorted(
+            value.decode("ascii", errors="backslashreplace")[:100]
+            for value in timestamps
+        )
+        raise WindowsPipelineError(
+            "Generated Ninja graph does not contain only the validated Windows "
+            f"/TIMESTAMP:{expected_timestamp}; observed={rendered}"
+        )
+    stats = {
+        "ninja_file_count": len(ninja_files),
+        "ninja_bytes_scanned": bytes_scanned,
+        "timestamp_occurrences": timestamp_occurrences,
+        "windows_build_timestamp": expected_timestamp,
+    }
+    print(
+        "Validated every generated Windows linker timestamp: "
+        f"{timestamp_occurrences} occurrences of /TIMESTAMP:{expected_timestamp} "
+        f"across {len(ninja_files)} Ninja files"
+    )
+    return stats
+
+
 def configure_gn(
     source: Path,
     gn: Path,
@@ -2134,27 +2196,18 @@ def configure_gn(
         if not (result.stdout or "").strip():
             raise WindowsPipelineError(f"GN graph lacks required target {label}")
         queries[label] = result.stdout
-    link_flags = _run(
-        [str(gn), "desc", str(out), "//chrome:chrome", "ldflags"],
-        cwd=source,
-        env=env,
-        timeout=600,
-        capture=True,
-    ).stdout or ""
-    linker_timestamps = re.findall(r"(?i)/TIMESTAMP:([0-9-]+)", link_flags)
-    if not linker_timestamps or set(linker_timestamps) != {
-        str(windows_build_timestamp)
-    }:
-        raise WindowsPipelineError(
-            "Generated Chrome linker flags do not contain only the validated "
-            f"/TIMESTAMP:{windows_build_timestamp}"
-        )
-    queries["//chrome:chrome ldflags"] = link_flags
+    timestamp_stats = validate_generated_windows_linker_timestamps(
+        out, windows_build_timestamp
+    )
     if evidence_dir is not None:
         evidence_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args_gn, evidence_dir / "args.gn")
         (evidence_dir / "gn-targets.json").write_text(
             json.dumps(queries, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        (evidence_dir / "windows-linker-timestamp.json").write_text(
+            json.dumps(timestamp_stats, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
     return out
 
