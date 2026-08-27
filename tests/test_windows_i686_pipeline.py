@@ -226,6 +226,9 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn('"infra/3pp/tools/cpython3/windows-amd64"', tool_block)
         self.assertIn('pins["cpython3_version"]', tool_block)
         self.assertIn('source / "third_party/cpython3/host"', tool_block)
+        self.assertIn('target_python = cpython_target / "bin/python3"', tool_block)
+        self.assertIn("shutil.copy2(target_python_exe, target_python)", tool_block)
+        self.assertIn("sha256_file(target_python)", tool_block)
 
     def test_gn_args_use_trusted_file_not_multiline_command_argument(self):
         source = (ROOT / "scripts/chromium_windows_pipeline.py").read_text(

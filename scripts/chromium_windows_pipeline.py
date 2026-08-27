@@ -1135,10 +1135,21 @@ def install_source_declared_tools(
     cpython_target = source / "third_party/cpython3/host"
     cpython_target.mkdir(parents=True, exist_ok=True)
     shutil.copytree(cpython_root, cpython_target, dirs_exist_ok=True)
-    if not (cpython_target / "bin/python3.exe").is_file():
+    target_python_exe = cpython_target / "bin/python3.exe"
+    if not target_python_exe.is_file():
         raise InfrastructureError(
             "Could not materialize source-declared CPython at Chromium's GN path"
         )
+    # concurrent_links.gni runs before GN's host executable suffix is
+    # initialized and therefore asks Windows for bin/python3 without '.exe'.
+    # Preserve the exact pinned PE bytes under that extensionless path.
+    target_python = cpython_target / "bin/python3"
+    shutil.copy2(target_python_exe, target_python)
+    if sha256_file(target_python) != sha256_file(target_python_exe):
+        raise InfrastructureError(
+            "Extensionless Chromium CPython launcher differs from pinned python3.exe"
+        )
+    _run([str(target_python), "--version"], env=env, timeout=60)
 
     depot_python = _depot_python(depot_tools)
     _run(
