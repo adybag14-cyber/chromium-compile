@@ -182,6 +182,14 @@ def run_with_watchdog(
 ) -> int:
     if not command:
         raise WatchdogError("a child command is required")
+    validated_command = list(command)
+    if any(
+        not isinstance(value, str)
+        or not value
+        or any(character in value for character in "\x00\r\n")
+        for value in validated_command
+    ):
+        raise WatchdogError("child command arguments must be non-empty single-line strings")
     for value, name, minimum, maximum in (
         (stall_seconds, "stall_seconds", 1, 24 * 60 * 60),
         (poll_seconds, "poll_seconds", 1, 60),
@@ -206,7 +214,11 @@ def run_with_watchdog(
         popen_kwargs["stdout"] = subprocess.PIPE
         popen_kwargs["stderr"] = subprocess.STDOUT
     try:
-        proc = subprocess.Popen(list(command), **popen_kwargs)
+        # This helper never invokes a shell. Production callers additionally
+        # choose the executable from a fixed allowlist before reaching here.
+        proc = subprocess.Popen(  # lgtm [py/command-line-injection]
+            validated_command, **popen_kwargs
+        )
     except OSError as exc:
         raise WatchdogError(f"could not start compiler command: {exc}") from exc
 

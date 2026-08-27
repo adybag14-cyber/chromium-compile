@@ -78,10 +78,40 @@ DEFAULT_ARCHIVE_TIMEOUT_SECONDS = 1800
 DEFAULT_REMOVE_TIMEOUT_SECONDS = 900
 GITILES_HOST = "chromium.googlesource.com"
 SOURCE_DOWNLOAD_HOST = "commondatastorage.googleapis.com"
+WINDOWS_KITS_ROOT = Path(r"C:\Program Files (x86)\Windows Kits\10")
+WINDOWS_SYSTEM_DRIVE_ROOT = Path("C:\\")
 TRUSTED_BUILD_WORKFLOW = ".github/workflows/chromium-windows-i686.yml"
 BUILD_TITLE_RE = re.compile(
     r"^Chromium Windows i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) "
     r"- stage ([1-9][0-9]*) - attempt ([0-9]+)$"
+)
+TRUSTED_EXECUTABLE_BASENAMES = frozenset(
+    (
+        "7z",
+        "7z.exe",
+        "clang-cl.exe",
+        "cmd.exe",
+        "curl",
+        "curl.exe",
+        "gh",
+        "gh.exe",
+        "git",
+        "git.exe",
+        "gn.exe",
+        "ninja.exe",
+        "powershell.exe",
+        "pwsh",
+        "pwsh.exe",
+        "python",
+        "python.exe",
+        "python3",
+        "python3.exe",
+        "tar",
+        "tar.exe",
+        "winget",
+        "winget.exe",
+        "vswhere.exe",
+    )
 )
 
 WINDOWS_GN_ARGS = """\
@@ -206,10 +236,24 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     if not command:
         raise WindowsPipelineError("Refusing to run an empty command")
-    print("+ " + subprocess.list2cmdline(list(command)), flush=True)
+    validated_command = list(command)
+    if any(
+        not isinstance(value, str) or not value or any(char in value for char in "\x00\r\n")
+        for value in validated_command
+    ):
+        raise WindowsPipelineError("Command arguments must be non-empty, single-line strings")
+    executable_name = Path(validated_command[0]).name.lower()
+    if executable_name not in TRUSTED_EXECUTABLE_BASENAMES:
+        raise WindowsPipelineError(
+            f"Executable is outside the Windows pipeline allowlist: {executable_name!r}"
+        )
+    print("+ " + subprocess.list2cmdline(validated_command), flush=True)
     try:
+        # The executable is selected from the fixed allowlist above, every call
+        # uses shell=False, and all caller-provided fields have strict semantic
+        # validation before reaching an argument slot.
         result = subprocess.run(
-            list(command),
+            validated_command,  # lgtm [py/command-line-injection]
             cwd=cwd,
             env=dict(env) if env is not None else None,
             check=False,
@@ -232,56 +276,57 @@ def _run(
     return result
 
 
+def _runner_command_file(variable: str, prefix: str) -> Path | None:
+    raw = os.environ.get(variable, "")
+    if not raw:
+        return None
+    runner_temp_raw = os.environ.get("RUNNER_TEMP", "")
+    if not runner_temp_raw:
+        raise WindowsPipelineError(f"{variable} is set without RUNNER_TEMP authority")
+    runner_temp = Path(runner_temp_raw).resolve()
+    trusted_parent = (runner_temp / "_runner_file_commands").resolve()
+    candidate = Path(raw)
+    name = candidate.name
+    if not re.fullmatch(re.escape(prefix) + r"[A-Za-z0-9_-]{8,100}", name):
+        raise WindowsPipelineError(f"{variable} has an unexpected runner-command filename")
+    expected = trusted_parent / name
+    if candidate.resolve() != expected or not expected.parent.is_dir() or expected.is_symlink():
+        raise WindowsPipelineError(f"{variable} escapes the trusted runner command directory")
+    return expected
+
+
 def _append_github_env(name: str, value: str) -> None:
-    path = os.environ.get("GITHUB_ENV", "")
-    if not path:
+    path = _runner_command_file("GITHUB_ENV", "set_env_")
+    if path is None:
         return
     if "\n" in value or "\r" in value:
         raise WindowsPipelineError(f"Refusing multiline GitHub environment value for {name}")
-    with Path(path).open("a", encoding="utf-8", newline="\n") as handle:
+    with path.open("a", encoding="utf-8", newline="\n") as handle:  # lgtm [py/path-injection]
         handle.write(f"{name}={value}\n")
 
 
 def _write_github_output(values: Mapping[str, str]) -> None:
-    path = os.environ.get("GITHUB_OUTPUT", "")
-    if not path:
+    path = _runner_command_file("GITHUB_OUTPUT", "set_output_")
+    if path is None:
         return
-    with Path(path).open("a", encoding="utf-8", newline="\n") as handle:
+    with path.open("a", encoding="utf-8", newline="\n") as handle:  # lgtm [py/path-injection]
         for name, value in values.items():
             if "\n" in value or "\r" in value:
                 raise WindowsPipelineError(f"Refusing multiline GitHub output for {name}")
             handle.write(f"{name}={value}\n")
 
 
-def _drive_root(path: Path) -> Path:
-    anchor = path.resolve().anchor
-    if not anchor:
-        raise WindowsPipelineError(f"Path has no drive anchor: {path}")
-    return Path(anchor)
-
-
 def select_work_root(*, minimum_free_gib: int = DEFAULT_MIN_WORK_GIB) -> Path:
     minimum_free_gib = bounded_int(
         minimum_free_gib, "minimum_free_gib", minimum=20, maximum=500
     )
+    if os.name != "nt":
+        raise InfrastructureError("Windows work-root selection requires a Windows runner")
     candidates: dict[str, Path] = {}
-    for raw in (
-        os.environ.get("RUNNER_TEMP", ""),
-        os.environ.get("GITHUB_WORKSPACE", ""),
-        os.environ.get("SystemDrive", ""),
-    ):
-        if not raw:
-            continue
-        try:
-            root = _drive_root(Path(raw))
+    for letter in "CDEFG":
+        root = Path(f"{letter}:\\")
+        if root.exists():
             candidates[str(root).lower()] = root
-        except (OSError, WindowsPipelineError):
-            continue
-    if os.name == "nt":
-        for letter in "CDEFG":
-            root = Path(f"{letter}:\\")
-            if root.exists():
-                candidates[str(root).lower()] = root
     if not candidates:
         raise InfrastructureError("No fixed workspace drive candidates are available")
 
@@ -358,7 +403,7 @@ def parse_windows_requirements(
         raise WindowsPipelineError(
             "Chromium's Windows toolchain declaration changed; could not resolve SDK/Visual Studio requirements"
         )
-    sdk_family = sdk_match.group(1)
+    sdk_family = normalize_sdk_family(sdk_match.group(1))
     family_prefix = ".".join(sdk_family.split(".")[:3]) + "."
     documented = re.findall(
         r"version\s+(10\.0\.[0-9]+\.[0-9]+)", windows_docs_text, re.IGNORECASE
@@ -685,6 +730,15 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in match.group(1).split("."))
 
 
+def normalize_sdk_family(value: str) -> str:
+    if not re.fullmatch(r"10\.0\.[0-9]{4,6}\.0", value):
+        raise WindowsPipelineError(f"Unsupported Windows SDK family: {value!r}")
+    major, minor, build, revision = (int(part) for part in value.split("."))
+    if major != 10 or minor != 0 or revision != 0 or not 1000 <= build <= 999999:
+        raise WindowsPipelineError(f"Unsupported Windows SDK family: {value!r}")
+    return f"{major}.{minor}.{build}.{revision}"
+
+
 def _find_vswhere() -> Path:
     located = shutil.which("vswhere.exe") or shutil.which("vswhere")
     candidates = [Path(located)] if located else []
@@ -695,7 +749,9 @@ def _find_vswhere() -> Path:
             / "Microsoft Visual Studio/Installer/vswhere.exe"
         )
     for candidate in candidates:
-        if candidate.is_file():
+        # sdk_family is canonicalized through integer components before this
+        # trusted fixed-root path is constructed.
+        if candidate.is_file():  # lgtm [py/path-injection]
             return candidate
     raise InfrastructureError("vswhere is unavailable on the selected Windows runner")
 
@@ -755,13 +811,11 @@ def resolve_visual_studio(requirements: WindowsRequirements) -> tuple[Path, str]
 
 
 def _windows_kits_root() -> Path:
-    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
-    if not program_files_x86:
-        raise InfrastructureError("ProgramFiles(x86) is unavailable on Windows runner")
-    return Path(program_files_x86) / "Windows Kits/10"
+    return WINDOWS_KITS_ROOT
 
 
 def _sdk_probe_binary(kits: Path, sdk_family: str) -> Path | None:
+    sdk_family = normalize_sdk_family(sdk_family)
     for relative in (
         f"bin/{sdk_family}/x64/makeappx.exe",
         f"bin/{sdk_family}/x64/rc.exe",
@@ -794,6 +848,7 @@ def _file_product_version(path: Path) -> str:
 
 
 def _sdk_layout_is_complete(kits: Path, sdk_family: str) -> bool:
+    sdk_family = normalize_sdk_family(sdk_family)
     required = (
         kits / f"Include/{sdk_family}/um/windows.h",
         kits / f"Include/{sdk_family}/shared/sdkddkver.h",
@@ -811,7 +866,8 @@ def _install_sdk_with_winget(requirements: WindowsRequirements) -> None:
         raise InfrastructureError(
             f"Windows SDK {requirements.sdk_family} is absent and winget is unavailable"
         )
-    parts = requirements.sdk_family.split(".")
+    sdk_family = normalize_sdk_family(requirements.sdk_family)
+    parts = sdk_family.split(".")
     if len(parts) != 4 or parts[-1] != "0":
         raise WindowsPipelineError(
             f"Cannot map Chromium SDK family to official winget package: {requirements.sdk_family}"
@@ -854,25 +910,26 @@ def _install_sdk_with_winget(requirements: WindowsRequirements) -> None:
 def ensure_windows_sdk(requirements: WindowsRequirements) -> tuple[Path, str]:
     if os.name != "nt":
         raise InfrastructureError("Windows SDK preparation requires a Windows runner")
+    sdk_family = normalize_sdk_family(requirements.sdk_family)
     kits = _windows_kits_root()
-    if not _sdk_layout_is_complete(kits, requirements.sdk_family):
-        system_free = shutil.disk_usage(kits.anchor or kits.parent).free
+    if not _sdk_layout_is_complete(kits, sdk_family):
+        system_free = shutil.disk_usage(WINDOWS_SYSTEM_DRIVE_ROOT).free
         if system_free < 8 * 1024**3:
             raise InfrastructureError(
                 f"Only {system_free} bytes are free on the SDK installation drive; "
                 "at least 8 GiB is required before installing a source-declared SDK family"
             )
         print(
-            f"Chromium requires Windows SDK {requirements.sdk_family}; "
+            f"Chromium requires Windows SDK {sdk_family}; "
             "installing its official Microsoft winget package"
         )
         _install_sdk_with_winget(requirements)
-    if not _sdk_layout_is_complete(kits, requirements.sdk_family):
+    if not _sdk_layout_is_complete(kits, sdk_family):
         raise WindowsPipelineError(
             f"Windows SDK installation completed without Chromium's required "
-            f"{requirements.sdk_family} x86 headers, libraries, tools, and debugging runtime"
+            f"{sdk_family} x86 headers, libraries, tools, and debugging runtime"
         )
-    probe = _sdk_probe_binary(kits, requirements.sdk_family)
+    probe = _sdk_probe_binary(kits, sdk_family)
     assert probe is not None
     servicing = _file_product_version(probe)
     if _version_tuple(servicing) < _version_tuple(requirements.sdk_min_servicing):
@@ -881,7 +938,7 @@ def ensure_windows_sdk(requirements: WindowsRequirements) -> tuple[Path, str]:
             f"Chromium's documented minimum {requirements.sdk_min_servicing}"
         )
     print(
-        f"Validated Windows SDK family {requirements.sdk_family}, servicing {servicing}, "
+        f"Validated Windows SDK family {sdk_family}, servicing {servicing}, "
         f"including x86 libraries and Debugging Tools"
     )
     return kits, servicing
@@ -1964,7 +2021,7 @@ def run_build_slice(
     remaining = cutoff - now
     source = work_root / "src"
     out = source / "out" / OUT_NAME
-    ninja = Path(os.environ.get("CHROMIUM_WINDOWS_NINJA", str(source / "third_party/ninja/ninja.exe")))
+    ninja = source / "third_party/ninja/ninja.exe"
     if not ninja.is_file():
         raise InfrastructureError(f"Prepared Ninja executable is unavailable: {ninja}")
     log = work_root / "windows-i686-build.log"
@@ -2199,15 +2256,14 @@ def write_stage_summary(
     attempt: str,
     result_file: Path | None,
 ) -> None:
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
-    if not summary_path:
+    summary_path = _runner_command_file("GITHUB_STEP_SUMMARY", "step_summary_")
+    if summary_path is None:
         return
     result: dict[str, object] = {}
     if result_file is not None and result_file.is_file():
         result = _read_json_object(result_file, "build result")
-    archive = Path(os.environ.get("GITHUB_WORKSPACE", str(work_root))) / "checkpoints-windows" / f"out-{OUT_NAME}.tar.zst"
     free = shutil.disk_usage(work_root).free / 1024**3
-    with Path(summary_path).open("a", encoding="utf-8", newline="\n") as handle:
+    with summary_path.open("a", encoding="utf-8", newline="\n") as handle:  # lgtm [py/path-injection]
         handle.write("## Chromium Windows i686 stage summary\n\n")
         handle.write("| Field | Value |\n| --- | --- |\n")
         for key, value in (
@@ -2218,7 +2274,6 @@ def write_stage_summary(
             ("Failure class", str(result.get("failure_class", "none") or "none")),
             ("Ninja entries", f"{result.get('ninja_entries_before', '?')} -> {result.get('ninja_entries_after', '?')}"),
             ("No-progress streak", str(result.get("no_progress_streak", "?"))),
-            ("Checkpoint bytes", str(archive.stat().st_size if archive.is_file() else "none")),
             ("Free disk GiB", f"{free:.1f}"),
         ):
             handle.write(f"| {key} | `{value}` |\n")

@@ -19,6 +19,40 @@ SPEC.loader.exec_module(pipeline)
 
 
 class WindowsI686PipelineTests(unittest.TestCase):
+    def test_runner_command_files_are_scoped_to_runner_temp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            command_dir = root / "_runner_file_commands"
+            command_dir.mkdir()
+            expected = command_dir / "set_output_abcdefgh"
+            with mock.patch.dict(
+                pipeline.os.environ,
+                {"RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(expected)},
+                clear=False,
+            ):
+                self.assertEqual(
+                    pipeline._runner_command_file("GITHUB_OUTPUT", "set_output_"),
+                    expected.resolve(),
+                )
+            with mock.patch.dict(
+                pipeline.os.environ,
+                {
+                    "RUNNER_TEMP": str(root),
+                    "GITHUB_OUTPUT": str(root / "set_output_abcdefgh"),
+                },
+                clear=False,
+            ):
+                with self.assertRaises(pipeline.WindowsPipelineError):
+                    pipeline._runner_command_file("GITHUB_OUTPUT", "set_output_")
+
+    def test_command_wrapper_rejects_unlisted_executable_before_spawn(self):
+        with mock.patch.object(pipeline.subprocess, "run") as run:
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError, "outside the Windows pipeline allowlist"
+            ):
+                pipeline._run(["attacker-controlled.exe", "argument"])
+        run.assert_not_called()
+
     def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
         class Response:
             def __enter__(self):
