@@ -1,0 +1,68 @@
+name: Report Chromium Windows i686 Workflow Failure
+
+on:
+  workflow_run:
+    workflows:
+      - Chromium Windows i686 Compatibility Preflight
+      - Chromium Windows i686 Build (Unofficial)
+      - Chromium Windows i686 Release Handoff
+      - Publish Chromium Windows i686 Release
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: chromium-windows-i686-maintenance-issues
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: ${{ github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.conclusion != 'skipped' && github.event.workflow_run.head_branch == github.event.repository.default_branch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout immutable maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Mirror failed Windows workflow into maintenance state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+          FAILED_RUN_NAME: ${{ github.event.workflow_run.name }}
+          FAILED_RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+          FAILED_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"${FAILED_RUN_TITLE}" | head -n1)"
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            title="[windows-i686-port] Chromium ${version} requires maintenance"
+          else
+            title="[windows-i686-port] Chromium pipeline requires maintenance"
+            version="unparseable"
+          fi
+          detail="$(timeout -k 10s 90s gh run view "${FAILED_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --json jobs 2>&1 || true)"
+          body_file="${RUNNER_TEMP}/chromium-windows-i686-workflow-failure.md"
+          cat > "${body_file}" <<EOF
+          A trusted Chromium Windows i686 workflow completed unsuccessfully.
+
+          - Workflow: ${FAILED_RUN_NAME}
+          - Display title: ${FAILED_RUN_TITLE}
+          - Parsed version: ${version}
+          - Conclusion: ${FAILED_CONCLUSION}
+          - Run: ${FAILED_RUN_URL}
+
+          The exact version is quarantined. Same-run reporters retain richer failure classification; this workflow is the independent backup mirror.
+
+          Bounded job metadata:
+          ```json
+          ${detail:0:12000}
+          ```
+          EOF
+          python3 scripts/github_maintenance_issue.py --repository "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body_file}"

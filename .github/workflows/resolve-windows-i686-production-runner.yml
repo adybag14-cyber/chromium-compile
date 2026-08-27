@@ -1,0 +1,48 @@
+name: Resolve Windows i686 Production Runner
+
+on:
+  workflow_call:
+    inputs:
+      requested_runner:
+        description: Optional explicit hosted Windows runner label.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      label:
+        description: Validated hosted Windows runner label.
+        value: ${{ jobs.resolve.outputs.label }}
+      valid:
+        description: Whether the requested label is in the tested allowlist.
+        value: ${{ jobs.resolve.outputs.valid }}
+
+permissions: {}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.runner.outputs.label }}
+      valid: ${{ steps.runner.outputs.valid }}
+    steps:
+      - name: Resolve tested VS 2026 image
+        id: runner
+        env:
+          REQUESTED_RUNNER: ${{ inputs.requested_runner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${REQUESTED_RUNNER:-windows-2025-vs2026}"
+          case "${requested}" in
+            windows-2025-vs2026|windows-2025)
+              echo "label=${requested}" >> "${GITHUB_OUTPUT}"
+              echo "valid=true" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "label=windows-2025-vs2026" >> "${GITHUB_OUTPUT}"
+              echo "valid=false" >> "${GITHUB_OUTPUT}"
+              echo "::error::Unsupported Windows i686 production runner ${requested@Q}; allowed labels are windows-2025-vs2026 and windows-2025."
+              exit 1
+              ;;
+          esac

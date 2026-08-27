@@ -10,6 +10,43 @@ The automation guarantees that every newly observed Linux stable version is eith
 
 It cannot guarantee that upstream Chromium will remain technically portable to i686. Chromium no longer supports or tests this target, so each stable release is treated as a new downstream-port compatibility event.
 
+## Windows i686 maintenance contract
+
+The Windows lane is a parallel authority surface, not a matrix child of Linux. It has its own global queue, stable watcher, exact-version maintenance titles, staged checkpoint namespace, artifact names, release handoff, immutable publisher, and release tag suffix. Do not combine the queues: a Windows image/SDK failure must not block a healthy Linux build.
+
+The Windows source/toolchain sequence is:
+
+1. Verify the requested `chromium-<version>.tar.xz` against GCS generation, length, MD5 and local SHA-256; stream-check paths/resource bounds before extraction; compare Windows-critical files with the exact Gitiles tag.
+2. Confirm root `BUILD.gn` still permits `target_os="win"` with `target_cpu="x86"`, and confirm `build/toolchain/win/BUILD.gn` still defines the x86 toolchain. Windows needs no downstream equivalent of the Linux x86 assertion patch.
+3. Parse `SDK_VERSION` and the preferred `MSVS_VERSIONS` entry from that revision's `build/vs_toolchain.py`. Parse the minimum serviced SDK from the same tag's Windows build instructions.
+4. Validate the hosted VS installation with `vswhere`, including Native Desktop, x64-hosted x86 tools, and ATL/MFC. If the source-declared SDK family is absent, install only the matching official `Microsoft.WindowsSDK.<family>` WinGet package with Desktop C++ x86/x64 and Windows Desktop Debuggers features. Recheck x86 headers/libraries, `dbghelp.dll`, and the servicing version before GN.
+5. Resolve depot_tools, GN, Ninja, host CPython and Clang from immutable pins in Chromium `DEPS`; disable depot_tools self-update and the Google-internal Windows toolchain path. Materialize the pinned host CPython payload at `third_party/cpython3/host`, which current GN scripts require before they can calculate linker concurrency. Chromium invokes `bin/python3` before host executable suffixes are initialized, so Windows also gets an extensionless, SHA-identical copy of the pinned `python3.exe` at that exact path.
+6. Generate the graph with the small cross-revision GN contract in `scripts/chromium_windows_pipeline.py`, then query both `//chrome` and `//chrome/installer/mini_installer:mini_installer` before compilation.
+
+The current production image allowlist is `windows-2025-vs2026` and `windows-2025`; the default is the explicit `windows-2025-vs2026` label. Never point production at `windows-latest`. A Chromium SDK-family roll is expected and handled dynamically; a Visual Studio major roll remains a reviewed runner-policy change.
+
+Windows compiler slices use a 325-minute maximum inside the six-hour job so source cleanup, PAX/Zstandard checkpoint creation, validation, and artifact upload retain a 35-minute reserve. `out/Release_x86_win` checkpoints must contain:
+
+```text
+out-Release_x86_win.tar.zst
+out-Release_x86_win.tar.zst.sha256
+checkpoint-manifest.json
+```
+
+The producer run must be the exact Windows build workflow in the same repository, on the expected branch and immutable lineage SHA, with a version/stage title matching the requested producer. The manifest additionally binds source SHA, Chromium-pinned depot_tools/GN/Ninja/Clang, SDK family, VS year, port hash, run ID/attempt, archive length and archive SHA. The servicing patch of an SDK or VS image may advance between runner rotations; GN is always regenerated after restore so command-line drift invalidates/rebuilds affected objects instead of making otherwise compatible checkpoints unusable.
+
+The final artifact is exactly:
+
+```text
+chromium-<version>-windows-i686.zip
+chromium-<version>-windows-i686.zip.sha256
+chromium-<version>-windows-i686-manifest.txt
+```
+
+Packaging starts from Chromium's generated `chrome.7z` runtime plus `mini_installer.exe`. Both the build job and trusted publisher reject traversal, duplicate, encrypted, linked, oversized or unexpected archive state. Every packaged `.exe` and `.dll` must carry `IMAGE_FILE_MACHINE_I386` and a PE32 optional header; a fresh Windows publisher runner then extracts the exact validated ZIP and renders a local headless DOM marker. Publication is draft-first and resumable: missing draft assets may be added, but an existing asset is accepted only with GitHub SHA-256 metadata equal to local bytes, and published releases must report GitHub-enforced immutability.
+
+For the initial lane, manually run **Chromium Windows i686 Compatibility Preflight** for `153.0.8010.12`. Use `dispatch_build=false` for a graph-only proof and `true` only after reviewing its evidence. Later versions are selected independently from the Windows VersionHistory feed by **Watch Chromium Windows Stable for i686**.
+
 ## Safe activation
 
 Scheduled discovery is intentionally gated. After this branch is reviewed and merged, create the repository variable:

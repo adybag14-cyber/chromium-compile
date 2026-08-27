@@ -12,7 +12,18 @@ RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
-TITLE_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]?) - attempt ([0-9]+)$")
+TITLE_RES = {
+    "linux": re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]?) - attempt ([0-9]+)$"),
+    "windows": re.compile(r"^Chromium Windows i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]?) - attempt ([0-9]+)$"),
+}
+WORKFLOW_PATHS = {
+    "linux": ".github/workflows/chromium-i686.yml",
+    "windows": ".github/workflows/chromium-windows-i686.yml",
+}
+ARTIFACT_PREFIXES = {
+    "linux": "chromium-i686-out-stage-",
+    "windows": "chromium-windows-i686-out-stage-",
+}
 
 
 class PruneError(RuntimeError):
@@ -49,8 +60,11 @@ def _bounded_stage(value: str) -> int:
     return stage
 
 def resolve_checkpoint_artifact(
-    repository: str, run_id: str, version: str, expected_stage: str, default_branch: str
+    repository: str, run_id: str, version: str, expected_stage: str, default_branch: str,
+    *, lane: str = "linux"
 ) -> int | None:
+    if lane not in TITLE_RES:
+        raise PruneError(f"unsupported checkpoint lane: {lane!r}")
     if not REPOSITORY_RE.fullmatch(repository):
         raise PruneError(f"invalid repository: {repository!r}")
     if not RUN_ID_RE.fullmatch(run_id):
@@ -69,8 +83,8 @@ def resolve_checkpoint_artifact(
     if actor_login != "github-actions[bot]":
         raise PruneError(f"run {run_id} was created by {actor_login!r}, not github-actions[bot]")
     workflow_path = str(run.get("path", "")).split("@", 1)[0]
-    if workflow_path != ".github/workflows/chromium-i686.yml":
-        raise PruneError(f"run {run_id} is not the Chromium i686 build workflow")
+    if workflow_path != WORKFLOW_PATHS[lane]:
+        raise PruneError(f"run {run_id} is not the trusted {lane} i686 build workflow")
     head_repo = (run.get("head_repository") or {}).get("full_name") if isinstance(run.get("head_repository"), dict) else None
     if head_repo != repository:
         raise PruneError(f"run {run_id} originated from {head_repo!r}, not {repository}")
@@ -79,7 +93,7 @@ def resolve_checkpoint_artifact(
     if run.get("event") != "workflow_dispatch":
         raise PruneError(f"run {run_id} was not created by workflow_dispatch")
     title = str(run.get("display_title", ""))
-    match = TITLE_RE.fullmatch(title)
+    match = TITLE_RES[lane].fullmatch(title)
     if not match or match.group(1) != version or int(match.group(2)) != stage:
         raise PruneError(f"run {run_id} title does not match Chromium {version} stage {stage}: {title!r}")
 
@@ -90,7 +104,7 @@ def resolve_checkpoint_artifact(
     total = artifacts.get("total_count")
     if not isinstance(total, int) or isinstance(total, bool) or total < 0 or total > 100:
         raise PruneError(f"run {run_id} artifact listing exceeds bounded 0..100 contract: {total!r}")
-    expected_name = f"chromium-i686-out-stage-{stage}"
+    expected_name = f"{ARTIFACT_PREFIXES[lane]}{stage}"
     values = artifacts.get("artifacts")
     if not isinstance(values, list):
         raise PruneError("artifact listing lacks an artifacts array")
@@ -112,14 +126,16 @@ def resolve_checkpoint_artifact(
 
 def prune_checkpoint(
     repository: str, run_id: str, version: str, expected_stage: str, default_branch: str, *,
-    protect_run_id: str = "", dry_run: bool = False
+    protect_run_id: str = "", dry_run: bool = False, lane: str = "linux"
 ) -> str:
     if protect_run_id:
         if not RUN_ID_RE.fullmatch(protect_run_id):
             raise PruneError(f"invalid protected Actions run id: {protect_run_id!r}")
         if run_id == protect_run_id:
             raise PruneError(f"refusing to prune checkpoint from protected current run {run_id}")
-    artifact_id = resolve_checkpoint_artifact(repository, run_id, version, expected_stage, default_branch)
+    artifact_id = resolve_checkpoint_artifact(
+        repository, run_id, version, expected_stage, default_branch, lane=lane
+    )
     if artifact_id is None:
         return "already-missing"
     if dry_run:
@@ -128,10 +144,14 @@ def prune_checkpoint(
         run_gh(["api", "--method", "DELETE", f"repos/{repository}/actions/artifacts/{artifact_id}"], timeout=120)
     except PruneError as exc:
         # DELETE is non-idempotent. Confirm whether GitHub accepted it before surfacing failure.
-        if resolve_checkpoint_artifact(repository, run_id, version, expected_stage, default_branch) is None:
+        if resolve_checkpoint_artifact(
+            repository, run_id, version, expected_stage, default_branch, lane=lane
+        ) is None:
             return f"deleted-after-client-error:{artifact_id}"
         raise exc
-    if resolve_checkpoint_artifact(repository, run_id, version, expected_stage, default_branch) is not None:
+    if resolve_checkpoint_artifact(
+        repository, run_id, version, expected_stage, default_branch, lane=lane
+    ) is not None:
         raise PruneError(f"checkpoint artifact {artifact_id} is still visible after DELETE")
     return f"deleted:{artifact_id}"
 
@@ -144,11 +164,12 @@ def main() -> int:
     parser.add_argument("--default-branch", required=True)
     parser.add_argument("--protect-run-id", default="")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--lane", choices=tuple(TITLE_RES), default="linux")
     args = parser.parse_args()
     try:
         result = prune_checkpoint(
             args.repository, args.run_id, args.version, args.expected_stage, args.default_branch,
-            protect_run_id=args.protect_run_id, dry_run=args.dry_run
+            protect_run_id=args.protect_run_id, dry_run=args.dry_run, lane=args.lane
         )
     except PruneError as exc:
         parser.error(str(exc))

@@ -20,7 +20,18 @@ REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
-BUILD_TITLE_RE = re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]*) - attempt ([0-9]+)$")
+BUILD_TITLE_RES = {
+    "linux": re.compile(r"^Chromium i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]*) - attempt ([0-9]+)$"),
+    "windows": re.compile(r"^Chromium Windows i686 ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) - stage ([1-9][0-9]*) - attempt ([0-9]+)$"),
+}
+BUILD_WORKFLOWS = {
+    "linux": ".github/workflows/chromium-i686.yml",
+    "windows": ".github/workflows/chromium-windows-i686.yml",
+}
+PUBLISH_WORKFLOWS = {
+    "linux": "publish-i686-release.yml",
+    "windows": "publish-windows-i686-release.yml",
+}
 ACTIVE_STATUSES = frozenset(("queued", "in_progress", "waiting", "pending", "requested"))
 
 
@@ -55,8 +66,11 @@ def read_build_run(repository: str, run_id: str) -> dict[str, object]:
 
 
 def validate_build_identity(
-    payload: dict[str, object], repository: str, version: str, branch: str, expected_sha: str
+    payload: dict[str, object], repository: str, version: str, branch: str, expected_sha: str,
+    *, lane: str = "linux"
 ) -> str:
+    if lane not in BUILD_TITLE_RES:
+        raise HandoffError(f"unsupported release lane: {lane!r}")
     workflow_path = str(payload.get("path", "")).split("@", 1)[0]
     head_repo = payload.get("head_repository")
     head_repo_name = str(head_repo.get("full_name", "")) if isinstance(head_repo, dict) else ""
@@ -64,8 +78,8 @@ def validate_build_identity(
     head_sha = str(payload.get("head_sha", "")).lower()
     display_title = str(payload.get("display_title", ""))
     event = str(payload.get("event", ""))
-    match = BUILD_TITLE_RE.fullmatch(display_title)
-    if workflow_path != ".github/workflows/chromium-i686.yml":
+    match = BUILD_TITLE_RES[lane].fullmatch(display_title)
+    if workflow_path != BUILD_WORKFLOWS[lane]:
         raise HandoffError(f"run is not the trusted Chromium build workflow: {workflow_path!r}")
     if head_repo_name != repository:
         raise HandoffError(f"run originated from {head_repo_name!r}, not {repository!r}")
@@ -90,10 +104,13 @@ def wait_for_successful_build(
     attempts: int = 60,
     delay_seconds: int = 5,
     sleeper: Callable[[float], None] = time.sleep,
+    lane: str = "linux",
 ) -> dict[str, object]:
     for attempt in range(attempts):
         payload = read_build_run(repository, run_id)
-        validate_build_identity(payload, repository, version, branch, expected_sha)
+        validate_build_identity(
+            payload, repository, version, branch, expected_sha, lane=lane
+        )
         status = str(payload.get("status", ""))
         conclusion = payload.get("conclusion")
         if status == "completed":
@@ -117,12 +134,13 @@ def wait_for_legacy_publisher(
     attempts: int = 4,
     delay_seconds: int = 2,
     sleeper: Callable[[float], None] = time.sleep,
+    lane: str = "linux",
 ) -> bool:
     legacy_title = f"Publish {build_title}"
     for attempt in range(attempts):
         if dispatch.exact_exists_since(
             repository,
-            "publish-i686-release.yml",
+            PUBLISH_WORKFLOWS[lane],
             legacy_title,
             branch,
             parent_started,
@@ -135,24 +153,39 @@ def wait_for_legacy_publisher(
     return False
 
 
-def handoff_release(repository: str, run_id: str, version: str, branch: str, expected_sha: str) -> str:
+def handoff_release(
+    repository: str,
+    run_id: str,
+    version: str,
+    branch: str,
+    expected_sha: str,
+    *,
+    lane: str = "linux",
+) -> str:
+    if lane not in BUILD_TITLE_RES:
+        raise HandoffError(f"unsupported release lane: {lane!r}")
     normalized_sha = validate_inputs(repository, run_id, version, branch, expected_sha)
-    payload = wait_for_successful_build(repository, run_id, version, branch, normalized_sha)
-    build_title = validate_build_identity(payload, repository, version, branch, normalized_sha)
+    payload = wait_for_successful_build(
+        repository, run_id, version, branch, normalized_sha, lane=lane
+    )
+    build_title = validate_build_identity(
+        payload, repository, version, branch, normalized_sha, lane=lane
+    )
     parent_started = dispatch.workflow_run_created_at(repository, run_id)
 
     # workflow_run is still preferred when GitHub emits it. Give that event a
     # short materialization window before falling back to workflow_dispatch, so
     # normal runs do not create redundant serialized publisher jobs.
     if wait_for_legacy_publisher(
-        repository, build_title, branch, normalized_sha, parent_started
+        repository, build_title, branch, normalized_sha, parent_started, lane=lane
     ):
         return "workflow-run-publisher-present"
 
-    expected_title = f"Publish Chromium i686 {version} from build run {run_id}"
+    label = "Chromium i686" if lane == "linux" else "Chromium Windows i686"
+    expected_title = f"Publish {label} {version} from build run {run_id}"
     return dispatch.dispatch_once(
         repository,
-        "publish-i686-release.yml",
+        PUBLISH_WORKFLOWS[lane],
         branch,
         expected_title,
         [f"build_run_id={run_id}", f"version={version}"],
@@ -169,6 +202,7 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--default-branch", required=True)
     parser.add_argument("--expected-build-sha", required=True)
+    parser.add_argument("--lane", choices=tuple(BUILD_TITLE_RES), default="linux")
     args = parser.parse_args()
     try:
         result = handoff_release(
@@ -177,6 +211,7 @@ def main() -> int:
             args.version,
             args.default_branch,
             args.expected_build_sha,
+            lane=args.lane,
         )
     except (HandoffError, dispatch.DispatchError, ValueError) as exc:
         parser.error(str(exc))

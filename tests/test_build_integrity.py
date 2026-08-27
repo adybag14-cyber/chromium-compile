@@ -29,6 +29,29 @@ archive_validator = load_module("validate_release_archive", "scripts/validate_re
 
 
 class ToolPinTests(unittest.TestCase):
+    def test_cpython_pin_is_optional_for_pre_cpython_chromium_deps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                """
+vars = {
+  'gn_version': 'git_revision:0123456789abcdef0123456789abcdef01234567',
+  'ninja_package': 'infra/3pp/tools/ninja/',
+  'ninja_version': 'version:3@1.12.1.chromium.4',
+}
+deps = {
+  'src/third_party/depot_tools':
+    Var('chromium_git') + '/chromium/tools/depot_tools.git' + '@' + '0123456789abcdef0123456789abcdef01234567',
+}
+""",
+                encoding="utf-8",
+            )
+            pins = tool_pins.resolve_pins(deps)
+            self.assertNotIn("cpython3_version", pins)
+            self.assertEqual(
+                pins["ninja_version"], "version:3@1.12.1.chromium.4"
+            )
+
     def test_resolves_chromium_declared_gn_and_depot_tools_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
             deps = pathlib.Path(tmp) / "DEPS"
@@ -36,6 +59,9 @@ class ToolPinTests(unittest.TestCase):
                 """
 vars = {
   'gn_version': 'git_revision:0123456789abcdef0123456789abcdef01234567',
+  'ninja_package': 'infra/3pp/tools/ninja/',
+  'ninja_version': 'version:3@1.12.1.chromium.4',
+  'cpython3_version': 'version:3@3.11.9.chromium.38',
 }
 
 deps = {
@@ -51,6 +77,9 @@ deps = {
                 {
                     "gn_version": "git_revision:0123456789abcdef0123456789abcdef01234567",
                     "depot_tools_revision": "0123456789abcdef0123456789abcdef01234567",
+                    "ninja_package": "infra/3pp/tools/ninja/",
+                    "ninja_version": "version:3@1.12.1.chromium.4",
+                    "cpython3_version": "version:3@3.11.9.chromium.38",
                 },
             )
 

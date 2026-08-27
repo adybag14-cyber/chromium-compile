@@ -1,0 +1,234 @@
+name: Chromium Windows i686 Compatibility Preflight
+run-name: Chromium Windows i686 preflight ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Chromium stable version.
+        required: true
+        type: string
+      dispatch_build:
+        description: Dispatch stage 1 after all compatibility checks pass.
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.ref_name == github.event.repository.default_branch && 'chromium-windows-i686-port-queue' || format('chromium-windows-i686-preflight-nonprod-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  source_ready:
+    name: Verify authoritative source publication
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.source.outputs.ready }}
+    steps:
+      - name: Checkout immutable source helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Verify exact source object exists
+        id: source
+        env:
+          CHROMIUM_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "${CHROMIUM_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be an exact four-part Chromium version"
+            exit 2
+          fi
+          if python3 scripts/chromium_source_object.py --version "${CHROMIUM_VERSION}" --availability-only; then
+            echo "ready=true" >> "${GITHUB_OUTPUT}"
+          else
+            status=$?
+            if [ "${status}" -eq 3 ]; then
+              echo "ready=false" >> "${GITHUB_OUTPUT}"
+              echo "::error::Chromium ${CHROMIUM_VERSION} source object is not published yet."
+            fi
+            exit "${status}"
+          fi
+
+  resolve_runner:
+    name: Resolve tested Windows i686 runner
+    permissions: {}
+    uses: ./.github/workflows/resolve-windows-i686-production-runner.yml
+    with:
+      requested_runner: ${{ vars.CHROMIUM_WINDOWS_I686_RUNNER }}
+
+  preflight:
+    name: Prove Windows x86 source, SDK, VS, GN, and package targets
+    needs: [source_ready, resolve_runner]
+    if: ${{ needs.source_ready.outputs.ready == 'true' && needs.resolve_runner.outputs.valid == 'true' }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ${{ needs.resolve_runner.outputs.label }}
+    timeout-minutes: 240
+    steps:
+      - name: Checkout immutable Windows port infrastructure
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Select short high-capacity Windows root
+        shell: pwsh
+        run: python scripts/chromium_windows_pipeline.py select-root --minimum-free-gib 70
+
+      - name: Resolve exact source cache identity
+        id: cache_identity
+        shell: pwsh
+        run: |
+          $metadata = Join-Path $env:RUNNER_TEMP 'chromium-windows-preflight-source.json'
+          $key = & python scripts/chromium_source_object.py --version '${{ inputs.version }}' --metadata-out $metadata --cache-key-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "key=$($key.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Restore exact Chromium source object cache
+        id: source_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ${{ github.workspace }}/.chromium-source-cache
+          key: ${{ steps.cache_identity.outputs.key }}
+
+      - name: Generate full Windows i686 compatibility proof
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'windows-i686-preflight-evidence'
+          python scripts/chromium_windows_pipeline.py prepare `
+            --version '${{ inputs.version }}' `
+            --work-root $env:CHROMIUM_WINDOWS_ROOT `
+            --cache-dir (Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache') `
+            --repository-root $env:GITHUB_WORKSPACE `
+            --stage 1 `
+            --repository $env:GITHUB_REPOSITORY `
+            --expected-ref '${{ github.ref_name }}' `
+            --expected-sha '${{ github.sha }}' `
+            --evidence-dir $evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Resolve prepared source cache key
+        id: prepared_cache
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:GITHUB_WORKSPACE '.chromium-source-cache'
+          $key = & python scripts/chromium_windows_pipeline.py prepared-source-cache-key --version '${{ inputs.version }}' --cache-dir $cache
+          if ($LASTEXITCODE -eq 0 -and $key) {
+            "key=$($key.Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            Write-Warning 'No fully trusted source cache is available to save from this attempt.'
+            "key=" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
+      - name: Save exact Chromium source object cache
+        if: ${{ always() && steps.prepared_cache.outputs.key != '' && steps.source_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ${{ github.workspace }}/.chromium-source-cache
+          key: ${{ steps.prepared_cache.outputs.key }}
+
+      - name: Upload Windows compatibility evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chromium-${{ inputs.version }}-windows-i686-preflight
+          path: ${{ github.workspace }}/windows-i686-preflight-evidence
+          retention-days: 14
+          if-no-files-found: error
+
+  dispatch_build:
+    name: Dispatch Windows stage 1 exactly once
+    needs: preflight
+    if: ${{ needs.preflight.result == 'success' && inputs.dispatch_build && github.ref_name == github.event.repository.default_branch }}
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout immutable dispatcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Dispatch resumable Windows build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ inputs.version }}
+          LINEAGE_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_title="Chromium Windows i686 ${CHROMIUM_VERSION} - stage 1 - attempt 0"
+          python3 scripts/github_workflow_dispatch.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow chromium-windows-i686.yml \
+            --ref "${DEFAULT_BRANCH}" \
+            --expected-title "${expected_title}" \
+            --expected-head-sha "${LINEAGE_SHA}" \
+            --dedupe-completed \
+            --dedupe-since-run-id "${GITHUB_RUN_ID}" \
+            --input "stage=1" \
+            --input "version=${CHROMIUM_VERSION}" \
+            --input "lineage_sha=${LINEAGE_SHA}" \
+            --input "preferred_checkpoint_run_id=" \
+            --input "fallback_checkpoint_run_id=" \
+            --input "older_checkpoint_run_id=" \
+            --input "retry_count=0"
+
+  report_failure:
+    name: Record Windows compatibility failure
+    needs: [source_ready, resolve_runner, preflight]
+    if: ${{ always() && github.ref_name == github.event.repository.default_branch && (needs.source_ready.result == 'failure' || needs.resolve_runner.result == 'failure' || needs.preflight.result == 'failure') }}
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Open or update exact-version maintenance issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${CHROMIUM_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            title="[windows-i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
+          else
+            title="[windows-i686-port] Chromium pipeline requires maintenance"
+          fi
+          body_file="${RUNNER_TEMP}/chromium-windows-i686-preflight-failure.md"
+          cat > "${body_file}" <<EOF
+          The hardened Windows i686 compatibility preflight did not complete successfully.
+
+          - Chromium: ${CHROMIUM_VERSION}
+          - Source readiness: ${{ needs.source_ready.result }}
+          - Runner resolution: ${{ needs.resolve_runner.result }}
+          - Full preflight: ${{ needs.preflight.result }}
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Workflow commit: ${GITHUB_SHA}
+
+          This exact version remains quarantined. Later stable revisions retain independent compatibility attempts.
+          EOF
+          python3 scripts/github_maintenance_issue.py --repository "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body_file}"

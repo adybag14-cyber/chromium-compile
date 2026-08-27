@@ -1,0 +1,254 @@
+name: Publish Chromium Windows i686 Release
+run-name: Publish Chromium Windows i686 ${{ inputs.version }} from build run ${{ inputs.build_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful trusted Windows i686 build run.
+        required: true
+        type: string
+      version:
+        description: Exact Chromium version expected in the artifact.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.ref_name == github.event.repository.default_branch && format('chromium-windows-i686-release-{0}', inputs.version) || format('chromium-windows-i686-release-nonprod-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  resolve_runner:
+    name: Resolve Windows runtime-smoke runner
+    permissions: {}
+    uses: ./.github/workflows/resolve-windows-i686-production-runner.yml
+    with:
+      requested_runner: ${{ vars.CHROMIUM_WINDOWS_I686_RUNNER }}
+
+  validate:
+    name: Validate trusted build and Windows PE32 artifact
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch }}
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      run_id: ${{ steps.proof.outputs.run_id }}
+      head_sha: ${{ steps.proof.outputs.head_sha }}
+      artifact_name: ${{ steps.proof.outputs.artifact_name }}
+      package_sha: ${{ steps.bundle.outputs.package_sha }}
+      version: ${{ steps.proof.outputs.version }}
+    steps:
+      - name: Checkout immutable release validators
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Verify successful build run and exact final artifact
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          CHROMIUM_VERSION: ${{ inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$(python3 scripts/chromium_windows_pipeline.py verify-build-run \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${BUILD_RUN_ID}" \
+            --version "${CHROMIUM_VERSION}" \
+            --expected-ref "${DEFAULT_BRANCH}" \
+            --expected-sha "${WORKFLOW_SHA}")"
+          printf '%s\n' "${proof}" | python3 -m json.tool
+          echo "run_id=$(jq -r .run_id <<<"${proof}")" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=$(jq -r .head_sha <<<"${proof}")" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=$(jq -r .artifact_name <<<"${proof}")" >> "${GITHUB_OUTPUT}"
+          echo "version=${CHROMIUM_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download exact completed artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.proof.outputs.run_id }}
+          ARTIFACT_NAME: ${{ steps.proof.outputs.artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${ARTIFACT_NAME}" --dir release-assets
+
+      - name: Validate checksum, manifest, ZIP paths, and every PE architecture
+        id: bundle
+        env:
+          CHROMIUM_VERSION: ${{ steps.proof.outputs.version }}
+          BUILD_RUN_ID: ${{ steps.proof.outputs.run_id }}
+          BUILD_SHA: ${{ steps.proof.outputs.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$(python3 scripts/chromium_windows_pipeline.py validate-release-bundle release-assets \
+            --version "${CHROMIUM_VERSION}" \
+            --expected-run-id "${BUILD_RUN_ID}" \
+            --expected-sha "${BUILD_SHA}")"
+          printf '%s\n' "${result}" | python3 -m json.tool
+          echo "package_sha=$(jq -r .package_sha256 <<<"${result}")" >> "${GITHUB_OUTPUT}"
+
+  smoke:
+    name: Revalidate and launch packaged Windows i686 Chromium
+    needs: [resolve_runner, validate]
+    if: ${{ needs.resolve_runner.outputs.valid == 'true' && needs.validate.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ${{ needs.resolve_runner.outputs.label }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout immutable Windows runtime validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download exact build artifact again
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+          ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}
+        run: |
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          gh run download $env:RUN_ID --repo $env:GITHUB_REPOSITORY --name $env:ARTIFACT_NAME --dir release-assets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Revalidate exact artifact and perform isolated headless smoke
+        shell: pwsh
+        env:
+          CHROMIUM_VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_RUN_ID: ${{ needs.validate.outputs.run_id }}
+          BUILD_SHA: ${{ needs.validate.outputs.head_sha }}
+          PACKAGE_SHA: ${{ needs.validate.outputs.package_sha }}
+        run: |
+          $result = & python scripts/chromium_windows_pipeline.py validate-release-bundle release-assets `
+            --version $env:CHROMIUM_VERSION `
+            --expected-run-id $env:BUILD_RUN_ID `
+            --expected-sha $env:BUILD_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $validated = $result | ConvertFrom-Json
+          if ($validated.package_sha256 -ne $env:PACKAGE_SHA) {
+            Write-Error 'Package digest changed between independent validation jobs.'
+            exit 2
+          }
+          $extract = Join-Path $env:RUNNER_TEMP 'chromium-windows-i686-release-smoke'
+          $package = Join-Path $env:GITHUB_WORKSPACE "release-assets/chromium-$env:CHROMIUM_VERSION-windows-i686.zip"
+          python scripts/chromium_windows_runtime.py extract-zip $package $extract --version $env:CHROMIUM_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $root = Join-Path $extract "chromium-$env:CHROMIUM_VERSION-windows-i686"
+          python scripts/chromium_windows_runtime.py smoke $root --timeout-seconds 120
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  publish:
+    name: Publish byte-identical immutable Windows release
+    needs: [validate, smoke]
+    if: ${{ needs.validate.result == 'success' && needs.smoke.result == 'success' }}
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout immutable publication helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Reverify build authority and redownload artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ needs.validate.outputs.run_id }}
+          CHROMIUM_VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_SHA: ${{ needs.validate.outputs.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/chromium_windows_pipeline.py verify-build-run \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${BUILD_RUN_ID}" \
+            --version "${CHROMIUM_VERSION}" \
+            --expected-ref "${DEFAULT_BRANCH}" \
+            --expected-sha "${BUILD_SHA}"
+          mkdir -p release-assets
+          gh run download "${BUILD_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${ARTIFACT_NAME}" --dir release-assets
+          result="$(python3 scripts/chromium_windows_pipeline.py validate-release-bundle release-assets \
+            --version "${CHROMIUM_VERSION}" \
+            --expected-run-id "${BUILD_RUN_ID}" \
+            --expected-sha "${BUILD_SHA}")"
+          test "$(jq -r .package_sha256 <<<"${result}")" = "${{ needs.validate.outputs.package_sha }}"
+      - name: Create or resume transactional immutable Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_RUN_ID: ${{ needs.validate.outputs.run_id }}
+          BUILD_SHA: ${{ needs.validate.outputs.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="chromium-${CHROMIUM_VERSION}-windows-i686"
+          title="Chromium ${CHROMIUM_VERSION} Windows i686 (Unofficial)"
+          notes="Unofficial downstream Windows i686 build of Chromium ${CHROMIUM_VERSION}. Built from Chromium's exact stable source object, PE32-validated, and independently headless-smoke-tested by GitHub Actions run ${BUILD_RUN_ID} at commit ${BUILD_SHA}."
+          python3 scripts/github_immutable_release.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${tag}" \
+            --sha "${BUILD_SHA}" \
+            --title "${title}" \
+            --notes "${notes}" \
+            --asset "release-assets/chromium-${CHROMIUM_VERSION}-windows-i686.zip" \
+            --asset "release-assets/chromium-${CHROMIUM_VERSION}-windows-i686.zip.sha256" \
+            --asset "release-assets/chromium-${CHROMIUM_VERSION}-windows-i686-manifest.txt"
+          python3 scripts/github_maintenance_issue.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --title "[windows-i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance" \
+            --close-if-open || true
+
+  report_failure:
+    name: Record Windows release failure
+    needs: [resolve_runner, validate, smoke, publish]
+    if: ${{ always() && github.ref_name == github.event.repository.default_branch && (needs.resolve_runner.result == 'failure' || needs.validate.result == 'failure' || needs.smoke.result == 'failure' || needs.publish.result == 'failure') }}
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted maintenance helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Open or update publication issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHROMIUM_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[windows-i686-port] Chromium ${CHROMIUM_VERSION} requires maintenance"
+          body_file="${RUNNER_TEMP}/chromium-windows-i686-release-failure.md"
+          cat > "${body_file}" <<EOF
+          Windows i686 release validation or immutable publication failed.
+
+          - Chromium: ${CHROMIUM_VERSION}
+          - Runner resolution: ${{ needs.resolve_runner.result }}
+          - Artifact validation: ${{ needs.validate.result }}
+          - Independent Windows smoke: ${{ needs.smoke.result }}
+          - Publication: ${{ needs.publish.result }}
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          python3 scripts/github_maintenance_issue.py --repository "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body_file}"
