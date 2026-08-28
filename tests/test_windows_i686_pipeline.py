@@ -72,6 +72,70 @@ class WindowsI686PipelineTests(unittest.TestCase):
         self.assertIs(run.call_args.kwargs["stdout"], pipeline.subprocess.DEVNULL)
         self.assertIs(run.call_args.kwargs["stderr"], pipeline.subprocess.PIPE)
 
+    def test_dawn_generator_output_is_confined_to_generated_output_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            out = source / "out/Release_x86_win"
+            out.mkdir(parents=True)
+            resolved = pipeline._gn_generated_output_under_out(
+                source,
+                out,
+                "//out/Release_x86_win/gen/src/tint/lang/core/enums.h",
+            )
+            self.assertEqual(
+                resolved,
+                out / "gen/src/tint/lang/core/enums.h",
+            )
+            for unsafe in (
+                "//out/Other/gen/src/tint/enums.h",
+                "gen/../escape.h",
+                "obj/third_party/dawn/generator.stamp",
+                "C:/escape.h",
+            ):
+                with self.subTest(unsafe=unsafe):
+                    with self.assertRaises(pipeline.WindowsPipelineError):
+                        pipeline._gn_generated_output_under_out(source, out, unsafe)
+
+    def test_dawn_generator_preflight_executes_real_ninja_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            out = source / "out/Release_x86_win"
+            out.mkdir(parents=True)
+            declared = (
+                out / "gen/src/tint/lang/core/enums.h",
+                out / "gen/src/tint/lang/wgsl/enums.cc",
+            )
+
+            def run(command, **_kwargs):
+                if "desc" in command:
+                    stdout = "\n".join(
+                        "//out/Release_x86_win/"
+                        + path.relative_to(out).as_posix()
+                        for path in declared
+                    )
+                    return pipeline.subprocess.CompletedProcess(
+                        command, 0, stdout + "\n", ""
+                    )
+                for path in declared:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("generated\n", encoding="utf-8")
+                return pipeline.subprocess.CompletedProcess(command, 0, None, "")
+
+            with mock.patch.object(pipeline, "_run", side_effect=run) as runner:
+                stats = pipeline.validate_dawn_source_generator(
+                    source,
+                    out,
+                    pathlib.Path("gn.exe"),
+                    pathlib.Path("ninja.exe"),
+                    {"GOTOOLCHAIN": "local"},
+                )
+            self.assertEqual(stats["label"], pipeline.DAWN_GENERATOR_LABEL)
+            self.assertEqual(stats["output_count"], 2)
+            self.assertEqual(
+                runner.call_args_list[1].args[0][-1],
+                "gen/src/tint/lang/core/enums.h",
+            )
+
     def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
         class Response:
             def __enter__(self):
@@ -537,6 +601,10 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn("devtools-frontend/src/third_party/rollup_libs", source)
         self.assertIn("scripts/deps/sync_rollup_libs.py", source)
         self.assertIn("rollup-win32-x64-msvc/package.json", source)
+        self.assertIn('source / "third_party/dawn/DEPS"', source)
+        self.assertIn("dawn/tools/golang/windows-amd64/bin/go.exe", source)
+        self.assertIn("validate_dawn_source_generator(", source)
+        self.assertIn('"GOTOOLCHAIN": "local"', source)
         self.assertIn('"--version"],', source)
         self.assertIn("install_windows_git_tools(", tool_block)
         self.assertIn('source / "third_party/gperf/bin/gperf.exe"', source)

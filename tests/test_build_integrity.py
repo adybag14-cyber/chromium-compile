@@ -50,6 +50,22 @@ deps = {
 }
 """
 
+    DAWN_CIPD_DEPS = """
+vars = {
+  'dawn_go_version': 'version:3@1.25.0',
+}
+deps = {
+  'tools/golang/windows-amd64': {
+    'packages': [{
+      'package': 'infra/3pp/tools/go/windows-amd64',
+      'version': Var('dawn_go_version'),
+    }],
+    'dep_type': 'cipd',
+    'condition': 'checkout_win and non_git_source',
+  },
+}
+"""
+
     WINDOWS_GCS_DEPS = """
   'src/buildtools/win-format': {
     'bucket': 'chromium-clang-format',
@@ -240,8 +256,12 @@ deps = {
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
             devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
             devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
-            cipd = tool_pins.resolve_windows_cipd_tool_pins(deps, devtools)
-            self.assertEqual(len(cipd), 3)
+            dawn = pathlib.Path(tmp) / "DAWN_DEPS"
+            dawn.write_text(self.DAWN_CIPD_DEPS, encoding="utf-8")
+            cipd = tool_pins.resolve_windows_cipd_tool_pins(
+                deps, devtools, dawn
+            )
+            self.assertEqual(len(cipd), 4)
             self.assertEqual(
                 cipd[0].package,
                 "chromium/third_party/typescript/windows-amd64",
@@ -255,6 +275,15 @@ deps = {
                 cipd[2].package,
                 "infra/3pp/tools/rollup_libs/windows-amd64",
             )
+            self.assertEqual(
+                cipd[3].dependency,
+                "src/third_party/dawn/tools/golang/windows-amd64",
+            )
+            self.assertEqual(
+                cipd[3].package,
+                "infra/3pp/tools/go/windows-amd64",
+            )
+            self.assertEqual(cipd[3].version, "version:3@1.25.0")
             self.assertRegex(
                 tool_pins.windows_cipd_tool_descriptor_sha256(cipd),
                 r"^[0-9a-f]{64}$",
@@ -312,8 +341,46 @@ deps = {
             )
             devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
             devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            dawn = pathlib.Path(tmp) / "DAWN_DEPS"
+            dawn.write_text(self.DAWN_CIPD_DEPS, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
-                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools)
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
+
+    def test_windows_dawn_go_cipd_pin_rejects_mutable_variable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n" + self.WINDOWS_GCS_DEPS + "}\n",
+                encoding="utf-8",
+            )
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            dawn = pathlib.Path(tmp) / "DAWN_DEPS"
+            dawn.write_text(
+                self.DAWN_CIPD_DEPS.replace("version:3@1.25.0", "latest"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
+
+    def test_windows_dawn_go_cipd_pin_rejects_version_variable_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n" + self.WINDOWS_GCS_DEPS + "}\n",
+                encoding="utf-8",
+            )
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            dawn = pathlib.Path(tmp) / "DAWN_DEPS"
+            dawn.write_text(
+                self.DAWN_CIPD_DEPS.replace(
+                    "Var('dawn_go_version')", "Var('untrusted_go_version')"
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "version variable"):
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
 
     def test_windows_git_tool_rejects_repository_drift(self):
         with tempfile.TemporaryDirectory() as tmp:
