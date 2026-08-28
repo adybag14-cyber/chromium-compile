@@ -53,6 +53,7 @@ WINDOWS_CIPD_TOOL_DEPENDENCIES = (
     "src/third_party/typescript/windows-amd64/src",
     "src/third_party/devtools-frontend/src/third_party/esbuild",
     "src/third_party/devtools-frontend/src/third_party/rollup_libs",
+    "src/third_party/dawn/tools/golang/windows-amd64",
 )
 WINDOWS_CIPD_TOOL_POLICIES = {
     "src/third_party/typescript/windows-amd64/src": {
@@ -75,6 +76,16 @@ WINDOWS_CIPD_TOOL_POLICIES = {
         "package_template": "infra/3pp/tools/rollup_libs/${{platform}}",
         "package": "infra/3pp/tools/rollup_libs/windows-amd64",
         "conditions": {"non_git_source"},
+    },
+    "src/third_party/dawn/tools/golang/windows-amd64": {
+        "mapping": "tools/golang/windows-amd64",
+        "package_template": "infra/3pp/tools/go/windows-amd64",
+        "package": "infra/3pp/tools/go/windows-amd64",
+        "conditions": {
+            "checkout_win and non_git_source",
+            "non_git_source and checkout_win",
+        },
+        "version_variable": "dawn_go_version",
     },
 }
 WINDOWS_GIT_TOOL_DEPENDENCIES = (
@@ -199,6 +210,38 @@ def _literal_field(mapping: str, field: str) -> str:
             f"Expected exactly one literal {field!r} field in Chromium DEPS"
         )
     return values[0]
+
+
+def _variable_literal(text: str, variable: str) -> str:
+    """Resolve one quoted DEPS variable without evaluating executable DEPS code."""
+    matches = list(
+        re.finditer(
+            rf"(?m)^[ \t]+(['\"]){re.escape(variable)}\1\s*:\s*"
+            rf"(['\"])([^'\"\r\n]+)\2\s*,?\s*(?:#.*)?$",
+            text,
+        )
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one literal {variable!r} variable in source DEPS"
+        )
+    value = matches[0].group(3)
+    if not value:
+        raise ValueError(f"Source DEPS variable {variable!r} must not be empty")
+    return value
+
+
+def _variable_reference_field(mapping: str, field: str) -> str:
+    matches = re.findall(
+        rf"['\"]{re.escape(field)}['\"]\s*:\s*"
+        r"Var\(\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\)",
+        mapping,
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one Var(...) {field!r} field in source DEPS"
+        )
+    return matches[0][1]
 
 
 def _integer_field(mapping: str, field: str) -> int:
@@ -388,13 +431,25 @@ def resolve_windows_cipd_package(path: Path, dependency: str) -> CipdPackagePin:
             f"found {len(package_mappings)}"
         )
     package_template = _literal_field(package_mappings[0], "package")
-    version = _literal_field(package_mappings[0], "version")
+    version_variable = policy.get("version_variable")
+    if version_variable:
+        referenced_variable = _variable_reference_field(
+            package_mappings[0], "version"
+        )
+        if referenced_variable != version_variable:
+            raise ValueError(
+                f"Unexpected Windows CIPD version variable for {dependency!r}: "
+                f"{referenced_variable!r}"
+            )
+        version = _variable_literal(text, str(version_variable))
+    else:
+        version = _literal_field(package_mappings[0], "version")
     if package_template != policy["package_template"]:
         raise ValueError(
             f"Unexpected Windows CIPD package for {dependency!r}: {package_template!r}"
         )
     if not re.fullmatch(r"version:[1-9][0-9]*@[A-Za-z0-9._+-]+", version):
-        raise ValueError(f"Mutable or malformed Windows TypeScript CIPD pin: {version!r}")
+        raise ValueError(f"Mutable or malformed Windows CIPD pin: {version!r}")
     return CipdPackagePin(
         dependency=dependency,
         package_template=package_template,
@@ -406,13 +461,18 @@ def resolve_windows_cipd_package(path: Path, dependency: str) -> CipdPackagePin:
 def resolve_windows_cipd_tool_pins(
     root_deps: Path,
     devtools_deps: Path,
+    dawn_deps: Path,
 ) -> tuple[CipdPackagePin, ...]:
     return tuple(
         resolve_windows_cipd_package(
             (
                 devtools_deps
                 if dependency.startswith("src/third_party/devtools-frontend/src/")
-                else root_deps
+                else (
+                    dawn_deps
+                    if dependency.startswith("src/third_party/dawn/")
+                    else root_deps
+                )
             ),
             dependency,
         )

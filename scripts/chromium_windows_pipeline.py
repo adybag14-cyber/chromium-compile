@@ -127,6 +127,8 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
         "git",
         "git.exe",
         "gn.exe",
+        "go",
+        "go.exe",
         "gperf.exe",
         "ninja.exe",
         "node.exe",
@@ -168,6 +170,7 @@ use_remoteexec=false
 use_siso=false
 treat_warnings_as_errors=false
 """
+DAWN_GENERATOR_LABEL = "//third_party/dawn/src/tint:generate_sources"
 
 CRITICAL_WINDOWS_SOURCE_FILES = (
     "DEPS",
@@ -1154,6 +1157,7 @@ def _depot_environment(
     env["DEPOT_TOOLS_UPDATE"] = "0"
     env["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
     env["GYP_MSVS_VERSION"] = requirements.visual_studio_year
+    env["GOTOOLCHAIN"] = "local"
     env[f"vs{requirements.visual_studio_year}_install"] = str(visual_studio)
     env["GYP_MSVS_OVERRIDE_PATH"] = str(visual_studio)
     env["PATH"] = os.pathsep.join(
@@ -1588,7 +1592,14 @@ def install_windows_cipd_tools(
         raise WindowsPipelineError(
             "Chromium source lacks a regular nested DevTools DEPS file"
         )
-    pins = resolve_windows_cipd_tool_pins(source / "DEPS", devtools_deps)
+    dawn_deps = source / "third_party/dawn/DEPS"
+    if not dawn_deps.is_file() or dawn_deps.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium source lacks a regular nested Dawn DEPS file"
+        )
+    pins = resolve_windows_cipd_tool_pins(
+        source / "DEPS", devtools_deps, dawn_deps
+    )
     descriptor_sha = windows_cipd_tool_descriptor_sha256(pins)
     cipd = depot_tools / "cipd.bat"
     resolved_source = source.resolve()
@@ -1650,6 +1661,12 @@ def install_windows_cipd_tools(
             "Chromium-pinned DevTools esbuild CIPD package omitted esbuild.exe"
         )
     _run([str(esbuild), "--version"], cwd=source, env=env, timeout=120)
+    dawn_go = source / "third_party/dawn/tools/golang/windows-amd64/bin/go.exe"
+    if not dawn_go.is_file() or dawn_go.is_symlink():
+        raise WindowsPipelineError(
+            "Dawn-pinned Windows Go CIPD package omitted bin/go.exe"
+        )
+    _run([str(dawn_go), "version"], cwd=source, env=env, timeout=120)
     rollup_root = (
         source
         / "third_party/devtools-frontend/src/third_party/rollup_libs"
@@ -2203,6 +2220,101 @@ def validate_generated_chrome_linker_timestamp(
         "Resolved the generated Chrome executable without a target-name assumption "
         f"({chrome_label} -> {chrome_output}) and validated "
         f"/TIMESTAMP:{expected_timestamp}"
+    )
+    return stats
+
+
+def _gn_generated_output_under_out(source: Path, out: Path, raw: str) -> Path:
+    """Translate one resolved GN output into a safe path below the output tree."""
+    normalized = raw.strip().replace("\\", "/")
+    try:
+        out_relative = out.resolve().relative_to(source.resolve()).as_posix()
+    except ValueError as exc:
+        raise WindowsPipelineError(
+            f"GN output directory escapes Chromium source: {out}"
+        ) from exc
+    if normalized.startswith("//"):
+        expected_prefix = f"//{out_relative}/"
+        if not normalized.startswith(expected_prefix):
+            raise WindowsPipelineError(
+                f"GN generated output escapes {out_relative!r}: {raw!r}"
+            )
+        normalized = normalized[len(expected_prefix) :]
+    elif normalized.startswith(f"{out_relative}/"):
+        normalized = normalized[len(out_relative) + 1 :]
+    relative = PurePosixPath(normalized)
+    if (
+        not normalized
+        or relative.is_absolute()
+        or not relative.parts
+        or relative.parts[0] != "gen"
+        or ".." in relative.parts
+        or any(":" in part for part in relative.parts)
+    ):
+        raise WindowsPipelineError(f"Unsafe GN generated output: {raw!r}")
+    destination = out.joinpath(*relative.parts)
+    resolved_out = out.resolve()
+    resolved_destination = destination.resolve()
+    if resolved_out not in resolved_destination.parents:
+        raise WindowsPipelineError(f"GN generated output escapes build root: {raw!r}")
+    return destination
+
+
+def validate_dawn_source_generator(
+    source: Path,
+    out: Path,
+    gn: Path,
+    ninja: Path,
+    env: Mapping[str, str],
+) -> dict[str, object]:
+    """Execute the real Dawn host generator that a Ninja dry-run cannot probe."""
+    result = _run(
+        [str(gn), "desc", str(out), DAWN_GENERATOR_LABEL, "outputs"],
+        cwd=source,
+        env=env,
+        timeout=600,
+        capture=True,
+    )
+    outputs = [
+        _gn_generated_output_under_out(source, out, line)
+        for line in (result.stdout or "").splitlines()
+        if line.strip()
+    ]
+    if not outputs:
+        raise WindowsPipelineError(
+            f"GN returned no outputs for required Dawn generator {DAWN_GENERATOR_LABEL}"
+        )
+    folded = [path.relative_to(out).as_posix().casefold() for path in outputs]
+    if len(folded) != len(set(folded)):
+        raise WindowsPipelineError(
+            "Dawn generator outputs contain duplicate or Windows-case-aliased paths"
+        )
+    target = outputs[0].relative_to(out).as_posix()
+    _run(
+        [str(ninja), "-C", str(out), target],
+        cwd=source,
+        env=env,
+        timeout=DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS,
+    )
+    missing = [
+        str(path)
+        for path in outputs
+        if not path.is_file() or path.is_symlink() or path.stat().st_size <= 0
+    ]
+    if missing:
+        raise WindowsPipelineError(
+            "Dawn generator completed without all declared regular outputs: "
+            + ", ".join(missing[:20])
+        )
+    stats: dict[str, object] = {
+        "label": DAWN_GENERATOR_LABEL,
+        "ninja_target": target,
+        "output_count": len(outputs),
+        "validated": True,
+    }
+    print(
+        f"Executed {DAWN_GENERATOR_LABEL} with its source-pinned Windows Go tool "
+        f"and validated {len(outputs)} generated outputs"
     )
     return stats
 
@@ -3107,6 +3219,9 @@ def prepare_pipeline(
         "without missing source-declared inputs"
     )
     if evidence_dir is not None:
+        dawn_generator_stats = validate_dawn_source_generator(
+            source, out, gn, ninja, env
+        )
         (evidence_dir / "requirements.json").write_text(
             json.dumps(asdict(requirements), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -3167,6 +3282,10 @@ def prepare_pipeline(
             + "\n",
             encoding="utf-8",
         )
+        (evidence_dir / "dawn-generator.json").write_text(
+            json.dumps(dawn_generator_stats, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     exports = {
         "CHROMIUM_WINDOWS_ROOT": str(work_root),
@@ -3177,6 +3296,7 @@ def prepare_pipeline(
         "CHROMIUM_WINDOWS_NINJA": str(ninja),
         "DEPOT_TOOLS_UPDATE": "0",
         "DEPOT_TOOLS_WIN_TOOLCHAIN": "0",
+        "GOTOOLCHAIN": "local",
         "GYP_MSVS_VERSION": requirements.visual_studio_year,
         "GYP_MSVS_OVERRIDE_PATH": str(visual_studio),
         f"vs{requirements.visual_studio_year}_install": str(visual_studio),
@@ -3276,6 +3396,7 @@ def run_build_slice(
     depot = Path(os.environ.get("CHROMIUM_WINDOWS_DEPOT_TOOLS", str(work_root / "depot_tools")))
     env["DEPOT_TOOLS_UPDATE"] = "0"
     env["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
+    env["GOTOOLCHAIN"] = "local"
     env["PATH"] = os.pathsep.join(
         (str(depot), str(depot / ".cipd_bin"), env.get("PATH", ""))
     )
