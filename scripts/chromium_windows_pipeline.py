@@ -86,6 +86,7 @@ CHECKPOINT_MANIFEST_SCHEMA = 5
 PREPARED_STATE_SCHEMA = 5
 PORT_CONFIG_HASH_SCHEMA = 1
 MAX_NO_PROGRESS_STREAK = 2
+WINDOWS_RESUME_INPUT_EPOCH = 946_684_800
 DEFAULT_MIN_WORK_GIB = 70
 DEFAULT_SOURCE_RESERVE_GIB = 25
 DEFAULT_CHECKPOINT_RESERVE_GIB = 12
@@ -247,6 +248,13 @@ class PreparedState:
     port_config_hash_schema: int
     port_config_sha256: str
     checkpoint_no_progress_streak: int
+
+
+@dataclass(frozen=True)
+class CheckpointCompatibility:
+    no_progress_streak: int
+    requires_gn_refresh: bool
+    gn_refresh_fields: tuple[str, ...]
 
 
 def validate_version(version: str) -> str:
@@ -925,6 +933,166 @@ def prepare_source(version: str, *, work_root: Path, cache_dir: Path) -> tuple[P
     )
     print(f"Prepared Chromium {version} source with SHA-256 {source_sha}")
     return source, source_sha
+
+
+def normalize_windows_resume_inputs(
+    source: Path,
+    *,
+    epoch: int = WINDOWS_RESUME_INPUT_EPOCH,
+) -> dict[str, int]:
+    """Give immutable source/tool inputs stable mtimes before restoring Ninja output."""
+    epoch = bounded_int(
+        epoch,
+        "Windows resume input epoch",
+        minimum=0,
+        maximum=int(time.time()),
+    )
+    if not source.is_dir() or source.is_symlink():
+        raise WindowsPipelineError(
+            f"Chromium source is unavailable for resume timestamp normalization: {source}"
+        )
+    source = source.resolve()
+    output_root = source / "out"
+    timestamp_ns = epoch * 1_000_000_000
+    directories: list[Path] = []
+    file_count = 0
+    directory_count = 0
+    symlink_count = 0
+    started = time.monotonic()
+
+    def normalize_symlink(path: Path) -> None:
+        if os.name != "nt":
+            os.utime(
+                path,
+                ns=(timestamp_ns, timestamp_ns),
+                follow_symlinks=False,
+            )
+            return
+
+        # Python's os.utime(..., follow_symlinks=False) is not implemented on
+        # Windows. Open the reparse point itself and set its access/write time
+        # without following it, including for directory symlinks.
+        import ctypes
+        from ctypes import wintypes
+
+        file_write_attributes = 0x0100
+        share_all = 0x00000001 | 0x00000002 | 0x00000004
+        open_existing = 3
+        file_flag_backup_semantics = 0x02000000
+        file_flag_open_reparse_point = 0x00200000
+        # Chromium source archives contain POSIX/Linux reparse tags whose
+        # directory nature is not necessarily exposed by Path.is_dir() or the
+        # ordinary FILE_ATTRIBUTE_DIRECTORY bit. BACKUP_SEMANTICS is harmless
+        # for file reparse points and is required to open directory-backed
+        # reparse points themselves instead of following their targets.
+        flags = file_flag_open_reparse_point | file_flag_backup_semantics
+
+        native = os.path.abspath(path)
+        if native.startswith("\\\\"):
+            native = "\\\\?\\UNC\\" + native[2:]
+        elif not native.startswith("\\\\?\\"):
+            native = "\\\\?\\" + native
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        set_file_time = kernel32.SetFileTime
+        set_file_time.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        )
+        set_file_time.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        handle = create_file(
+            native,
+            file_write_attributes,
+            share_all,
+            None,
+            open_existing,
+            flags,
+            None,
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        windows_ticks = (epoch + 11_644_473_600) * 10_000_000
+        file_time = wintypes.FILETIME(
+            windows_ticks & 0xFFFFFFFF,
+            windows_ticks >> 32,
+        )
+        try:
+            if not set_file_time(handle, None, ctypes.byref(file_time), ctypes.byref(file_time)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            close_handle(handle)
+
+    def normalize(path: Path) -> None:
+        nonlocal file_count, directory_count, symlink_count
+        is_link = path.is_symlink()
+        try:
+            if is_link:
+                normalize_symlink(path)
+            else:
+                os.utime(path, ns=(timestamp_ns, timestamp_ns))
+        except (NotImplementedError, OSError) as exc:
+            raise InfrastructureError(
+                f"Could not normalize immutable Windows resume input mtime: {path}: {exc}"
+            ) from exc
+        if is_link:
+            symlink_count += 1
+        elif path.is_dir():
+            directory_count += 1
+        else:
+            file_count += 1
+
+    for root, directory_names, file_names in os.walk(source, topdown=True, followlinks=False):
+        root_path = Path(root)
+        if root_path == source:
+            directory_names[:] = [name for name in directory_names if name != output_root.name]
+        traversable: list[str] = []
+        for name in directory_names:
+            path = root_path / name
+            if path.is_symlink():
+                normalize(path)
+            else:
+                traversable.append(name)
+        directory_names[:] = traversable
+        for name in file_names:
+            normalize(root_path / name)
+        directories.append(root_path)
+
+    # Directories are normalized last, matching the proven Linux resume path.
+    # This removes extraction/installation directory mtimes from GN regeneration inputs.
+    for directory in reversed(directories):
+        normalize(directory)
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    stats = {
+        "epoch": epoch,
+        "files": file_count,
+        "directories": directory_count,
+        "symlinks": symlink_count,
+        "elapsed_ms": elapsed_ms,
+    }
+    print(
+        "Normalized immutable Windows source/tool mtimes before checkpoint restore: "
+        f"epoch={epoch}; files={file_count}; directories={directory_count}; "
+        f"symlinks={symlink_count}; elapsed_ms={elapsed_ms}"
+    )
+    return stats
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -2319,8 +2487,9 @@ def validate_dawn_source_generator(
     return stats
 
 
-def configure_gn(
+def _validate_configured_gn_graph(
     source: Path,
+    out: Path,
     gn: Path,
     env: Mapping[str, str],
     *,
@@ -2330,19 +2499,13 @@ def configure_gn(
     windows_build_timestamp = validate_chromium_timestamp(
         windows_build_timestamp, "expected Chromium Windows build timestamp"
     )
-    out = source / "out" / OUT_NAME
-    out.mkdir(parents=True, exist_ok=True)
     args_gn = out / "args.gn"
-    args_gn.write_text(WINDOWS_GN_ARGS, encoding="utf-8", newline="\n")
-    _run(
-        [str(gn), "gen", str(out)],
-        cwd=source,
-        env=env,
-        timeout=DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS,
-    )
     build_ninja = out / "build.ninja"
-    if not build_ninja.is_file() or not args_gn.is_file():
-        raise WindowsPipelineError("GN succeeded without build.ninja and args.gn")
+    for path in (build_ninja, args_gn):
+        if not path.is_file() or path.is_symlink() or path.stat().st_size <= 0:
+            raise WindowsPipelineError(
+                f"Configured Windows Ninja graph lacks regular nonempty {path.name}"
+            )
     rendered = args_gn.read_text(encoding="utf-8")
     for pattern, label in (
         (r'target_os\s*=\s*"win"', "target_os=win"),
@@ -2378,6 +2541,93 @@ def configure_gn(
             encoding="utf-8",
         )
     return out
+
+
+def configure_gn(
+    source: Path,
+    gn: Path,
+    env: Mapping[str, str],
+    *,
+    windows_build_timestamp: int,
+    evidence_dir: Path | None = None,
+) -> Path:
+    out = source / "out" / OUT_NAME
+    out.mkdir(parents=True, exist_ok=True)
+    args_gn = out / "args.gn"
+    args_gn.write_text(WINDOWS_GN_ARGS, encoding="utf-8", newline="\n")
+    _run(
+        [str(gn), "gen", str(out)],
+        cwd=source,
+        env=env,
+        timeout=DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS,
+    )
+    return _validate_configured_gn_graph(
+        source,
+        out,
+        gn,
+        env,
+        windows_build_timestamp=windows_build_timestamp,
+        evidence_dir=evidence_dir,
+    )
+
+
+def reuse_restored_gn_graph(
+    source: Path,
+    gn: Path,
+    ninja: Path,
+    env: Mapping[str, str],
+    *,
+    windows_build_timestamp: int,
+    evidence_dir: Path | None = None,
+) -> Path:
+    out = source / "out" / OUT_NAME
+    args_gn = out / "args.gn"
+    build_ninja = out / "build.ninja"
+    for path in (args_gn, build_ninja):
+        if not path.is_file() or path.is_symlink() or path.stat().st_size <= 0:
+            raise WindowsPipelineError(
+                f"Restored checkpoint lacks reusable regular nonempty {path.name}"
+            )
+    if args_gn.read_text(encoding="utf-8") != WINDOWS_GN_ARGS:
+        raise WindowsPipelineError(
+            "Restored Windows args.gn differs from the exact current GN contract"
+        )
+
+    manifest_probe = _run(
+        [str(ninja), "-C", str(out), "-n", "build.ninja"],
+        cwd=source,
+        env=env,
+        timeout=600,
+        capture=True,
+    )
+    probe_text = "\n".join(
+        part for part in (manifest_probe.stdout or "", manifest_probe.stderr or "") if part
+    )
+    actionable = [
+        line.strip()
+        for line in probe_text.splitlines()
+        if line.strip()
+        and "entering directory" not in line.lower()
+        and "no work to do" not in line.lower()
+    ]
+    if actionable:
+        raise WindowsPipelineError(
+            "Restored build.ninja is dirty after immutable-input timestamp normalization; "
+            "refusing silent graph regeneration: " + " | ".join(actionable[:10])
+        )
+
+    print(
+        "Reusing build.ninja and args.gn from the restored Windows checkpoint; "
+        "the manifest regeneration target is clean"
+    )
+    return _validate_configured_gn_graph(
+        source,
+        out,
+        gn,
+        env,
+        windows_build_timestamp=windows_build_timestamp,
+        evidence_dir=evidence_dir,
+    )
 
 
 def _read_json_object(path: Path, label: str) -> dict[str, object]:
@@ -2756,7 +3006,7 @@ def _checkpoint_manifest_matches_state(
     manifest: Mapping[str, object],
     state: PreparedState,
     proof: Mapping[str, object],
-) -> int:
+) -> CheckpointCompatibility:
     exact = {
         "schema": CHECKPOINT_MANIFEST_SCHEMA,
         "checkpoint_contract_version": CHECKPOINT_CONTRACT_VERSION,
@@ -2780,6 +3030,7 @@ def _checkpoint_manifest_matches_state(
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "visual_studio_year": state.visual_studio_year,
+        "resume_input_epoch": WINDOWS_RESUME_INPUT_EPOCH,
         "port_config_hash_schema": state.port_config_hash_schema,
         "port_config_sha256": state.port_config_sha256,
         "github_sha": proof["producer_sha"],
@@ -2801,7 +3052,20 @@ def _checkpoint_manifest_matches_state(
         minimum=0,
         maximum=MAX_NO_PROGRESS_STREAK,
     )
-    return streak
+    refresh_expected = {
+        "sdk_servicing": state.sdk_servicing,
+        "visual_studio_version": state.visual_studio_version,
+    }
+    refresh_fields = tuple(
+        key
+        for key, expected in refresh_expected.items()
+        if manifest.get(key) != expected
+    )
+    return CheckpointCompatibility(
+        no_progress_streak=streak,
+        requires_gn_refresh=bool(refresh_fields),
+        gn_refresh_fields=refresh_fields,
+    )
 
 
 def validate_checkpoint_bundle(
@@ -2809,13 +3073,13 @@ def validate_checkpoint_bundle(
     *,
     state: PreparedState,
     proof: Mapping[str, object],
-) -> tuple[Path, int]:
+) -> tuple[Path, CheckpointCompatibility]:
     archive, checksum, manifest_path = _checkpoint_expected_files(directory)
     for path in (archive, checksum, manifest_path):
         if not path.is_file() or path.is_symlink():
             raise WindowsPipelineError(f"Checkpoint artifact lacks regular file: {path.name}")
     manifest = _read_json_object(manifest_path, "checkpoint manifest")
-    streak = _checkpoint_manifest_matches_state(manifest, state, proof)
+    compatibility = _checkpoint_manifest_matches_state(manifest, state, proof)
     archive_sha = sha256_file(archive)
     expected_sha = validate_sha256(str(manifest.get("archive_sha256", "")), "checkpoint archive SHA-256")
     if archive_sha != expected_sha:
@@ -2831,7 +3095,7 @@ def validate_checkpoint_bundle(
     if checksum.read_text(encoding="utf-8") != expected_sidecar:
         raise WindowsPipelineError("Checkpoint checksum sidecar is malformed or inconsistent")
     validate_checkpoint(archive, root=OUT_NAME)
-    return archive, streak
+    return archive, compatibility
 
 
 def acquire_checkpoint(
@@ -2845,7 +3109,7 @@ def acquire_checkpoint(
     destination: Path,
     preferred_run_id: str = "",
     fallback_run_id: str = "",
-) -> tuple[Path | None, int]:
+) -> tuple[Path | None, CheckpointCompatibility]:
     destination.mkdir(parents=True, exist_ok=True)
     candidates: list[tuple[str, int, str]] = []
     if preferred_run_id:
@@ -2883,7 +3147,7 @@ def acquire_checkpoint(
                 ],
                 timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS,
             )
-            archive, streak = validate_checkpoint_bundle(
+            archive, compatibility = validate_checkpoint_bundle(
                 candidate_dir, state=state, proof=proof
             )
         except InfrastructureError:
@@ -2894,10 +3158,11 @@ def acquire_checkpoint(
             continue
         print(
             f"Accepted {label} checkpoint from run {run_id}, stage {producer_stage}, "
-            f"no-progress streak {streak}"
+            f"no-progress streak {compatibility.no_progress_streak}, "
+            f"GN refresh required={str(compatibility.requires_gn_refresh).lower()}"
         )
-        return archive, streak
-    return None, 0
+        return archive, compatibility
+    return None, CheckpointCompatibility(0, False, ())
 
 
 def restore_checkpoint(archive: Path, *, source: Path) -> None:
@@ -3054,6 +3319,7 @@ def create_checkpoint(
         "sdk_servicing": state.sdk_servicing,
         "visual_studio_year": state.visual_studio_year,
         "visual_studio_version": state.visual_studio_version,
+        "resume_input_epoch": WINDOWS_RESUME_INPUT_EPOCH,
         "port_config_hash_schema": state.port_config_hash_schema,
         "port_config_sha256": state.port_config_sha256,
         "github_repository": os.environ.get("GITHUB_REPOSITORY", ""),
@@ -3139,6 +3405,11 @@ def prepare_pipeline(
         env,
         tag_identity=tag_identity,
     )
+    # Create the excluded output parent before directory normalization. Later
+    # checkpoint staging beneath it must not make the source root look newer
+    # than the restored build.ninja regeneration inputs.
+    (source / "out").mkdir(parents=True, exist_ok=True)
+    resume_input_stats = normalize_windows_resume_inputs(source)
     port_hash = compute_port_config_sha256(repository_root)
     state = PreparedState(
         schema=PREPARED_STATE_SCHEMA,
@@ -3167,12 +3438,14 @@ def prepare_pipeline(
     )
     write_prepared_state(work_root, state)
 
+    checkpoint_archive: Path | None = None
+    checkpoint_compatibility = CheckpointCompatibility(0, False, ())
     if preferred_run_id or fallback_run_id:
         if not (repository and expected_ref and expected_sha):
             raise WindowsPipelineError(
                 "Checkpoint inputs require repository, expected ref, and immutable lineage SHA"
             )
-        archive, streak = acquire_checkpoint(
+        checkpoint_archive, checkpoint_compatibility = acquire_checkpoint(
             repository=repository,
             version=version,
             stage=stage,
@@ -3183,23 +3456,41 @@ def prepare_pipeline(
             preferred_run_id=preferred_run_id,
             fallback_run_id=fallback_run_id,
         )
-        if archive is not None:
-            restore_checkpoint(archive, source=source)
+        if checkpoint_archive is not None:
+            restore_checkpoint(checkpoint_archive, source=source)
             state = PreparedState(
                 **{
                     **asdict(state),
-                    "checkpoint_no_progress_streak": streak,
+                    "checkpoint_no_progress_streak": (
+                        checkpoint_compatibility.no_progress_streak
+                    ),
                 }
             )
             write_prepared_state(work_root, state)
 
-    out = configure_gn(
-        source,
-        gn,
-        env,
-        windows_build_timestamp=windows_build_timestamp,
-        evidence_dir=evidence_dir,
-    )
+    if checkpoint_archive is not None and not checkpoint_compatibility.requires_gn_refresh:
+        out = reuse_restored_gn_graph(
+            source,
+            gn,
+            ninja,
+            env,
+            windows_build_timestamp=windows_build_timestamp,
+            evidence_dir=evidence_dir,
+        )
+    else:
+        if checkpoint_archive is not None:
+            print(
+                "Refreshing the restored Windows GN graph because runner toolchain "
+                "metadata changed: "
+                + ", ".join(checkpoint_compatibility.gn_refresh_fields)
+            )
+        out = configure_gn(
+            source,
+            gn,
+            env,
+            windows_build_timestamp=windows_build_timestamp,
+            evidence_dir=evidence_dir,
+        )
     _run(
         [
             str(ninja),
@@ -3219,6 +3510,10 @@ def prepare_pipeline(
         "without missing source-declared inputs"
     )
     if evidence_dir is not None:
+        (evidence_dir / "resume-input-normalization.json").write_text(
+            json.dumps(resume_input_stats, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         dawn_generator_stats = validate_dawn_source_generator(
             source, out, gn, ninja, env
         )
@@ -3320,12 +3615,25 @@ def prepare_pipeline(
     return state
 
 
-def _ninja_log_count(path: Path) -> int:
+def _ninja_log_stats(path: Path) -> tuple[int, int]:
+    rows = 0
+    outputs: set[str] = set()
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return sum(1 for line in handle if line.strip() and not line.startswith("#"))
+            for line in handle:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                rows += 1
+                fields = line.rstrip("\r\n").split("\t")
+                if len(fields) >= 5 and fields[3]:
+                    outputs.add(fields[3].replace("\\", "/").casefold())
     except FileNotFoundError:
-        return 0
+        return 0, 0
+    return rows, len(outputs)
+
+
+def _ninja_log_count(path: Path) -> int:
+    return _ninja_log_stats(path)[0]
 
 
 def classify_build_log(path: Path) -> str:
@@ -3373,7 +3681,7 @@ def run_build_slice(
         raise InfrastructureError(f"Prepared Ninja executable is unavailable: {ninja}")
     log = work_root / "windows-i686-build.log"
     progress_log = out / ".ninja_log"
-    before = _ninja_log_count(progress_log)
+    before, unique_before = _ninja_log_stats(progress_log)
     prior_streak = state.checkpoint_no_progress_streak
     result: dict[str, object] = {
         "complete": False,
@@ -3381,6 +3689,8 @@ def run_build_slice(
         "no_progress_streak": prior_streak,
         "ninja_entries_before": before,
         "ninja_entries_after": before,
+        "ninja_unique_outputs_before": unique_before,
+        "ninja_unique_outputs_after": unique_before,
         "status": 0,
     }
     if remaining <= 600:
@@ -3425,9 +3735,11 @@ def run_build_slice(
         )
     except WatchdogError as exc:
         raise InfrastructureError(f"Ninja watchdog failed internally: {exc}") from exc
-    after = _ninja_log_count(progress_log)
+    after, unique_after = _ninja_log_stats(progress_log)
     result["status"] = status
     result["ninja_entries_after"] = after
+    result["ninja_unique_outputs_after"] = unique_after
+    durable_progress = unique_after > unique_before
     if status == 0:
         required = (
             out / "chrome.exe",
@@ -3437,7 +3749,7 @@ def run_build_slice(
         missing = [str(path) for path in required if not path.is_file() or path.stat().st_size <= 0]
         if missing:
             result["failure_class"] = "deterministic_build"
-            result["no_progress_streak"] = 0 if after > before else min(prior_streak + 1, MAX_NO_PROGRESS_STREAK)
+            result["no_progress_streak"] = 0 if durable_progress else min(prior_streak + 1, MAX_NO_PROGRESS_STREAK)
             result_file.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
             raise WindowsPipelineError(
                 "Ninja returned success without required Windows package outputs: "
@@ -3446,7 +3758,7 @@ def run_build_slice(
         result["complete"] = True
         result["no_progress_streak"] = 0
     elif status in {TIMEOUT_EXIT_CODE, STALL_EXIT_CODE}:
-        streak = 0 if after > before else min(prior_streak + 1, MAX_NO_PROGRESS_STREAK)
+        streak = 0 if durable_progress else min(prior_streak + 1, MAX_NO_PROGRESS_STREAK)
         result["no_progress_streak"] = streak
         if streak >= MAX_NO_PROGRESS_STREAK:
             result["failure_class"] = "deterministic_build"
@@ -3456,11 +3768,12 @@ def run_build_slice(
             )
         print(
             f"Compiler slice rotated at status {status}; Ninja entries {before}->{after}; "
+            f"unique outputs {unique_before}->{unique_after}; "
             f"no-progress streak {streak}/{MAX_NO_PROGRESS_STREAK}"
         )
     else:
         result["failure_class"] = classify_build_log(log)
-        result["no_progress_streak"] = 0 if after > before else min(prior_streak + 1, MAX_NO_PROGRESS_STREAK)
+        result["no_progress_streak"] = 0 if durable_progress else min(prior_streak + 1, MAX_NO_PROGRESS_STREAK)
         result_file.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
         raise WindowsPipelineError(
             f"Windows Chromium Ninja failed with status {status} ({result['failure_class']})"
@@ -3571,6 +3884,7 @@ def package_build(
         ("windows_sdk_servicing", state.sdk_servicing),
         ("visual_studio_year", state.visual_studio_year),
         ("visual_studio_version", state.visual_studio_version),
+        ("windows_resume_input_epoch", str(WINDOWS_RESUME_INPUT_EPOCH)),
         ("port_config_hash_schema", str(state.port_config_hash_schema)),
         ("port_config_sha256", state.port_config_sha256),
         ("checkpoint_contract_version", str(CHECKPOINT_CONTRACT_VERSION)),
@@ -3667,6 +3981,11 @@ def write_stage_summary(
             ("Complete", str(result.get("complete", "unknown"))),
             ("Failure class", str(result.get("failure_class", "none") or "none")),
             ("Ninja entries", f"{result.get('ninja_entries_before', '?')} -> {result.get('ninja_entries_after', '?')}"),
+            (
+                "Unique Ninja outputs",
+                f"{result.get('ninja_unique_outputs_before', '?')} -> "
+                f"{result.get('ninja_unique_outputs_after', '?')}",
+            ),
             ("No-progress streak", str(result.get("no_progress_streak", "?"))),
             ("Free disk GiB", f"{free:.1f}"),
         ):

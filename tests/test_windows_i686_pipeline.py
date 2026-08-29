@@ -136,6 +136,168 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 "gen/src/tint/lang/core/enums.h",
             )
 
+    def test_windows_resume_normalizes_inputs_without_touching_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            tool = source / "third_party/tool/bin/tool.exe"
+            output = source / "out/Release_x86_win/obj/already-built.obj"
+            tool.parent.mkdir(parents=True)
+            output.parent.mkdir(parents=True)
+            tool.write_bytes(b"tool")
+            output.write_bytes(b"object")
+            symlink = source / "tool-link.exe"
+            try:
+                symlink.symlink_to(tool)
+            except OSError:
+                symlink = None
+            output_epoch = 1_700_000_000
+            pipeline.os.utime(output, (output_epoch, output_epoch))
+
+            stats = pipeline.normalize_windows_resume_inputs(
+                source, epoch=pipeline.WINDOWS_RESUME_INPUT_EPOCH
+            )
+
+            self.assertEqual(int(tool.stat().st_mtime), pipeline.WINDOWS_RESUME_INPUT_EPOCH)
+            self.assertEqual(
+                int(tool.parent.stat().st_mtime), pipeline.WINDOWS_RESUME_INPUT_EPOCH
+            )
+            self.assertEqual(int(source.stat().st_mtime), pipeline.WINDOWS_RESUME_INPUT_EPOCH)
+            self.assertEqual(int(output.stat().st_mtime), output_epoch)
+            self.assertGreaterEqual(stats["files"], 1)
+            self.assertGreaterEqual(stats["directories"], 3)
+            if symlink is not None:
+                self.assertEqual(
+                    int(symlink.lstat().st_mtime), pipeline.WINDOWS_RESUME_INPUT_EPOCH
+                )
+                self.assertEqual(stats["symlinks"], 1)
+
+    def test_reused_windows_graph_never_runs_gn_gen_and_requires_clean_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            out = source / "out" / pipeline.OUT_NAME
+            out.mkdir(parents=True)
+            (out / "args.gn").write_text(pipeline.WINDOWS_GN_ARGS, encoding="utf-8")
+            (out / "build.ninja").write_text("rule noop\n", encoding="utf-8")
+            clean = pipeline.subprocess.CompletedProcess(
+                ["ninja.exe"], 0, "ninja: no work to do.\n", ""
+            )
+            with mock.patch.object(pipeline, "_run", return_value=clean) as run, mock.patch.object(
+                pipeline,
+                "_validate_configured_gn_graph",
+                return_value=out,
+            ) as validate:
+                result = pipeline.reuse_restored_gn_graph(
+                    source,
+                    pathlib.Path("gn.exe"),
+                    pathlib.Path("ninja.exe"),
+                    {},
+                    windows_build_timestamp=1_785_646_800,
+                )
+            self.assertEqual(result, out)
+            self.assertEqual(run.call_args.args[0][-2:], ["-n", "build.ninja"])
+            self.assertNotIn("gen", run.call_args.args[0])
+            validate.assert_called_once()
+
+            dirty = pipeline.subprocess.CompletedProcess(
+                ["ninja.exe"], 0, "[1/1] ACTION //build:gn_run_binary\n", ""
+            )
+            with mock.patch.object(pipeline, "_run", return_value=dirty):
+                with self.assertRaisesRegex(
+                    pipeline.WindowsPipelineError, "refusing silent graph regeneration"
+                ):
+                    pipeline.reuse_restored_gn_graph(
+                        source,
+                        pathlib.Path("gn.exe"),
+                        pathlib.Path("ninja.exe"),
+                        {},
+                        windows_build_timestamp=1_785_646_800,
+                    )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows reparse-point API test")
+    def test_windows_resume_reparse_timestamp_api_does_not_follow_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            forced_reparse = source / "forced-reparse"
+            source.mkdir()
+            forced_reparse.write_bytes(b"fixture")
+            concrete_path_type = type(forced_reparse)
+            original_is_symlink = concrete_path_type.is_symlink
+
+            def is_symlink(path):
+                return path.name == forced_reparse.name or original_is_symlink(path)
+
+            with mock.patch.object(concrete_path_type, "is_symlink", is_symlink):
+                stats = pipeline.normalize_windows_resume_inputs(source)
+
+            self.assertEqual(
+                int(forced_reparse.stat().st_mtime),
+                pipeline.WINDOWS_RESUME_INPUT_EPOCH,
+            )
+            self.assertEqual(stats["symlinks"], 1)
+
+    def test_windows_reparse_timestamp_always_uses_directory_handle_semantics(self):
+        source = (ROOT / "scripts" / "chromium_windows_pipeline.py").read_text(
+            encoding="utf-8"
+        )
+        block = source[
+            source.index("def normalize_windows_resume_inputs(") : source.index(
+                "def _version_tuple("
+            )
+        ]
+        self.assertIn(
+            "flags = file_flag_open_reparse_point | file_flag_backup_semantics",
+            block,
+        )
+        self.assertNotIn("if path.is_dir() or lstat_attributes", block)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows bsdtar precision test")
+    def test_windows_pax_checkpoint_preserves_subsecond_output_mtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            output = root / "out" / pipeline.OUT_NAME / "obj/probe.obj"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"probe")
+            wanted_ns = 1_787_689_253_123_456_700
+            pipeline.os.utime(output, ns=(wanted_ns, wanted_ns))
+            before_ns = output.stat().st_mtime_ns
+            archive = root / "checkpoint.tar.zst"
+            tar = pipeline.shutil.which("tar.exe") or pipeline.shutil.which("tar")
+            self.assertIsNotNone(tar)
+            pipeline.subprocess.run(
+                [
+                    tar,
+                    "--zstd",
+                    "-cf",
+                    str(archive),
+                    "--format=pax",
+                    "-C",
+                    str(root / "out"),
+                    pipeline.OUT_NAME,
+                ],
+                check=True,
+            )
+            restored = root / "restored"
+            restored.mkdir()
+            pipeline.subprocess.run(
+                [tar, "-xf", str(archive), "-C", str(restored)],
+                check=True,
+            )
+            after_ns = (restored / pipeline.OUT_NAME / "obj/probe.obj").stat().st_mtime_ns
+            self.assertEqual(after_ns, before_ns)
+
+    def test_ninja_log_progress_counts_unique_outputs_not_rebuild_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log = pathlib.Path(temp) / ".ninja_log"
+            log.write_text(
+                "# ninja log v5\n"
+                "0\t1\t1\tobj/a.obj\taaaa\n"
+                "1\t2\t2\tobj/b.obj\tbbbb\n"
+                "2\t3\t3\tobj/a.obj\taaaa\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(pipeline._ninja_log_stats(log), (3, 2))
+            self.assertEqual(pipeline._ninja_log_count(log), 3)
+
     def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
         class Response:
             def __enter__(self):
@@ -416,7 +578,10 @@ class WindowsI686PipelineTests(unittest.TestCase):
             "windows_git_tools_sha256": state.windows_git_tools_sha256,
             "clang_revision": state.clang_revision,
             "sdk_family": state.sdk_family,
+            "sdk_servicing": state.sdk_servicing,
             "visual_studio_year": state.visual_studio_year,
+            "visual_studio_version": state.visual_studio_version,
+            "resume_input_epoch": pipeline.WINDOWS_RESUME_INPUT_EPOCH,
             "port_config_hash_schema": state.port_config_hash_schema,
             "port_config_sha256": state.port_config_sha256,
             "github_sha": proof["producer_sha"],
@@ -425,9 +590,18 @@ class WindowsI686PipelineTests(unittest.TestCase):
             "stage": proof["producer_stage"],
             "no_progress_streak": 0,
         }
-        self.assertEqual(
-            pipeline._checkpoint_manifest_matches_state(manifest, state, proof), 0
+        compatibility = pipeline._checkpoint_manifest_matches_state(
+            manifest, state, proof
         )
+        self.assertEqual(compatibility.no_progress_streak, 0)
+        self.assertFalse(compatibility.requires_gn_refresh)
+        manifest["sdk_servicing"] = "10.0.28000.9999"
+        compatibility = pipeline._checkpoint_manifest_matches_state(
+            manifest, state, proof
+        )
+        self.assertTrue(compatibility.requires_gn_refresh)
+        self.assertEqual(compatibility.gn_refresh_fields, ("sdk_servicing",))
+        manifest["sdk_servicing"] = state.sdk_servicing
         manifest["windows_build_timestamp"] = state.windows_build_timestamp + 1
         with self.assertRaisesRegex(
             pipeline.WindowsPipelineError, "windows_build_timestamp"
@@ -661,7 +835,7 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
             encoding="utf-8"
         )
         block = source[
-            source.index("def configure_gn(") : source.index(
+            source.index("def _validate_configured_gn_graph(") : source.index(
                 "def _read_json_object(")
         ]
         self.assertIn('args_gn.write_text(WINDOWS_GN_ARGS', block)
@@ -669,14 +843,25 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertNotIn("--args=", block)
         self.assertIn("validate_generated_chrome_linker_timestamp(", block)
         self.assertIn("source, out, gn, env, windows_build_timestamp", block)
+        self.assertIn("def reuse_restored_gn_graph(", block)
+        self.assertIn('"-n", "build.ninja"', block)
+        self.assertIn("refusing silent graph regeneration", block)
 
     def test_prepare_traverses_full_ninja_input_graph_before_dispatch(self):
         source = (ROOT / "scripts" / "chromium_windows_pipeline.py").read_text(
             encoding="utf-8"
         )
+        output_parent_pos = source.index('(source / "out").mkdir')
+        normalize_pos = source.index("resume_input_stats =")
+        restore_pos = source.index("restore_checkpoint(checkpoint_archive")
+        self.assertLess(output_parent_pos, normalize_pos)
+        self.assertLess(normalize_pos, restore_pos)
         block = source[
-            source.index("out = configure_gn(") : source.index("exports = {")
+            normalize_pos : source.index("exports = {")
         ]
+        self.assertIn("normalize_windows_resume_inputs(source)", block)
+        self.assertIn("reuse_restored_gn_graph(", block)
+        self.assertIn("requires_gn_refresh", block)
         self.assertIn('"-n",', block)
         self.assertIn('"chrome",', block)
         self.assertIn('"mini_installer",', block)
