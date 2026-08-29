@@ -440,8 +440,14 @@ def list_workflow_runs(
     raise AssertionError("unreachable workflow pagination state")
 
 
-def extract_port_version(title: str) -> str | None:
-    match = re.search(r"Chromium i686(?: preflight)? (\d+\.\d+\.\d+\.\d+)", title)
+def extract_port_version(
+    title: str, lane: LaneConfig = LINUX_LANE
+) -> str | None:
+    product = "Chromium Windows i686" if lane.key == "windows" else "Chromium i686"
+    match = re.search(
+        rf"{re.escape(product)}(?: preflight)? (\d+\.\d+\.\d+\.\d+)",
+        title,
+    )
     return match.group(1) if match else None
 
 
@@ -598,7 +604,7 @@ def list_port_run_state(
         status = str(run.get("status", ""))
         conclusion = str(run.get("conclusion", ""))
         title = str(run.get("display_title", ""))
-        version = extract_port_version(title)
+        version = extract_port_version(title, lane)
         if not version:
             if status in ACTIVE_RUN_STATES:
                 raise WatcherError(

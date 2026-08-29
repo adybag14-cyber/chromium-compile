@@ -155,6 +155,28 @@ class StableWatcherTests(unittest.TestCase):
             with self.assertRaises(watcher.WatcherError):
                 watcher.list_port_run_state("owner/repository", "main")
 
+    def test_windows_lane_parses_active_staged_build_title(self):
+        def fake_runs(_repository, workflow, **_kwargs):
+            if workflow == "chromium-windows-i686.yml":
+                return [
+                    {
+                        "status": "in_progress",
+                        "conclusion": "",
+                        "display_title": (
+                            "Chromium Windows i686 153.0.8010.12 - stage 6 - attempt 0"
+                        ),
+                        "head_branch": "main",
+                    }
+                ]
+            return []
+
+        with mock.patch.object(watcher, "list_workflow_runs", side_effect=fake_runs):
+            active, quarantined = watcher.list_port_run_state(
+                "owner/repository", "main", watcher.WINDOWS_LANE
+            )
+        self.assertEqual(active, {"153.0.8010.12"})
+        self.assertEqual(quarantined, set())
+
     def test_feature_branch_active_run_still_owns_global_queue(self):
         def fake_runs(_repository, workflow, **_kwargs):
             if workflow == "chromium-i686.yml":
