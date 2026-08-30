@@ -232,9 +232,11 @@ class WindowsI686PipelineTests(unittest.TestCase):
             out = source / "out" / pipeline.OUT_NAME
             visual_studio = root / "Program Files/Microsoft Visual Studio/18/Enterprise"
             windows_kits = root / "Program Files (x86)/Windows Kits/10"
+            netfx_sdk = windows_kits.parent / "NETFXSDK"
             vs_dep = visual_studio / "VC/Tools/MSVC/14.51/include"
             kits_dep = windows_kits / "include/10.0.28000.0/shared"
-            for directory in (out, vs_dep, kits_dep):
+            netfx_dep = netfx_sdk / "4.8.1/include/um"
+            for directory in (out, vs_dep, kits_dep, netfx_dep):
                 directory.mkdir(parents=True)
             source_dep = source / "BUILD.gn"
             source_dep.write_text("group(\"fixture\") {}\n", encoding="utf-8")
@@ -272,6 +274,8 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 + escaped(vs_dep)
                 + " "
                 + escaped(kits_dep)
+                + " "
+                + escaped(netfx_dep)
                 + "\n",
                 encoding="utf-8",
             )
@@ -312,9 +316,10 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 windows_kits_root=windows_kits,
             )
 
-            self.assertEqual(stats["dependency_count"], 3)
+            self.assertEqual(stats["dependency_count"], 4)
             self.assertEqual(stats["source_dependency_count"], 1)
-            self.assertEqual(stats["external_directory_count"], 2)
+            self.assertEqual(stats["external_directory_count"], 3)
+            self.assertEqual(stats["trusted_external_root_count"], 3)
             self.assertTrue(stats["stamp_refreshed"])
             self.assertGreater(stamp.stat().st_mtime_ns, external_ns)
             for path, before in protected.items():
