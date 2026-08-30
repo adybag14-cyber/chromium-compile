@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -99,6 +100,9 @@ DEFAULT_NETWORK_TIMEOUT_SECONDS = 7200
 DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS = 3600
 DEFAULT_ARCHIVE_TIMEOUT_SECONDS = 1800
 DEFAULT_REMOVE_TIMEOUT_SECONDS = 900
+MAX_GN_REGEN_DEPFILE_BYTES = 4 * 1024 * 1024
+MAX_GN_REGEN_DEPENDENCIES = 100_000
+MAX_GN_REGEN_FUTURE_SKEW_SECONDS = 300
 GITILES_HOST = "chromium.googlesource.com"
 MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
 MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
@@ -255,6 +259,37 @@ class CheckpointCompatibility:
     no_progress_streak: int
     requires_gn_refresh: bool
     gn_refresh_fields: tuple[str, ...]
+    migration_run_id: str = ""
+
+
+@dataclass(frozen=True)
+class CheckpointMigration:
+    run_id: str
+    version: str
+    stage: int
+    producer_sha: str
+    port_config_sha256: str
+    archive_sha256: str
+
+
+# One immutable bridge preserves the already-proven Stage 1 compiler output
+# across the manifest-stamp repair. Every field is exact; this is not a generic
+# cross-lineage compatibility escape hatch. The next checkpoint is written with
+# the current lineage/configuration and resumes normal strict validation.
+APPROVED_CHECKPOINT_MIGRATIONS = {
+    "33274094424": CheckpointMigration(
+        run_id="33274094424",
+        version="153.0.8010.12",
+        stage=1,
+        producer_sha="70443e888304bc1ac17e986e33f1fab605243fca",
+        port_config_sha256=(
+            "6ed02add0b467c87a1b1072d8340713374562dcfc090752ce0631deeaf078787"
+        ),
+        archive_sha256=(
+            "6f124bee59ed5693db7a0477f91ad57330f990cc0f32aa43fe0e9cabb426e058"
+        ),
+    ),
+}
 
 
 def validate_version(version: str) -> str:
@@ -2577,6 +2612,7 @@ def reuse_restored_gn_graph(
     ninja: Path,
     env: Mapping[str, str],
     *,
+    visual_studio: Path,
     windows_build_timestamp: int,
     evidence_dir: Path | None = None,
 ) -> Path:
@@ -2593,8 +2629,14 @@ def reuse_restored_gn_graph(
             "Restored Windows args.gn differs from the exact current GN contract"
         )
 
+    manifest_stats = revalidate_restored_gn_manifest(
+        source,
+        out,
+        visual_studio=visual_studio,
+    )
+
     manifest_probe = _run(
-        [str(ninja), "-C", str(out), "-n", "build.ninja"],
+        [str(ninja), "-d", "explain", "-C", str(out), "-n", "build.ninja"],
         cwd=source,
         env=env,
         timeout=600,
@@ -2616,6 +2658,13 @@ def reuse_restored_gn_graph(
             "refusing silent graph regeneration: " + " | ".join(actionable[:10])
         )
 
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / "restored-gn-manifest.json").write_text(
+            json.dumps(manifest_stats, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
     print(
         "Reusing build.ninja and args.gn from the restored Windows checkpoint; "
         "the manifest regeneration target is clean"
@@ -2628,6 +2677,204 @@ def reuse_restored_gn_graph(
         windows_build_timestamp=windows_build_timestamp,
         evidence_dir=evidence_dir,
     )
+
+
+def _parse_restored_gn_depfile(path: Path) -> list[str]:
+    if not path.is_file() or path.is_symlink():
+        raise WindowsPipelineError(
+            "Restored checkpoint lacks regular build.ninja.d regeneration metadata"
+        )
+    size = path.stat().st_size
+    if size <= 0 or size > MAX_GN_REGEN_DEPFILE_BYTES:
+        raise WindowsPipelineError(
+            "Restored build.ninja.d exceeds the bounded regeneration metadata policy"
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise WindowsPipelineError(
+            f"Could not read restored build.ninja.d: {exc}"
+        ) from exc
+    if "\0" in text:
+        raise WindowsPipelineError("Restored build.ninja.d contains a NUL byte")
+    # GN emits a Make-style depfile. Join bounded continuations before shlex
+    # consumes its backslash-escaped spaces (for example Program\ Files).
+    rendered = text.replace("\\\r\n", "").replace("\\\n", "").strip()
+    target, separator, dependencies = rendered.partition(": ")
+    if separator != ": " or target != "build.ninja.stamp":
+        raise WindowsPipelineError(
+            "Restored build.ninja.d does not describe build.ninja.stamp"
+        )
+    try:
+        tokens = shlex.split(dependencies, posix=True)
+    except ValueError as exc:
+        raise WindowsPipelineError(
+            f"Restored build.ninja.d has malformed escaping: {exc}"
+        ) from exc
+    if not tokens or len(tokens) > MAX_GN_REGEN_DEPENDENCIES:
+        raise WindowsPipelineError(
+            "Restored build.ninja.d dependency count is empty or unbounded"
+        )
+    folded = [token.replace("\\", "/").casefold() for token in tokens]
+    if len(folded) != len(set(folded)):
+        raise WindowsPipelineError(
+            "Restored build.ninja.d contains duplicate or Windows-case-aliased inputs"
+        )
+    return tokens
+
+
+def _is_descendant(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def revalidate_restored_gn_manifest(
+    source: Path,
+    out: Path,
+    *,
+    visual_studio: Path,
+    windows_kits_root: Path = WINDOWS_KITS_ROOT,
+) -> dict[str, object]:
+    """Revalidate and advance only GN's restored zero-byte manifest stamp.
+
+    GN records Visual Studio and Windows Kits directory mtimes in build.ninja.d.
+    Those exact-version directories are recreated on each hosted runner, so a
+    checkpoint's stamp is necessarily older even when its graph is still exact.
+    The checkpoint manifest has already bound source, tools, SDK, VS, and port
+    configuration before this function is called. This additional check keeps
+    every depfile input inside those authorities and touches no compiled output.
+    """
+    source = source.resolve()
+    out = out.resolve()
+    visual_studio = visual_studio.resolve()
+    windows_kits_root = windows_kits_root.resolve()
+    if not _is_descendant(out, source):
+        raise WindowsPipelineError("Restored GN output is outside the Chromium source")
+    for root, label in (
+        (visual_studio, "Visual Studio"),
+        (windows_kits_root, "Windows Kits"),
+    ):
+        if not root.is_dir() or root.is_symlink():
+            raise WindowsPipelineError(
+                f"Trusted {label} root is unavailable for GN manifest revalidation: {root}"
+            )
+
+    args_gn = out / "args.gn"
+    build_ninja = out / "build.ninja"
+    depfile = out / "build.ninja.d"
+    stamp = out / "build.ninja.stamp"
+    for path, allow_empty in (
+        (args_gn, False),
+        (build_ninja, False),
+        (depfile, False),
+        (stamp, True),
+    ):
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or (not allow_empty and path.stat().st_size <= 0)
+        ):
+            raise WindowsPipelineError(
+                f"Restored checkpoint lacks reusable regular {path.name}"
+            )
+
+    header = "\n".join(build_ninja.read_text(encoding="utf-8").splitlines()[:32])
+    required_lines = (
+        "rule gn",
+        "  command = ../../../gn/gn.exe --root=../.. -q --regeneration gen .",
+        "build build.ninja.stamp: gn",
+        "  depfile = build.ninja.d",
+        "build build.ninja: phony build.ninja.stamp",
+    )
+    missing_lines = [line for line in required_lines if line not in header]
+    if missing_lines:
+        raise WindowsPipelineError(
+            "Restored build.ninja lacks the expected bounded GN regeneration contract: "
+            + ", ".join(missing_lines)
+        )
+
+    dependencies = _parse_restored_gn_depfile(depfile)
+    trusted_external_roots = (visual_studio, windows_kits_root)
+    source_count = 0
+    external_count = 0
+    newest_dependency_mtime_ns = args_gn.stat().st_mtime_ns
+    for token in dependencies:
+        raw = Path(token)
+        if raw.is_absolute():
+            resolved = raw.resolve()
+            if not any(
+                _is_descendant(resolved, root) for root in trusted_external_roots
+            ):
+                raise WindowsPipelineError(
+                    f"Restored GN depfile contains an untrusted absolute input: {token}"
+                )
+            if not resolved.is_dir() or resolved.is_symlink():
+                raise WindowsPipelineError(
+                    f"Restored GN external input is not a trusted regular directory: {token}"
+                )
+            external_count += 1
+        else:
+            resolved = (out / raw).resolve()
+            if not _is_descendant(resolved, source):
+                raise WindowsPipelineError(
+                    f"Restored GN depfile input escapes the Chromium source: {token}"
+                )
+            if not resolved.exists() and not resolved.is_symlink():
+                raise WindowsPipelineError(
+                    f"Restored GN depfile input is unavailable: {token}"
+                )
+            source_count += 1
+        newest_dependency_mtime_ns = max(
+            newest_dependency_mtime_ns,
+            resolved.stat().st_mtime_ns,
+        )
+
+    if external_count <= 0:
+        raise WindowsPipelineError(
+            "Restored Windows GN depfile contains no trusted external toolchain directories"
+        )
+    now_ns = time.time_ns()
+    future_limit_ns = now_ns + MAX_GN_REGEN_FUTURE_SKEW_SECONDS * 1_000_000_000
+    if newest_dependency_mtime_ns > future_limit_ns:
+        raise WindowsPipelineError(
+            "Restored GN dependency mtime is implausibly far in the future"
+        )
+    before_ns = stamp.stat().st_mtime_ns
+    refreshed = before_ns <= newest_dependency_mtime_ns
+    if refreshed:
+        wanted_ns = max(now_ns, newest_dependency_mtime_ns + 1_000_000_000)
+        os.utime(
+            stamp,
+            ns=(stamp.stat().st_atime_ns, wanted_ns),
+        )
+    after_ns = stamp.stat().st_mtime_ns
+    if after_ns <= newest_dependency_mtime_ns:
+        raise WindowsPipelineError(
+            "Could not advance restored build.ninja.stamp beyond validated dependencies"
+        )
+
+    stats: dict[str, object] = {
+        "dependency_count": len(dependencies),
+        "source_dependency_count": source_count,
+        "external_directory_count": external_count,
+        "stamp_mtime_before_ns": before_ns,
+        "stamp_mtime_after_ns": after_ns,
+        "newest_dependency_mtime_ns": newest_dependency_mtime_ns,
+        "stamp_refreshed": refreshed,
+        "build_ninja_sha256": sha256_file(build_ninja),
+        "build_ninja_depfile_sha256": sha256_file(depfile),
+        "args_gn_sha256": sha256_file(args_gn),
+    }
+    print(
+        "Revalidated restored Windows GN manifest without regenerating its graph: "
+        f"dependencies={len(dependencies)}; source={source_count}; "
+        f"external_directories={external_count}; stamp_refreshed={str(refreshed).lower()}; "
+        f"stamp_mtime_ns={before_ns}->{after_ns}"
+    )
+    return stats
 
 
 def _read_json_object(path: Path, label: str) -> dict[str, object]:
@@ -3006,6 +3253,8 @@ def _checkpoint_manifest_matches_state(
     manifest: Mapping[str, object],
     state: PreparedState,
     proof: Mapping[str, object],
+    *,
+    migration: CheckpointMigration | None = None,
 ) -> CheckpointCompatibility:
     exact = {
         "schema": CHECKPOINT_MANIFEST_SCHEMA,
@@ -3032,7 +3281,9 @@ def _checkpoint_manifest_matches_state(
         "visual_studio_year": state.visual_studio_year,
         "resume_input_epoch": WINDOWS_RESUME_INPUT_EPOCH,
         "port_config_hash_schema": state.port_config_hash_schema,
-        "port_config_sha256": state.port_config_sha256,
+        "port_config_sha256": (
+            migration.port_config_sha256 if migration else state.port_config_sha256
+        ),
         "github_sha": proof["producer_sha"],
         "github_run_id": proof["run_id"],
         "github_run_attempt": proof["run_attempt"],
@@ -3056,15 +3307,29 @@ def _checkpoint_manifest_matches_state(
         "sdk_servicing": state.sdk_servicing,
         "visual_studio_version": state.visual_studio_version,
     }
+    if os.environ.get("RUNNER_OS", "").casefold() == "windows":
+        for manifest_field, environment_field in (
+            ("runner_image", "ImageOS"),
+            ("runner_image_version", "ImageVersion"),
+        ):
+            current = os.environ.get(environment_field, "")
+            if current:
+                refresh_expected[manifest_field] = current
     refresh_fields = tuple(
         key
         for key, expected in refresh_expected.items()
         if manifest.get(key) != expected
     )
+    if migration and refresh_fields:
+        raise WindowsPipelineError(
+            "Approved checkpoint migration cannot cross runner toolchain drift: "
+            + ", ".join(refresh_fields)
+        )
     return CheckpointCompatibility(
         no_progress_streak=streak,
         requires_gn_refresh=bool(refresh_fields),
         gn_refresh_fields=refresh_fields,
+        migration_run_id=migration.run_id if migration else "",
     )
 
 
@@ -3073,18 +3338,28 @@ def validate_checkpoint_bundle(
     *,
     state: PreparedState,
     proof: Mapping[str, object],
+    migration: CheckpointMigration | None = None,
 ) -> tuple[Path, CheckpointCompatibility]:
     archive, checksum, manifest_path = _checkpoint_expected_files(directory)
     for path in (archive, checksum, manifest_path):
         if not path.is_file() or path.is_symlink():
             raise WindowsPipelineError(f"Checkpoint artifact lacks regular file: {path.name}")
     manifest = _read_json_object(manifest_path, "checkpoint manifest")
-    compatibility = _checkpoint_manifest_matches_state(manifest, state, proof)
+    compatibility = _checkpoint_manifest_matches_state(
+        manifest,
+        state,
+        proof,
+        migration=migration,
+    )
     archive_sha = sha256_file(archive)
     expected_sha = validate_sha256(str(manifest.get("archive_sha256", "")), "checkpoint archive SHA-256")
     if archive_sha != expected_sha:
         raise WindowsPipelineError(
             f"Checkpoint archive SHA-256 mismatch: expected {expected_sha}, got {archive_sha}"
+        )
+    if migration and archive_sha != migration.archive_sha256:
+        raise WindowsPipelineError(
+            "Approved checkpoint migration archive SHA-256 is not the exact allowlisted object"
         )
     expected_bytes = manifest.get("archive_bytes")
     if not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool) or expected_bytes <= 0:
@@ -3096,6 +3371,31 @@ def validate_checkpoint_bundle(
         raise WindowsPipelineError("Checkpoint checksum sidecar is malformed or inconsistent")
     validate_checkpoint(archive, root=OUT_NAME)
     return archive, compatibility
+
+
+def _resolve_checkpoint_migration(
+    run_id: str,
+    *,
+    version: str,
+    stage: int,
+) -> CheckpointMigration | None:
+    migration = APPROVED_CHECKPOINT_MIGRATIONS.get(run_id)
+    if migration is None:
+        return None
+    if migration.run_id != run_id or migration.version != version or migration.stage != stage:
+        raise WindowsPipelineError(
+            f"Checkpoint run {run_id} does not match its exact approved migration scope"
+        )
+    validate_sha1(migration.producer_sha, "approved migration producer SHA")
+    validate_sha256(
+        migration.port_config_sha256,
+        "approved migration port configuration SHA-256",
+    )
+    validate_sha256(
+        migration.archive_sha256,
+        "approved migration archive SHA-256",
+    )
+    return migration
 
 
 def acquire_checkpoint(
@@ -3123,13 +3423,18 @@ def acquire_checkpoint(
             shutil.rmtree(candidate_dir)
         candidate_dir.mkdir()
         try:
+            migration = _resolve_checkpoint_migration(
+                run_id,
+                version=version,
+                stage=producer_stage,
+            )
             proof = verify_checkpoint_run(
                 repository=repository,
                 run_id=run_id,
                 version=version,
                 expected_stage=producer_stage,
                 expected_ref=expected_ref,
-                expected_sha=expected_sha,
+                expected_sha=(migration.producer_sha if migration else expected_sha),
                 artifact_name=artifact_name,
             )
             _run(
@@ -3148,7 +3453,10 @@ def acquire_checkpoint(
                 timeout=DEFAULT_NETWORK_TIMEOUT_SECONDS,
             )
             archive, compatibility = validate_checkpoint_bundle(
-                candidate_dir, state=state, proof=proof
+                candidate_dir,
+                state=state,
+                proof=proof,
+                migration=migration,
             )
         except InfrastructureError:
             raise
@@ -3159,7 +3467,8 @@ def acquire_checkpoint(
         print(
             f"Accepted {label} checkpoint from run {run_id}, stage {producer_stage}, "
             f"no-progress streak {compatibility.no_progress_streak}, "
-            f"GN refresh required={str(compatibility.requires_gn_refresh).lower()}"
+            f"GN refresh required={str(compatibility.requires_gn_refresh).lower()}, "
+            f"approved migration={str(bool(compatibility.migration_run_id)).lower()}"
         )
         return archive, compatibility
     return None, CheckpointCompatibility(0, False, ())
@@ -3474,6 +3783,7 @@ def prepare_pipeline(
             gn,
             ninja,
             env,
+            visual_studio=visual_studio,
             windows_build_timestamp=windows_build_timestamp,
             evidence_dir=evidence_dir,
         )

@@ -185,23 +185,34 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 pipeline,
                 "_validate_configured_gn_graph",
                 return_value=out,
-            ) as validate:
+            ) as validate, mock.patch.object(
+                pipeline,
+                "revalidate_restored_gn_manifest",
+                return_value={"stamp_refreshed": True},
+            ) as revalidate:
                 result = pipeline.reuse_restored_gn_graph(
                     source,
                     pathlib.Path("gn.exe"),
                     pathlib.Path("ninja.exe"),
                     {},
+                    visual_studio=pathlib.Path("vs"),
                     windows_build_timestamp=1_785_646_800,
                 )
             self.assertEqual(result, out)
             self.assertEqual(run.call_args.args[0][-2:], ["-n", "build.ninja"])
+            self.assertIn("explain", run.call_args.args[0])
             self.assertNotIn("gen", run.call_args.args[0])
+            revalidate.assert_called_once()
             validate.assert_called_once()
 
             dirty = pipeline.subprocess.CompletedProcess(
                 ["ninja.exe"], 0, "[1/1] ACTION //build:gn_run_binary\n", ""
             )
-            with mock.patch.object(pipeline, "_run", return_value=dirty):
+            with mock.patch.object(pipeline, "_run", return_value=dirty), mock.patch.object(
+                pipeline,
+                "revalidate_restored_gn_manifest",
+                return_value={"stamp_refreshed": True},
+            ):
                 with self.assertRaisesRegex(
                     pipeline.WindowsPipelineError, "refusing silent graph regeneration"
                 ):
@@ -210,8 +221,138 @@ class WindowsI686PipelineTests(unittest.TestCase):
                         pathlib.Path("gn.exe"),
                         pathlib.Path("ninja.exe"),
                         {},
+                        visual_studio=pathlib.Path("vs"),
                         windows_build_timestamp=1_785_646_800,
                     )
+
+    def test_restored_gn_manifest_revalidates_only_the_zero_byte_stamp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            source = root / "src"
+            out = source / "out" / pipeline.OUT_NAME
+            visual_studio = root / "Program Files/Microsoft Visual Studio/18/Enterprise"
+            windows_kits = root / "Program Files (x86)/Windows Kits/10"
+            vs_dep = visual_studio / "VC/Tools/MSVC/14.51/include"
+            kits_dep = windows_kits / "include/10.0.28000.0/shared"
+            for directory in (out, vs_dep, kits_dep):
+                directory.mkdir(parents=True)
+            source_dep = source / "BUILD.gn"
+            source_dep.write_text("group(\"fixture\") {}\n", encoding="utf-8")
+            args_gn = out / "args.gn"
+            args_gn.write_text(pipeline.WINDOWS_GN_ARGS, encoding="utf-8")
+            build_ninja = out / "build.ninja"
+            build_ninja.write_text(
+                "\n".join(
+                    (
+                        "ninja_required_version = 1.7.2",
+                        "",
+                        "rule gn",
+                        "  command = ../../../gn/gn.exe --root=../.. -q --regeneration gen .",
+                        "  pool = console",
+                        "  description = Regenerating ninja files",
+                        "",
+                        "build build.ninja.stamp: gn",
+                        "  generator = 1",
+                        "  depfile = build.ninja.d",
+                        "",
+                        "build build.ninja: phony build.ninja.stamp",
+                        "  generator = 1",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            def escaped(path):
+                return path.as_posix().replace(" ", "\\ ")
+
+            depfile = out / "build.ninja.d"
+            depfile.write_text(
+                "build.ninja.stamp: ../../BUILD.gn "
+                + escaped(vs_dep)
+                + " "
+                + escaped(kits_dep)
+                + "\n",
+                encoding="utf-8",
+            )
+            stamp = out / "build.ninja.stamp"
+            stamp.touch()
+            ninja_log = out / ".ninja_log"
+            ninja_log.write_text("# ninja log v5\n1\t2\t0\tobj/a.obj\tdeadbeef\n", encoding="utf-8")
+            ninja_deps = out / ".ninja_deps"
+            ninja_deps.write_bytes(b"deps-fixture")
+            completed_output = out / "obj/a.obj"
+            completed_output.parent.mkdir()
+            completed_output.write_bytes(b"compiled-output")
+
+            fixture_now_ns = pipeline.time.time_ns()
+            old_ns = fixture_now_ns - 20_000_000_000
+            source_ns = 946_684_800_000_000_000
+            external_ns = fixture_now_ns - 10_000_000_000
+            pipeline.os.utime(source_dep, ns=(source_ns, source_ns))
+            pipeline.os.utime(stamp, ns=(old_ns, old_ns))
+            pipeline.os.utime(vs_dep, ns=(external_ns, external_ns))
+            pipeline.os.utime(kits_dep, ns=(external_ns, external_ns))
+            protected = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (
+                    args_gn,
+                    build_ninja,
+                    depfile,
+                    ninja_log,
+                    ninja_deps,
+                    completed_output,
+                )
+            }
+
+            stats = pipeline.revalidate_restored_gn_manifest(
+                source,
+                out,
+                visual_studio=visual_studio,
+                windows_kits_root=windows_kits,
+            )
+
+            self.assertEqual(stats["dependency_count"], 3)
+            self.assertEqual(stats["source_dependency_count"], 1)
+            self.assertEqual(stats["external_directory_count"], 2)
+            self.assertTrue(stats["stamp_refreshed"])
+            self.assertGreater(stamp.stat().st_mtime_ns, external_ns)
+            for path, before in protected.items():
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
+    def test_restored_gn_manifest_rejects_untrusted_external_dependency(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            source = root / "src"
+            out = source / "out" / pipeline.OUT_NAME
+            visual_studio = root / "vs"
+            windows_kits = root / "kits"
+            rogue = root / "rogue"
+            for directory in (out, visual_studio, windows_kits, rogue):
+                directory.mkdir(parents=True)
+            (out / "args.gn").write_text(pipeline.WINDOWS_GN_ARGS, encoding="utf-8")
+            (out / "build.ninja").write_text(
+                "rule gn\n"
+                "  command = ../../../gn/gn.exe --root=../.. -q --regeneration gen .\n"
+                "build build.ninja.stamp: gn\n"
+                "  depfile = build.ninja.d\n"
+                "build build.ninja: phony build.ninja.stamp\n",
+                encoding="utf-8",
+            )
+            (out / "build.ninja.d").write_text(
+                "build.ninja.stamp: " + rogue.as_posix() + "\n",
+                encoding="utf-8",
+            )
+            (out / "build.ninja.stamp").touch()
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError, "untrusted absolute input"
+            ):
+                pipeline.revalidate_restored_gn_manifest(
+                    source,
+                    out,
+                    visual_studio=visual_studio,
+                    windows_kits_root=windows_kits,
+                )
 
     @unittest.skipUnless(sys.platform == "win32", "Windows reparse-point API test")
     def test_windows_resume_reparse_timestamp_api_does_not_follow_target(self):
@@ -581,6 +722,10 @@ class WindowsI686PipelineTests(unittest.TestCase):
             "sdk_servicing": state.sdk_servicing,
             "visual_studio_year": state.visual_studio_year,
             "visual_studio_version": state.visual_studio_version,
+            "runner_image": pipeline.os.environ.get("ImageOS", "unknown"),
+            "runner_image_version": pipeline.os.environ.get(
+                "ImageVersion", "unknown"
+            ),
             "resume_input_epoch": pipeline.WINDOWS_RESUME_INPUT_EPOCH,
             "port_config_hash_schema": state.port_config_hash_schema,
             "port_config_sha256": state.port_config_sha256,
@@ -595,6 +740,39 @@ class WindowsI686PipelineTests(unittest.TestCase):
         )
         self.assertEqual(compatibility.no_progress_streak, 0)
         self.assertFalse(compatibility.requires_gn_refresh)
+        with mock.patch.dict(
+            pipeline.os.environ,
+            {"RUNNER_OS": "Linux", "ImageOS": "ubuntu24"},
+            clear=False,
+        ):
+            compatibility = pipeline._checkpoint_manifest_matches_state(
+                manifest, state, proof
+            )
+            self.assertFalse(compatibility.requires_gn_refresh)
+        manifest["runner_image"] = "win25-vs2026"
+        manifest["runner_image_version"] = "20260824.214.3"
+        with mock.patch.dict(
+            pipeline.os.environ,
+            {
+                "RUNNER_OS": "Windows",
+                "ImageOS": "win25-vs2026",
+                "ImageVersion": "20260824.214.3",
+            },
+            clear=False,
+        ):
+            compatibility = pipeline._checkpoint_manifest_matches_state(
+                manifest, state, proof
+            )
+            self.assertFalse(compatibility.requires_gn_refresh)
+            manifest["runner_image_version"] = "20260825.1"
+            compatibility = pipeline._checkpoint_manifest_matches_state(
+                manifest, state, proof
+            )
+            self.assertTrue(compatibility.requires_gn_refresh)
+            self.assertEqual(
+                compatibility.gn_refresh_fields, ("runner_image_version",)
+            )
+        manifest["runner_image_version"] = "20260824.214.3"
         manifest["sdk_servicing"] = "10.0.28000.9999"
         compatibility = pipeline._checkpoint_manifest_matches_state(
             manifest, state, proof
@@ -607,6 +785,62 @@ class WindowsI686PipelineTests(unittest.TestCase):
             pipeline.WindowsPipelineError, "windows_build_timestamp"
         ):
             pipeline._checkpoint_manifest_matches_state(manifest, state, proof)
+        manifest["windows_build_timestamp"] = state.windows_build_timestamp
+
+        migration = pipeline.CheckpointMigration(
+            run_id=proof["run_id"],
+            version=state.version,
+            stage=proof["producer_stage"],
+            producer_sha=proof["producer_sha"],
+            port_config_sha256="4" * 64,
+            archive_sha256="5" * 64,
+        )
+        manifest["port_config_sha256"] = migration.port_config_sha256
+        compatibility = pipeline._checkpoint_manifest_matches_state(
+            manifest,
+            state,
+            proof,
+            migration=migration,
+        )
+        self.assertEqual(compatibility.migration_run_id, proof["run_id"])
+        manifest["visual_studio_version"] = "19.0.0"
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError,
+            "cannot cross runner toolchain drift",
+        ):
+            pipeline._checkpoint_manifest_matches_state(
+                manifest,
+                state,
+                proof,
+                migration=migration,
+            )
+
+    def test_approved_checkpoint_migration_is_exactly_scoped(self):
+        migration = pipeline._resolve_checkpoint_migration(
+            "33274094424",
+            version="153.0.8010.12",
+            stage=1,
+        )
+        self.assertIsNotNone(migration)
+        self.assertEqual(
+            migration.archive_sha256,
+            "6f124bee59ed5693db7a0477f91ad57330f990cc0f32aa43fe0e9cabb426e058",
+        )
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "exact approved migration scope"
+        ):
+            pipeline._resolve_checkpoint_migration(
+                "33274094424",
+                version="153.0.8010.12",
+                stage=2,
+            )
+        self.assertIsNone(
+            pipeline._resolve_checkpoint_migration(
+                "99999999999",
+                version="153.0.8010.12",
+                stage=1,
+            )
+        )
 
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
         vs_toolchain = """
