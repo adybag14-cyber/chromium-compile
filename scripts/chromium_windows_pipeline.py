@@ -2751,6 +2751,7 @@ def revalidate_restored_gn_manifest(
     out = out.resolve()
     visual_studio = visual_studio.resolve()
     windows_kits_root = windows_kits_root.resolve()
+    netfx_sdk_root = (windows_kits_root.parent / "NETFXSDK").resolve()
     if not _is_descendant(out, source):
         raise WindowsPipelineError("Restored GN output is outside the Chromium source")
     for root, label in (
@@ -2797,7 +2798,9 @@ def revalidate_restored_gn_manifest(
         )
 
     dependencies = _parse_restored_gn_depfile(depfile)
-    trusted_external_roots = (visual_studio, windows_kits_root)
+    trusted_external_roots = [visual_studio, windows_kits_root]
+    if netfx_sdk_root.is_dir() and not netfx_sdk_root.is_symlink():
+        trusted_external_roots.append(netfx_sdk_root)
     source_count = 0
     external_count = 0
     newest_dependency_mtime_ns = args_gn.stat().st_mtime_ns
@@ -2860,6 +2863,7 @@ def revalidate_restored_gn_manifest(
         "dependency_count": len(dependencies),
         "source_dependency_count": source_count,
         "external_directory_count": external_count,
+        "trusted_external_root_count": len(trusted_external_roots),
         "stamp_mtime_before_ns": before_ns,
         "stamp_mtime_after_ns": after_ns,
         "newest_dependency_mtime_ns": newest_dependency_mtime_ns,
