@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 import urllib.parse
 import urllib.error
@@ -391,65 +390,36 @@ def _run(
     if capture and discard_stdout:
         raise WindowsPipelineError("Command output cannot be captured and discarded together")
     print("+ " + subprocess.list2cmdline(validated_command), flush=True)
-    quiet_stdout = tempfile.TemporaryFile(mode="w+b") if discard_stdout else None
-
-    def quiet_stdout_tail() -> str:
-        if quiet_stdout is None:
-            return ""
-        quiet_stdout.flush()
-        end = quiet_stdout.seek(0, os.SEEK_END)
-        quiet_stdout.seek(max(0, end - 32_000), os.SEEK_SET)
-        return quiet_stdout.read().decode("utf-8", errors="replace")
-
     try:
-        try:
-            # The executable is selected from the fixed allowlist above, every
-            # call uses shell=False, and all caller-provided fields have strict
-            # semantic validation before reaching an argument slot.
-            result = subprocess.run(
-                validated_command,  # lgtm [py/command-line-injection]
-                cwd=cwd,
-                env=dict(env) if env is not None else None,
-                check=False,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                stdout=(
-                    subprocess.PIPE
-                    if capture
-                    else quiet_stdout if quiet_stdout is not None else None
-                ),
-                stderr=subprocess.PIPE if capture or discard_stdout else None,
-                timeout=timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            detail = quiet_stdout_tail().strip()
-            raise InfrastructureError(
-                f"Command could not complete: {command[0]}: {exc}"
-                + (f"\n{detail[-8000:]}" if detail else "")
-            ) from exc
-        if check and result.returncode != 0:
-            detail = (
-                (result.stderr or "")
-                + "\n"
-                + quiet_stdout_tail()
-                + "\n"
-                + (result.stdout or "")
-            ).strip()
-            error_type = (
-                InfrastructureError
-                if INFRASTRUCTURE_PATTERNS.search(detail)
-                else WindowsPipelineError
-            )
-            raise error_type(
-                f"Command failed with exit {result.returncode}: "
-                f"{subprocess.list2cmdline(list(command))}"
-                + (f"\n{detail[-8000:]}" if detail else "")
-            )
-        return result
-    finally:
-        if quiet_stdout is not None:
-            quiet_stdout.close()
+        # The executable is selected from the fixed allowlist above, every call
+        # uses shell=False, and all caller-provided fields have strict semantic
+        # validation before reaching an argument slot.
+        result = subprocess.run(
+            validated_command,  # lgtm [py/command-line-injection]
+            cwd=cwd,
+            env=dict(env) if env is not None else None,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=(
+                subprocess.PIPE
+                if capture
+                else subprocess.DEVNULL if discard_stdout else None
+            ),
+            stderr=subprocess.PIPE if capture or discard_stdout else None,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InfrastructureError(f"Command could not complete: {command[0]}: {exc}") from exc
+    if check and result.returncode != 0:
+        detail = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
+        error_type = InfrastructureError if INFRASTRUCTURE_PATTERNS.search(detail) else WindowsPipelineError
+        raise error_type(
+            f"Command failed with exit {result.returncode}: {subprocess.list2cmdline(list(command))}"
+            + (f"\n{detail[-8000:]}" if detail else "")
+        )
+    return result
 
 
 def _runner_command_file(variable: str, prefix: str) -> Path | None:

@@ -69,24 +69,8 @@ class WindowsI686PipelineTests(unittest.TestCase):
             pipeline.subprocess, "run", return_value=completed
         ) as run:
             pipeline._run(["ninja.exe", "-n", "chrome"], discard_stdout=True)
-        self.assertIsNot(run.call_args.kwargs["stdout"], pipeline.subprocess.DEVNULL)
+        self.assertIs(run.call_args.kwargs["stdout"], pipeline.subprocess.DEVNULL)
         self.assertIs(run.call_args.kwargs["stderr"], pipeline.subprocess.PIPE)
-
-    def test_command_wrapper_preserves_quiet_stdout_tail_on_failure(self):
-        def run(command, **kwargs):
-            kwargs["stdout"].write(b"primary ninja build-stopped reason\n")
-            return pipeline.subprocess.CompletedProcess(
-                command, 1, None, "ninja: error:\n"
-            )
-
-        with mock.patch.object(pipeline.subprocess, "run", side_effect=run):
-            with self.assertRaisesRegex(
-                pipeline.WindowsPipelineError,
-                "primary ninja build-stopped reason",
-            ):
-                pipeline._run(
-                    ["ninja.exe", "-n", "chrome"], discard_stdout=True
-                )
 
     def test_dawn_generator_output_is_confined_to_generated_output_tree(self):
         with tempfile.TemporaryDirectory() as temp:
