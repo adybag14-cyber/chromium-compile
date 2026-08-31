@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.parse
 import urllib.error
@@ -103,6 +104,8 @@ DEFAULT_REMOVE_TIMEOUT_SECONDS = 900
 MAX_GN_REGEN_DEPFILE_BYTES = 4 * 1024 * 1024
 MAX_GN_REGEN_DEPENDENCIES = 100_000
 MAX_GN_REGEN_FUTURE_SKEW_SECONDS = 300
+MAX_NINJA_INPUT_CLOSURE_BYTES = 128 * 1024 * 1024
+MAX_NINJA_INPUT_CLOSURE_COUNT = 2_000_000
 GITILES_HOST = "chromium.googlesource.com"
 MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
 MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
@@ -272,10 +275,10 @@ class CheckpointMigration:
     archive_sha256: str
 
 
-# One immutable bridge preserves the already-proven Stage 1 compiler output
-# across the manifest-stamp repair. Every field is exact; this is not a generic
-# cross-lineage compatibility escape hatch. The next checkpoint is written with
-# the current lineage/configuration and resumes normal strict validation.
+# Immutable bridges preserve already-proven compiler output across narrowly
+# scoped resume-path repairs. Every field is exact; these are not generic
+# cross-lineage compatibility escape hatches. The next checkpoint is written
+# with the current lineage/configuration and resumes normal strict validation.
 APPROVED_CHECKPOINT_MIGRATIONS = {
     "33274094424": CheckpointMigration(
         run_id="33274094424",
@@ -287,6 +290,18 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         ),
         archive_sha256=(
             "6f124bee59ed5693db7a0477f91ad57330f990cc0f32aa43fe0e9cabb426e058"
+        ),
+    ),
+    "33357533082": CheckpointMigration(
+        run_id="33357533082",
+        version="153.0.8010.12",
+        stage=4,
+        producer_sha="4bc44f0ba432ca2b3eaeac40811e2533daeb2e98",
+        port_config_sha256=(
+            "2c2fade4813c2baca7f6ef770c102e7bbe999b62dd8871282d336bf03852bc67"
+        ),
+        archive_sha256=(
+            "c81f702c589404b3f4ffa6bade8db08650f6e8cade30a45b274d8e0740497ce7"
         ),
     ),
 }
@@ -376,36 +391,65 @@ def _run(
     if capture and discard_stdout:
         raise WindowsPipelineError("Command output cannot be captured and discarded together")
     print("+ " + subprocess.list2cmdline(validated_command), flush=True)
+    quiet_stdout = tempfile.TemporaryFile(mode="w+b") if discard_stdout else None
+
+    def quiet_stdout_tail() -> str:
+        if quiet_stdout is None:
+            return ""
+        quiet_stdout.flush()
+        end = quiet_stdout.seek(0, os.SEEK_END)
+        quiet_stdout.seek(max(0, end - 32_000), os.SEEK_SET)
+        return quiet_stdout.read().decode("utf-8", errors="replace")
+
     try:
-        # The executable is selected from the fixed allowlist above, every call
-        # uses shell=False, and all caller-provided fields have strict semantic
-        # validation before reaching an argument slot.
-        result = subprocess.run(
-            validated_command,  # lgtm [py/command-line-injection]
-            cwd=cwd,
-            env=dict(env) if env is not None else None,
-            check=False,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=(
-                subprocess.PIPE
-                if capture
-                else subprocess.DEVNULL if discard_stdout else None
-            ),
-            stderr=subprocess.PIPE if capture or discard_stdout else None,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise InfrastructureError(f"Command could not complete: {command[0]}: {exc}") from exc
-    if check and result.returncode != 0:
-        detail = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
-        error_type = InfrastructureError if INFRASTRUCTURE_PATTERNS.search(detail) else WindowsPipelineError
-        raise error_type(
-            f"Command failed with exit {result.returncode}: {subprocess.list2cmdline(list(command))}"
-            + (f"\n{detail[-8000:]}" if detail else "")
-        )
-    return result
+        try:
+            # The executable is selected from the fixed allowlist above, every
+            # call uses shell=False, and all caller-provided fields have strict
+            # semantic validation before reaching an argument slot.
+            result = subprocess.run(
+                validated_command,  # lgtm [py/command-line-injection]
+                cwd=cwd,
+                env=dict(env) if env is not None else None,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=(
+                    subprocess.PIPE
+                    if capture
+                    else quiet_stdout if quiet_stdout is not None else None
+                ),
+                stderr=subprocess.PIPE if capture or discard_stdout else None,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail = quiet_stdout_tail().strip()
+            raise InfrastructureError(
+                f"Command could not complete: {command[0]}: {exc}"
+                + (f"\n{detail[-8000:]}" if detail else "")
+            ) from exc
+        if check and result.returncode != 0:
+            detail = (
+                (result.stderr or "")
+                + "\n"
+                + quiet_stdout_tail()
+                + "\n"
+                + (result.stdout or "")
+            ).strip()
+            error_type = (
+                InfrastructureError
+                if INFRASTRUCTURE_PATTERNS.search(detail)
+                else WindowsPipelineError
+            )
+            raise error_type(
+                f"Command failed with exit {result.returncode}: "
+                f"{subprocess.list2cmdline(list(command))}"
+                + (f"\n{detail[-8000:]}" if detail else "")
+            )
+        return result
+    finally:
+        if quiet_stdout is not None:
+            quiet_stdout.close()
 
 
 def _runner_command_file(variable: str, prefix: str) -> Path | None:
@@ -3656,6 +3700,139 @@ def create_checkpoint(
     return archive, checksum, manifest_path
 
 
+def _ninja_database_identity(path: Path) -> dict[str, object]:
+    if not path.exists() and not path.is_symlink():
+        return {"exists": False}
+    if not path.is_file() or path.is_symlink():
+        raise WindowsPipelineError(
+            f"Ninja progress database is not a regular file: {path}"
+        )
+    return {
+        "exists": True,
+        "bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
+
+
+def validate_ninja_input_closure(
+    source: Path,
+    out: Path,
+    ninja: Path,
+    env: Mapping[str, str],
+) -> dict[str, object]:
+    """Traverse target inputs without simulating or mutating the resumed build.
+
+    A normal ``ninja -n`` schedules every unfinished edge and can fail while
+    creating response files or pretending that generated outputs completed. It
+    is therefore not a read-only checkpoint validator. Ninja's ``inputs`` and
+    ``missingdeps`` tools parse the same manifest closure, while ``missingdeps``
+    also loads and checks the dependency database. ``-n`` prevents the log-open
+    path from recompacting either database. Exact before/after identities make
+    preserving completed work an enforced invariant rather than an assumption.
+    """
+    targets = ["chrome", "mini_installer"]
+    database_paths = (out / ".ninja_log", out / ".ninja_deps")
+    before = {
+        path.name: _ninja_database_identity(path) for path in database_paths
+    }
+    try:
+        input_probe = _run(
+            [
+                str(ninja),
+                "-C",
+                str(out),
+                "-n",
+                "-t",
+                "inputs",
+                *targets,
+            ],
+            cwd=source,
+            env=env,
+            timeout=1200,
+            capture=True,
+        )
+        input_text = input_probe.stdout or ""
+        input_payload = input_text.encode("utf-8")
+        input_lines = input_text.splitlines()
+        if input_probe.stderr and input_probe.stderr.strip():
+            raise WindowsPipelineError(
+                "Ninja input-closure traversal emitted an unexpected diagnostic: "
+                + input_probe.stderr.strip()[-8000:]
+            )
+        if (
+            not input_lines
+            or len(input_lines) > MAX_NINJA_INPUT_CLOSURE_COUNT
+            or len(input_payload) > MAX_NINJA_INPUT_CLOSURE_BYTES
+            or any(
+                not line or "\0" in line or len(line) > 32_768
+                for line in input_lines
+            )
+            or len(input_lines) != len(set(input_lines))
+        ):
+            raise WindowsPipelineError(
+                "Ninja input-closure traversal was empty, duplicated, malformed, or unbounded"
+            )
+
+        missing_probe = _run(
+            [
+                str(ninja),
+                "-C",
+                str(out),
+                "-n",
+                "-t",
+                "missingdeps",
+                *targets,
+            ],
+            cwd=source,
+            env=env,
+            timeout=1200,
+            capture=True,
+        )
+        missing_text = "\n".join(
+            part.strip()
+            for part in (missing_probe.stdout or "", missing_probe.stderr or "")
+            if part.strip()
+        )
+        missing_match = re.fullmatch(
+            r"Processed ([1-9][0-9]*) nodes\.\s*"
+            r"No missing dependencies on generated files found\.",
+            missing_text,
+        )
+        if not missing_match:
+            raise WindowsPipelineError(
+                "Ninja missing-dependency validation did not produce its exact clean "
+                f"summary: {missing_text[-8000:]}"
+            )
+    finally:
+        after = {
+            path.name: _ninja_database_identity(path) for path in database_paths
+        }
+        if after != before:
+            raise WindowsPipelineError(
+                "Read-only Ninja closure validation changed a progress database; "
+                "refusing to continue from mutated checkpoint state"
+            )
+
+    stats: dict[str, object] = {
+        "build_simulation": False,
+        "dependency_nodes_processed": int(missing_match.group(1)),
+        "manifest_input_bytes": len(input_payload),
+        "manifest_input_count": len(input_lines),
+        "manifest_input_sha256": hashlib.sha256(input_payload).hexdigest(),
+        "ninja_databases": before,
+        "ninja_tool_dry_run_guard": True,
+        "state_unchanged": True,
+        "targets": targets,
+        "validated": True,
+    }
+    print(
+        "Read-only Ninja tools validated the chrome + mini_installer closure: "
+        f"manifest_inputs={len(input_lines)}; "
+        f"dependency_nodes={missing_match.group(1)}; progress_databases_unchanged=true"
+    )
+    return stats
+
+
 def prepare_pipeline(
     *,
     version: str,
@@ -3805,23 +3982,11 @@ def prepare_pipeline(
             windows_build_timestamp=windows_build_timestamp,
             evidence_dir=evidence_dir,
         )
-    _run(
-        [
-            str(ninja),
-            "-C",
-            str(out),
-            "-n",
-            "chrome",
-            "mini_installer",
-        ],
-        cwd=source,
-        env=env,
-        timeout=1200,
-        discard_stdout=True,
-    )
-    print(
-        "Ninja dry-run traversed the complete chrome + mini_installer graph "
-        "without missing source-declared inputs"
+    ninja_closure_stats = validate_ninja_input_closure(
+        source,
+        out,
+        ninja,
+        env,
     )
     if evidence_dir is not None:
         (evidence_dir / "resume-input-normalization.json").write_text(
@@ -3879,15 +4044,7 @@ def prepare_pipeline(
             encoding="utf-8",
         )
         (evidence_dir / "ninja-input-closure.json").write_text(
-            json.dumps(
-                {
-                    "dry_run": True,
-                    "targets": ["chrome", "mini_installer"],
-                    "validated": True,
-                },
-                indent=2,
-                sort_keys=True,
-            )
+            json.dumps(ninja_closure_stats, indent=2, sort_keys=True)
             + "\n",
             encoding="utf-8",
         )

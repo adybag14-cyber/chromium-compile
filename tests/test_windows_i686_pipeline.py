@@ -69,8 +69,24 @@ class WindowsI686PipelineTests(unittest.TestCase):
             pipeline.subprocess, "run", return_value=completed
         ) as run:
             pipeline._run(["ninja.exe", "-n", "chrome"], discard_stdout=True)
-        self.assertIs(run.call_args.kwargs["stdout"], pipeline.subprocess.DEVNULL)
+        self.assertIsNot(run.call_args.kwargs["stdout"], pipeline.subprocess.DEVNULL)
         self.assertIs(run.call_args.kwargs["stderr"], pipeline.subprocess.PIPE)
+
+    def test_command_wrapper_preserves_quiet_stdout_tail_on_failure(self):
+        def run(command, **kwargs):
+            kwargs["stdout"].write(b"primary ninja build-stopped reason\n")
+            return pipeline.subprocess.CompletedProcess(
+                command, 1, None, "ninja: error:\n"
+            )
+
+        with mock.patch.object(pipeline.subprocess, "run", side_effect=run):
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError,
+                "primary ninja build-stopped reason",
+            ):
+                pipeline._run(
+                    ["ninja.exe", "-n", "chrome"], discard_stdout=True
+                )
 
     def test_dawn_generator_output_is_confined_to_generated_output_tree(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -847,6 +863,29 @@ class WindowsI686PipelineTests(unittest.TestCase):
             )
         )
 
+        stage_four = pipeline._resolve_checkpoint_migration(
+            "33357533082",
+            version="153.0.8010.12",
+            stage=4,
+        )
+        self.assertIsNotNone(stage_four)
+        self.assertEqual(
+            stage_four.producer_sha,
+            "4bc44f0ba432ca2b3eaeac40811e2533daeb2e98",
+        )
+        self.assertEqual(
+            stage_four.archive_sha256,
+            "c81f702c589404b3f4ffa6bade8db08650f6e8cade30a45b274d8e0740497ce7",
+        )
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "exact approved migration scope"
+        ):
+            pipeline._resolve_checkpoint_migration(
+                "33357533082",
+                version="153.0.8010.12",
+                stage=5,
+            )
+
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
         vs_toolchain = """
 TOOLCHAIN_HASH = 'abc'
@@ -1101,11 +1140,104 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn("normalize_windows_resume_inputs(source)", block)
         self.assertIn("reuse_restored_gn_graph(", block)
         self.assertIn("requires_gn_refresh", block)
-        self.assertIn('"-n",', block)
-        self.assertIn('"chrome",', block)
-        self.assertIn('"mini_installer",', block)
-        self.assertIn("discard_stdout=True", block)
+        self.assertIn("validate_ninja_input_closure(", block)
+        self.assertNotIn("discard_stdout=True", block)
         self.assertIn("ninja-input-closure.json", block)
+
+        closure = source[
+            source.index("def validate_ninja_input_closure(") : source.index(
+                "def prepare_pipeline("
+            )
+        ]
+        self.assertIn('"-n",', closure)
+        self.assertIn('"-t",', closure)
+        self.assertIn('"inputs",', closure)
+        self.assertIn('"missingdeps",', closure)
+        self.assertIn('targets = ["chrome", "mini_installer"]', closure)
+        self.assertIn("progress_databases_unchanged=true", closure)
+
+    def test_read_only_ninja_closure_preserves_progress_databases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            out = source / "out" / pipeline.OUT_NAME
+            out.mkdir(parents=True)
+            ninja_log = out / ".ninja_log"
+            ninja_deps = out / ".ninja_deps"
+            ninja_log.write_text(
+                "# ninja log v6\n1\t2\t3\tobj/a.obj\tdeadbeef\n",
+                encoding="utf-8",
+            )
+            ninja_deps.write_bytes(b"exact dependency database")
+
+            def run(command, **_kwargs):
+                if "inputs" in command:
+                    return pipeline.subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "../../a.cc\nobj/generated.h\n",
+                        "",
+                    )
+                if "missingdeps" in command:
+                    return pipeline.subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "Processed 156605 nodes.\n"
+                        "No missing dependencies on generated files found.\n",
+                        "",
+                    )
+                self.fail(f"Unexpected Ninja closure command: {command}")
+
+            log_before = ninja_log.read_bytes()
+            deps_before = ninja_deps.read_bytes()
+            with mock.patch.object(pipeline, "_run", side_effect=run) as runner:
+                stats = pipeline.validate_ninja_input_closure(
+                    source,
+                    out,
+                    pathlib.Path("ninja.exe"),
+                    {},
+                )
+
+            self.assertEqual(runner.call_count, 2)
+            self.assertEqual(stats["manifest_input_count"], 2)
+            self.assertEqual(stats["dependency_nodes_processed"], 156605)
+            self.assertFalse(stats["build_simulation"])
+            self.assertTrue(stats["state_unchanged"])
+            self.assertEqual(ninja_log.read_bytes(), log_before)
+            self.assertEqual(ninja_deps.read_bytes(), deps_before)
+
+    def test_read_only_ninja_closure_rejects_progress_database_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            out = source / "out" / pipeline.OUT_NAME
+            out.mkdir(parents=True)
+            ninja_log = out / ".ninja_log"
+            ninja_log.write_bytes(b"before")
+
+            def run(command, **_kwargs):
+                ninja_log.write_bytes(b"after")
+                return pipeline.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    (
+                        "../../a.cc\n"
+                        if "inputs" in command
+                        else "Processed 1 nodes.\n"
+                        "No missing dependencies on generated files found.\n"
+                    ),
+                    "",
+                )
+
+            with mock.patch.object(pipeline, "_run", side_effect=run):
+                with self.assertRaisesRegex(
+                    pipeline.WindowsPipelineError,
+                    "changed a progress database",
+                ):
+                    pipeline.validate_ninja_input_closure(
+                        source,
+                        out,
+                        pathlib.Path("ninja.exe"),
+                        {},
+                    )
 
 
 if __name__ == "__main__":
