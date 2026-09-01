@@ -573,6 +573,8 @@ class WindowsI686PipelineTests(unittest.TestCase):
             ), mock.patch.object(
                 pipeline.time, "time", return_value=2_000_000_000
             ), mock.patch.object(
+                pipeline.time, "monotonic", return_value=1_000
+            ), mock.patch.object(
                 pipeline.shutil,
                 "disk_usage",
                 return_value=mock.Mock(free=20 * 1024**3),
@@ -601,6 +603,90 @@ class WindowsI686PipelineTests(unittest.TestCase):
             self.assertEqual(result["ninja_entries_after"], 2)
             self.assertEqual(result["ninja_unique_outputs_before"], 1)
             self.assertEqual(result["ninja_unique_outputs_after"], 1)
+            self.assertEqual(
+                result["ninja_controller_restarts"],
+                pipeline.MAX_NINJA_CONTROLLER_RESTARTS_PER_SLICE,
+            )
+
+    def test_empty_controller_exit_restarts_in_place_before_checkpointing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / "work"
+            out = root / "src/out" / pipeline.OUT_NAME
+            out.mkdir(parents=True)
+            ninja = root / "ninja/ninja.exe"
+            ninja.parent.mkdir()
+            ninja.write_bytes(b"ninja")
+            progress = out / ".ninja_log"
+            progress.write_text(
+                "# ninja log v5\n0\t1\t1\tobj/already-known.obj\taaaa\n",
+                encoding="utf-8",
+            )
+            result_file = root / "build-result.json"
+            calls = 0
+
+            def controller_then_success(command, **kwargs):
+                nonlocal calls
+                calls += 1
+                self.assertEqual(command[1:3], ["-d", "nostatcache"])
+                if calls == 1:
+                    kwargs["progress_log"].write_text(
+                        "# ninja log v5\n"
+                        "0\t1\t1\tobj/already-known.obj\taaaa\n"
+                        "1\t2\t2\tobj/already-known.obj\taaaa\n",
+                        encoding="utf-8",
+                    )
+                    kwargs["output_log"].write_text(
+                        "[1/2576] COPY obj/already-known.obj\n"
+                        "ninja: error: \n"
+                        "ninja: build stopped: .\n",
+                        encoding="utf-8",
+                    )
+                    return 1
+                with kwargs["progress_log"].open("a", encoding="utf-8") as handle:
+                    handle.write("2\t3\t3\tobj/new.obj\tbbbb\n")
+                kwargs["output_log"].write_text(
+                    "ninja: Entering directory `out/Release_x86_win'\n"
+                    "[1/2575] CXX obj/new.obj\n",
+                    encoding="utf-8",
+                )
+                for name in ("chrome.exe", "mini_installer.exe", "chrome.7z"):
+                    (out / name).write_bytes(b"output")
+                return 0
+
+            state = mock.Mock(checkpoint_no_progress_streak=1)
+            with mock.patch.object(
+                pipeline, "validate_work_root", return_value=root
+            ), mock.patch.object(
+                pipeline, "read_prepared_state", return_value=state
+            ), mock.patch.object(
+                pipeline.time, "time", return_value=2_000_000_000
+            ), mock.patch.object(
+                pipeline.time, "monotonic", return_value=1_000
+            ), mock.patch.object(
+                pipeline.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=20 * 1024**3),
+            ), mock.patch.object(
+                pipeline, "run_with_watchdog", side_effect=controller_then_success
+            ) as watchdog:
+                result = pipeline.run_build_slice(
+                    work_root=root,
+                    result_file=result_file,
+                    job_started_at=2_000_000_000,
+                    checkpoint_minutes=30,
+                    stall_minutes=90,
+                    jobs=4,
+                )
+
+            self.assertEqual(watchdog.call_count, 2)
+            self.assertTrue(result["complete"])
+            self.assertEqual(result["status"], 0)
+            self.assertEqual(result["no_progress_streak"], 0)
+            self.assertEqual(result["ninja_controller_restarts"], 1)
+            self.assertEqual(result["ninja_entries_before"], 1)
+            self.assertEqual(result["ninja_entries_after"], 3)
+            self.assertEqual(result["ninja_unique_outputs_before"], 1)
+            self.assertEqual(result["ninja_unique_outputs_after"], 2)
 
     def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
         class Response:
