@@ -465,6 +465,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 pipeline.compiler_slice_timeout_seconds(invalid)
 
     def test_windows_ninja_compile_disables_batched_directory_stat_cache(self):
+        self.assertEqual(pipeline.MAX_NINJA_CONTROLLER_RESTARTS_PER_SLICE, 8)
         self.assertEqual(
             pipeline._windows_ninja_build_command(
                 pathlib.Path("tools/ninja.exe"),
