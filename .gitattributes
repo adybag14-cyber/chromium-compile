@@ -1,0 +1,7 @@
+/.gitattributes text eol=lf
+/.github/actions/chromium-windows-i686-stage/action.yml text eol=lf
+/scripts/chromium_tool_pins.py text eol=lf
+/scripts/chromium_windows_pipeline.py text eol=lf
+/scripts/chromium_windows_runtime.py text eol=lf
+/scripts/ninja_stall_watchdog.py text eol=lf
+/scripts/validate_checkpoint_archive.py text eol=lf

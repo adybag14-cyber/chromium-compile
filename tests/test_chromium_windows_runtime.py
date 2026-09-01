@@ -66,6 +66,35 @@ class WindowsRuntimeTests(unittest.TestCase):
             self.assertEqual(stats["pe32_count"], 4)
             self.assertGreaterEqual(stats["member_count"], 7)
 
+    def test_release_zip_writer_uses_canonical_posix_member_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / runtime.release_root(VERSION)
+            members = {
+                "mini_installer.exe": pe_bytes(),
+                f"Chrome-bin/{VERSION}/chrome.exe": pe_bytes(),
+                f"Chrome-bin/{VERSION}/chrome.dll": pe_bytes(),
+                f"Chrome-bin/{VERSION}/chrome_elf.dll": pe_bytes(),
+                f"Chrome-bin/{VERSION}/icudtl.dat": b"icu",
+                f"Chrome-bin/{VERSION}/resources.pak": b"pak",
+                f"Chrome-bin/{VERSION}/locales/en-US.pak": b"locale",
+            }
+            for relative, data in members.items():
+                path = root.joinpath(*relative.split("/"))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            archive_path = pathlib.Path(temp) / "release.partial"
+
+            stats = runtime.write_release_zip(root, archive_path)
+
+            self.assertEqual(stats["member_count"], len(members))
+            with zipfile.ZipFile(archive_path) as archive:
+                names = [info.filename for info in archive.infolist()]
+            expected = sorted(f"{root.name}/{relative}" for relative in members)
+            self.assertEqual(names, expected)
+            self.assertTrue(all("\\" not in name for name in names))
+            validation = runtime.validate_release_zip(archive_path, VERSION)
+            self.assertEqual(validation["pe32_count"], 4)
+
     def test_release_zip_rejects_wrong_architecture(self):
         with tempfile.TemporaryDirectory() as temp:
             archive = pathlib.Path(temp) / "release.zip"

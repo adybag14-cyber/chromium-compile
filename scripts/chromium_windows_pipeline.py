@@ -59,6 +59,7 @@ from chromium_windows_runtime import (
     smoke_test_runtime,
     validate_release_zip,
     validate_runtime_tree,
+    write_release_zip,
 )
 from ninja_stall_watchdog import (
     STALL_EXIT_CODE,
@@ -380,6 +381,18 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         ),
         windows_cipd_tools_sha256=(
             "66358e99eb0d8d3bdfd3f0117c8edd5098a0f2d7acd10a92b51f0223eeb38176"
+        ),
+    ),
+    "33546924031": CheckpointMigration(
+        run_id="33546924031",
+        version="153.0.8010.12",
+        stage=7,
+        producer_sha="02db14a5c2771d489d2654e90e1939801554d589",
+        port_config_sha256=(
+            "ac006d3c9b55c67ea7e74a07d58a6842eb1a5e6fb1ce9493de53cc186430e317"
+        ),
+        archive_sha256=(
+            "ef831e6deb3fda984e2c1a59574f25ba1a1dd0471d1f9ad5c003ad7b7d833733"
         ),
     ),
 }
@@ -2504,6 +2517,7 @@ def install_source_declared_tools(
 
 
 PORT_CONFIG_FILES = (
+    ".gitattributes",
     "scripts/chromium_tool_pins.py",
     "scripts/chromium_windows_pipeline.py",
     "scripts/chromium_windows_runtime.py",
@@ -4689,14 +4703,7 @@ def package_build(
     manifest = destination / f"chromium-{version}-windows-i686-manifest.txt"
     for path in (package, partial, checksum, manifest):
         path.unlink(missing_ok=True)
-    seven_zip = shutil.which("7z.exe") or shutil.which("7z")
-    if not seven_zip:
-        raise InfrastructureError("7z is unavailable for Windows runtime packaging")
-    _run(
-        [seven_zip, "a", "-tzip", "-mx=7", str(partial), bundle.name],
-        cwd=staging,
-        timeout=DEFAULT_ARCHIVE_TIMEOUT_SECONDS,
-    )
+    write_release_zip(bundle, partial)
     os.replace(partial, package)
     if package.stat().st_size > 16 * 1024**3:
         raise WindowsPipelineError("Windows release ZIP exceeds hard 16 GiB compressed limit")
