@@ -107,7 +107,7 @@ MAX_NINJA_INPUT_CLOSURE_BYTES = 128 * 1024 * 1024
 MAX_NINJA_INPUT_CLOSURE_COUNT = 2_000_000
 MIN_WINDOWS_COMPILER_SLICE_SECONDS = 10 * 60
 WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS = 5 * 60
-WINDOWS_CHECKPOINT_BOUNDARY_LATE_SECONDS = 2 * 60
+NINJA_CONTROLLER_ROTATION_EXIT_CODE = 87
 GITILES_HOST = "chromium.googlesource.com"
 MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
 MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
@@ -316,6 +316,18 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         ),
         archive_sha256=(
             "ace1e90426e6973d8ec4dabef9f73b5e106a9652003bfd2dfcde91723429f392"
+        ),
+    ),
+    "33454594511": CheckpointMigration(
+        run_id="33454594511",
+        version="153.0.8010.12",
+        stage=6,
+        producer_sha="b31d768fa3843489a63e6f4b375ccd77e79a85fe",
+        port_config_sha256=(
+            "fec64b496706536a4e15c1b6dd8b0a72ff40aeaf9e0427994517770cace86e08"
+        ),
+        archive_sha256=(
+            "c0264ff9c1685648502127fb64d1472270a7021670228e6810fb62f060dd9040"
         ),
     ),
 }
@@ -4128,22 +4140,31 @@ def is_empty_ninja_controller_exit(path: Path) -> bool:
     )
 
 
-def normalize_checkpoint_boundary_status(
+def normalize_empty_ninja_controller_status(
     status: int,
     *,
     durable_progress: bool,
-    seconds_until_cutoff: int,
     build_log: Path,
 ) -> int:
+    """Rotate a diagnostic-free Ninja controller failure into a checkpoint.
+
+    A failed build edge is actionable and must remain fatal: Ninja prints a
+    ``FAILED:`` record, the command's diagnostic, and a non-empty stop reason.
+    The pinned Windows Ninja can instead return status 1 after an internal
+    controller/filesystem-start failure with only the exact empty
+    ``ninja: error:`` / ``ninja: build stopped: .`` pair.  That has now occurred
+    both at a checkpoint boundary and well before one.  When the durable Ninja
+    database gained unique outputs, preserve those outputs and let the next
+    bounded stage resume.  A diagnostic, a different status, or no durable
+    progress still fails closed; the existing timeout/stall no-progress policy
+    remains bounded by ``MAX_NO_PROGRESS_STREAK`` in ``run_build_slice``.
+    """
     if (
         status == 1
         and durable_progress
-        and -WINDOWS_CHECKPOINT_BOUNDARY_LATE_SECONDS
-        <= seconds_until_cutoff
-        <= WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS
         and is_empty_ninja_controller_exit(build_log)
     ):
-        return TIMEOUT_EXIT_CODE
+        return NINJA_CONTROLLER_ROTATION_EXIT_CODE
     return status
 
 
@@ -4274,17 +4295,16 @@ def run_build_slice(
     result["ninja_unique_outputs_after"] = unique_after
     durable_progress = unique_after > unique_before
     observed_status = status
-    status = normalize_checkpoint_boundary_status(
+    status = normalize_empty_ninja_controller_status(
         status,
         durable_progress=durable_progress,
-        seconds_until_cutoff=cutoff - int(time.time()),
         build_log=log,
     )
     if status != observed_status:
         print(
-            "::warning::Normalized an empty Ninja controller exit at the "
-            "checkpoint boundary to controlled timeout status 124; durable "
-            "progress will be preserved."
+            "::warning::Rotating an exact diagnostic-free Ninja controller "
+            f"exit into checkpoint status {NINJA_CONTROLLER_ROTATION_EXIT_CODE}; "
+            "durable progress will be preserved."
         )
     result["status"] = status
     if status == 0:
@@ -4304,7 +4324,11 @@ def run_build_slice(
             )
         result["complete"] = True
         result["no_progress_streak"] = 0
-    elif status in {TIMEOUT_EXIT_CODE, STALL_EXIT_CODE}:
+    elif status in {
+        TIMEOUT_EXIT_CODE,
+        STALL_EXIT_CODE,
+        NINJA_CONTROLLER_ROTATION_EXIT_CODE,
+    }:
         streak = 0 if durable_progress else min(prior_streak + 1, MAX_NO_PROGRESS_STREAK)
         result["no_progress_streak"] = streak
         if streak >= MAX_NO_PROGRESS_STREAK:
