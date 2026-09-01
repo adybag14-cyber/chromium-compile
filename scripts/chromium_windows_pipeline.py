@@ -373,7 +373,7 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         stage=7,
         producer_sha="474bfa89b37124a42d0a42ed155230562370c821",
         port_config_sha256=(
-            "9bb677820a9644b4fe4c9910d4b92be744145a235dd460cd32490a322d1fb991"
+            "6d0d942c1bab5a7f7e7ac95c22cbe220d4939f7a27bf6d5fc53cb8fa3a2f28ba"
         ),
         archive_sha256=(
             "bef948bd53b94674350b9db1c0b768d75b2d19dde0557367beb8cd8d526bd452"

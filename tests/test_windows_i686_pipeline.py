@@ -1325,7 +1325,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
         )
         self.assertEqual(
             latest_stage_seven.port_config_sha256,
-            "9bb677820a9644b4fe4c9910d4b92be744145a235dd460cd32490a322d1fb991",
+            "6d0d942c1bab5a7f7e7ac95c22cbe220d4939f7a27bf6d5fc53cb8fa3a2f28ba",
         )
         self.assertEqual(
             latest_stage_seven.archive_sha256,
@@ -1343,6 +1343,99 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 version="153.0.8010.12",
                 stage=8,
             )
+
+    def test_latest_stage_seven_manifest_matches_approved_migration(self):
+        migration = pipeline._resolve_checkpoint_migration(
+            "33525395251",
+            version="153.0.8010.12",
+            stage=7,
+        )
+        self.assertIsNotNone(migration)
+        state = pipeline.PreparedState(
+            schema=pipeline.PREPARED_STATE_SCHEMA,
+            version="153.0.8010.12",
+            source_sha256=(
+                "ec0000939c222665e412c54e84ed8283a0eef179c0ce557a1b4c2ac6f4fdd963"
+            ),
+            chromium_commit="971a7443b0c9b0a9b2860529b33331b76077ec62",
+            chromium_commit_position="refs/branch-heads/8010@{#343}",
+            chromium_commit_timestamp=1_787_689_253,
+            windows_build_timestamp=1_785_646_800,
+            depot_tools_revision="6411ed52842756261c66b6b8ece6b53ade2570f1",
+            gn_version=(
+                "git_revision:e8a8e0932a5e42a99e5896aa58e3b8290f4e5b8c"
+            ),
+            ninja_package="infra/3pp/tools/ninja/",
+            ninja_version="version:3@1.12.1.chromium.4",
+            cpython3_version="version:3@3.11.9.chromium.38",
+            windows_cipd_tools_sha256=(
+                "1cdac2c7f2d7a1de9c23d02a25d95dc4f62535073f57934f730ed25cf7af376e"
+            ),
+            windows_gcs_tools_sha256=(
+                "2cc44e628b57681e4c7d2faa0aa4cd87e012c96d9c7f63b868911ef5b9d4c915"
+            ),
+            windows_git_tools_sha256=(
+                "efb6325923da887d3c3c43ecc2b8b1383529be0a55803d4f24c6d5b1fa0a4df7"
+            ),
+            clang_revision="llvmorg-24-init-3796-g20e97c4b-2",
+            sdk_family="10.0.28000.0",
+            sdk_servicing="10.0.28000.2526",
+            visual_studio_year="2026",
+            visual_studio_version="18.9.12112.369",
+            port_config_hash_schema=pipeline.PORT_CONFIG_HASH_SCHEMA,
+            port_config_sha256="f" * 64,
+            checkpoint_no_progress_streak=0,
+        )
+        proof = {
+            "producer_sha": migration.producer_sha,
+            "run_id": migration.run_id,
+            "run_attempt": 1,
+            "producer_stage": migration.stage,
+        }
+        manifest = {
+            "schema": pipeline.CHECKPOINT_MANIFEST_SCHEMA,
+            "checkpoint_contract_version": pipeline.CHECKPOINT_CONTRACT_VERSION,
+            "target_os": "win",
+            "target_cpu": "x86",
+            "output_root": pipeline.OUT_NAME,
+            "version": state.version,
+            "source_sha256": state.source_sha256,
+            "chromium_commit": state.chromium_commit,
+            "chromium_commit_position": state.chromium_commit_position,
+            "chromium_commit_timestamp": state.chromium_commit_timestamp,
+            "windows_build_timestamp": state.windows_build_timestamp,
+            "depot_tools_revision": state.depot_tools_revision,
+            "gn_version": state.gn_version,
+            "ninja_package": state.ninja_package,
+            "ninja_version": state.ninja_version,
+            "cpython3_version": state.cpython3_version,
+            "windows_cipd_tools_sha256": migration.windows_cipd_tools_sha256,
+            "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
+            "windows_git_tools_sha256": state.windows_git_tools_sha256,
+            "clang_revision": state.clang_revision,
+            "sdk_family": state.sdk_family,
+            "sdk_servicing": state.sdk_servicing,
+            "visual_studio_year": state.visual_studio_year,
+            "visual_studio_version": state.visual_studio_version,
+            "runner_image": "win25-vs2026",
+            "runner_image_version": "20260824.214.3",
+            "resume_input_epoch": pipeline.WINDOWS_RESUME_INPUT_EPOCH,
+            "port_config_hash_schema": state.port_config_hash_schema,
+            "port_config_sha256": migration.port_config_sha256,
+            "github_sha": proof["producer_sha"],
+            "github_run_id": proof["run_id"],
+            "github_run_attempt": proof["run_attempt"],
+            "stage": proof["producer_stage"],
+            "no_progress_streak": 0,
+        }
+        compatibility = pipeline._checkpoint_manifest_matches_state(
+            manifest,
+            state,
+            proof,
+            migration=migration,
+        )
+        self.assertEqual(compatibility.migration_run_id, "33525395251")
+        self.assertFalse(compatibility.requires_gn_refresh)
 
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
         vs_toolchain = """
