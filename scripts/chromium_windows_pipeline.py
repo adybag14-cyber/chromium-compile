@@ -137,6 +137,7 @@ TRUSTED_EXECUTABLE_BASENAMES = frozenset(
     (
         "7z",
         "7z.exe",
+        "7za.exe",
         "bindgen.exe",
         "cargo.exe",
         "clang-cl.exe",

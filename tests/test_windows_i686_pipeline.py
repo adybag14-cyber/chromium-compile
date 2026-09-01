@@ -63,6 +63,18 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 pipeline._run(["attacker-controlled.exe", "argument"])
         run.assert_not_called()
 
+    def test_command_wrapper_allows_pinned_7za_preflight(self):
+        completed = pipeline.subprocess.CompletedProcess(
+            ["7za.exe", "i"], 0, None, ""
+        )
+        with mock.patch.object(
+            pipeline.subprocess, "run", return_value=completed
+        ) as run:
+            result = pipeline._run(["7za.exe", "i"])
+        self.assertEqual(result.returncode, 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["7za.exe", "i"])
+
     def test_command_wrapper_can_quietly_discard_large_dry_run_output(self):
         completed = pipeline.subprocess.CompletedProcess(["ninja.exe"], 0, None, "")
         with mock.patch.object(
