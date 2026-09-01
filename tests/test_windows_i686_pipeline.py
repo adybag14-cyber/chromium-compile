@@ -464,7 +464,26 @@ class WindowsI686PipelineTests(unittest.TestCase):
             ):
                 pipeline.compiler_slice_timeout_seconds(invalid)
 
-    def test_empty_ninja_controller_exit_with_progress_rotates_at_any_time(self):
+    def test_windows_ninja_compile_disables_batched_directory_stat_cache(self):
+        self.assertEqual(
+            pipeline._windows_ninja_build_command(
+                pathlib.Path("tools/ninja.exe"),
+                pathlib.Path("out/Release_x86_win"),
+                4,
+            ),
+            [
+                str(pathlib.Path("tools/ninja.exe")),
+                "-d",
+                "nostatcache",
+                "-C",
+                str(pathlib.Path("out/Release_x86_win")),
+                "-j4",
+                "chrome",
+                "mini_installer",
+            ],
+        )
+
+    def test_empty_ninja_controller_exit_routes_by_durable_progress(self):
         with tempfile.TemporaryDirectory() as temp:
             log = pathlib.Path(temp) / "build.log"
             log.write_text(
@@ -482,19 +501,22 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 ),
                 pipeline.NINJA_CONTROLLER_ROTATION_EXIT_CODE,
             )
-            for status, progress in (
-                (2, True),
-                (1, False),
-            ):
-                with self.subTest(status=status, progress=progress):
-                    self.assertEqual(
-                        pipeline.normalize_empty_ninja_controller_status(
-                            status,
-                            durable_progress=progress,
-                            build_log=log,
-                        ),
-                        status,
-                    )
+            self.assertEqual(
+                pipeline.normalize_empty_ninja_controller_status(
+                    1,
+                    durable_progress=False,
+                    build_log=log,
+                ),
+                pipeline.NINJA_CONTROLLER_RETRY_EXIT_CODE,
+            )
+            self.assertEqual(
+                pipeline.normalize_empty_ninja_controller_status(
+                    2,
+                    durable_progress=True,
+                    build_log=log,
+                ),
+                2,
+            )
 
             log.write_text(
                 "FAILED: obj/chrome/example.obj\n"
@@ -512,6 +534,73 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_empty_controller_exit_without_unique_progress_requests_fresh_runner(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / "work"
+            out = root / "src/out" / pipeline.OUT_NAME
+            out.mkdir(parents=True)
+            ninja = root / "ninja/ninja.exe"
+            ninja.parent.mkdir()
+            ninja.write_bytes(b"ninja")
+            progress = out / ".ninja_log"
+            progress.write_text(
+                "# ninja log v5\n0\t1\t1\tobj/already-known.obj\taaaa\n",
+                encoding="utf-8",
+            )
+            result_file = root / "build-result.json"
+
+            def controller_exit(_command, **kwargs):
+                kwargs["progress_log"].write_text(
+                    "# ninja log v5\n"
+                    "0\t1\t1\tobj/already-known.obj\taaaa\n"
+                    "1\t2\t2\tobj/already-known.obj\taaaa\n",
+                    encoding="utf-8",
+                )
+                kwargs["output_log"].write_text(
+                    "[1/2576] COPY obj/already-known.obj\n"
+                    "ninja: error: \n"
+                    "ninja: build stopped: .\n",
+                    encoding="utf-8",
+                )
+                return 1
+
+            state = mock.Mock(checkpoint_no_progress_streak=1)
+            with mock.patch.object(
+                pipeline, "validate_work_root", return_value=root
+            ), mock.patch.object(
+                pipeline, "read_prepared_state", return_value=state
+            ), mock.patch.object(
+                pipeline.time, "time", return_value=2_000_000_000
+            ), mock.patch.object(
+                pipeline.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=20 * 1024**3),
+            ), mock.patch.object(
+                pipeline, "run_with_watchdog", side_effect=controller_exit
+            ):
+                with self.assertRaisesRegex(
+                    pipeline.InfrastructureError, "fresh-runner retry"
+                ):
+                    pipeline.run_build_slice(
+                        work_root=root,
+                        result_file=result_file,
+                        job_started_at=2_000_000_000,
+                        checkpoint_minutes=30,
+                        stall_minutes=90,
+                        jobs=4,
+                    )
+
+            result = json.loads(result_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                result["status"], pipeline.NINJA_CONTROLLER_RETRY_EXIT_CODE
+            )
+            self.assertEqual(result["failure_class"], "infrastructure")
+            self.assertEqual(result["no_progress_streak"], 1)
+            self.assertEqual(result["ninja_entries_before"], 1)
+            self.assertEqual(result["ninja_entries_after"], 2)
+            self.assertEqual(result["ninja_unique_outputs_before"], 1)
+            self.assertEqual(result["ninja_unique_outputs_after"], 1)
 
     def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
         class Response:
@@ -991,6 +1080,33 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 "33454594511",
                 version="153.0.8010.12",
                 stage=7,
+            )
+
+        stage_seven = pipeline._resolve_checkpoint_migration(
+            "33502755381",
+            version="153.0.8010.12",
+            stage=7,
+        )
+        self.assertIsNotNone(stage_seven)
+        self.assertEqual(
+            stage_seven.producer_sha,
+            "08d73b9dfb715ede3c05c77158bc52d8dccf6a6b",
+        )
+        self.assertEqual(
+            stage_seven.port_config_sha256,
+            "7754ab4a089b72c33a35a0686377ae343eae6e188d73d26b5c32fda6e5c9b918",
+        )
+        self.assertEqual(
+            stage_seven.archive_sha256,
+            "e066c261980fafb4ec8c086edcf93090d0ce0fbe24c8f2c08238472e7acf3dd5",
+        )
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "exact approved migration scope"
+        ):
+            pipeline._resolve_checkpoint_migration(
+                "33502755381",
+                version="153.0.8010.12",
+                stage=8,
             )
 
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
