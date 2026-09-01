@@ -109,7 +109,10 @@ MIN_WINDOWS_COMPILER_SLICE_SECONDS = 10 * 60
 WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS = 5 * 60
 NINJA_CONTROLLER_ROTATION_EXIT_CODE = 87
 NINJA_CONTROLLER_RETRY_EXIT_CODE = 88
-MAX_NINJA_CONTROLLER_RESTARTS_PER_SLICE = 3
+# The restored tab-strip generator has three COPY destinations. Production
+# evidence showed that a destination can require two controller passes before
+# Ninja advances, so allow two full passes plus a bounded margin.
+MAX_NINJA_CONTROLLER_RESTARTS_PER_SLICE = 8
 GITILES_HOST = "chromium.googlesource.com"
 MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
 MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
