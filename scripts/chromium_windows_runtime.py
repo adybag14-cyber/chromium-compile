@@ -94,6 +94,18 @@ def _safe_member_name(name: str, *, expected_root: str | None = None) -> str:
     return normal
 
 
+def _safe_7z_member_name(name: str) -> str:
+    """Canonicalize 7-Zip's Windows listing separator before validation.
+
+    The ``7z l -slt`` output uses native ``\\`` separators on Windows even for
+    ordinary contained archive members. Interpret those separators, then run
+    the same drive, absolute-path, traversal, device-name, ADS, and ambiguity
+    checks used for canonical POSIX archive names. Release ZIP validation stays
+    strict and continues to reject backslashes outright.
+    """
+    return _safe_member_name(name.replace("\\", "/"))
+
+
 def _read_exact(handle: BinaryIO, size: int, context: str) -> bytes:
     data = handle.read(size)
     if len(data) != size:
@@ -309,7 +321,7 @@ def list_7z_runtime(
     for index, record in enumerate(records, 1):
         if index > max_members:
             raise WindowsRuntimeError(f"Runtime 7z exceeds member limit {max_members}")
-        name = _safe_member_name(record["Path"])
+        name = _safe_7z_member_name(record["Path"])
         if name in seen:
             raise WindowsRuntimeError(f"Duplicate runtime 7z member: {name}")
         folded = name.casefold()

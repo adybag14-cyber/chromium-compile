@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).parents[1]
 PATH = ROOT / "scripts" / "chromium_windows_runtime.py"
@@ -130,6 +131,40 @@ class WindowsRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(records[0]["Path"], "Chrome-bin/a=b.pak")
         self.assertEqual(records[0]["Size"], "7")
+
+    def test_7z_listing_accepts_contained_windows_separators(self):
+        listing = (
+            f"Path = Chrome-bin\\{VERSION}\nSize = 0\nAttributes = D\n\n"
+            f"Path = Chrome-bin\\{VERSION}\\chrome.exe\n"
+            "Size = 512\nAttributes = A\n\n"
+        )
+        completed = runtime.subprocess.CompletedProcess(
+            ["7z", "l"],
+            0,
+            listing,
+            "",
+        )
+        with mock.patch.object(runtime.subprocess, "run", return_value=completed):
+            stats = runtime.list_7z_runtime(pathlib.Path("chrome.7z"))
+        self.assertEqual(stats, {"member_count": 2, "unpacked_bytes": 512})
+        self.assertEqual(
+            runtime._safe_7z_member_name(
+                f"Chrome-bin\\{VERSION}\\locales\\en-US.pak"
+            ),
+            f"Chrome-bin/{VERSION}/locales/en-US.pak",
+        )
+
+    def test_7z_listing_rejects_windows_escape_forms(self):
+        for value in (
+            "..\\escape.exe",
+            "C:\\escape.exe",
+            "\\\\server\\share\\escape.exe",
+            "\\absolute.exe",
+            "folder\\NUL.txt",
+            "folder\\file.txt:stream",
+        ):
+            with self.subTest(value=value), self.assertRaises(runtime.WindowsRuntimeError):
+                runtime._safe_7z_member_name(value)
 
     def test_safe_member_rejects_windows_drive_and_backslash(self):
         for value in (
