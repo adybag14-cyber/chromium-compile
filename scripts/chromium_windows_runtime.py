@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -12,6 +13,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Sequence
@@ -492,6 +496,45 @@ def _terminate_windows_tree(proc: subprocess.Popen[str]) -> None:
         proc.kill()
 
 
+def _read_devtools_port(path: Path) -> int | None:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="strict").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    if not lines or not re.fullmatch(r"[1-9][0-9]{0,4}", lines[0]):
+        return None
+    port = int(lines[0])
+    return port if port <= 65535 else None
+
+
+def _read_devtools_json(port: int, path: str) -> object:
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise WindowsRuntimeError(f"Invalid Chrome DevTools port: {port!r}")
+    if not path.startswith("/json/") or len(path) > 200 or any(
+        character in path for character in "\r\n"
+    ):
+        raise WindowsRuntimeError(f"Invalid Chrome DevTools path: {path!r}")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        headers={"Connection": "close"},
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        payload = response.read(1024 * 1024 + 1)
+    if len(payload) > 1024 * 1024:
+        raise WindowsRuntimeError("Chrome DevTools response exceeds 1 MiB")
+    return json.loads(payload.decode("utf-8", "strict"))
+
+
+def _read_log_tail(path: Path, limit: int = 4000) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - limit))
+            return handle.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
 def smoke_test_runtime(root: Path, *, timeout_seconds: int = 120) -> None:
     if os.name != "nt":
         raise WindowsRuntimeError("Windows runtime smoke must run on a Windows host")
@@ -506,6 +549,9 @@ def smoke_test_runtime(root: Path, *, timeout_seconds: int = 120) -> None:
     validate_pe32(chrome)
     marker = "chromium-windows-i686-runtime-smoke"
     with tempfile.TemporaryDirectory(prefix="chromium-win32-smoke-") as user_data:
+        user_data_path = Path(user_data)
+        log_path = user_data_path / "chrome-smoke.log"
+        local_page = f"data:text/html,<title>{marker}</title><p>{marker}</p>"
         command = [
             str(chrome),
             "--headless=new",
@@ -521,48 +567,63 @@ def smoke_test_runtime(root: Path, *, timeout_seconds: int = 120) -> None:
             "--disable-extensions",
             "--disable-sync",
             "--metrics-recording-only",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=0",
             f"--user-data-dir={user_data}",
-            "--dump-dom",
-            f"data:text/html,<title>{marker}</title><p>{marker}</p>",
+            local_page,
         ]
-        proc = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=chrome.parent,
-        )
-        try:
-            output, _ = proc.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            _terminate_windows_tree(proc)
+        rendered = False
+        observed_status: int | None = None
+        last_devtools_error = ""
+        deadline = time.monotonic() + timeout_seconds
+        with log_path.open("wb") as output_log:
+            proc = subprocess.Popen(
+                command,
+                stdout=output_log,
+                stderr=subprocess.STDOUT,
+                cwd=chrome.parent,
+            )
             try:
-                output, _ = proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                output, _ = proc.communicate(timeout=30)
-            output = output or ""
-            if marker in output:
-                print(
-                    "::warning::Chromium rendered the local smoke marker but "
-                    f"did not exit within {timeout_seconds} seconds; terminated "
-                    "only its exact PID tree after successful rendering."
-                )
-                return
+                while time.monotonic() < deadline:
+                    observed_status = proc.poll()
+                    if observed_status is not None:
+                        break
+                    port = _read_devtools_port(user_data_path / "DevToolsActivePort")
+                    if port is not None:
+                        try:
+                            targets = _read_devtools_json(port, "/json/list")
+                            if isinstance(targets, list) and any(
+                                isinstance(target, dict)
+                                and target.get("type") == "page"
+                                and target.get("title") == marker
+                                for target in targets
+                            ):
+                                rendered = True
+                                break
+                        except (
+                            OSError,
+                            UnicodeError,
+                            ValueError,
+                            urllib.error.URLError,
+                            WindowsRuntimeError,
+                        ) as exc:
+                            last_devtools_error = f"{type(exc).__name__}: {exc}"[-500:]
+                    time.sleep(0.25)
+            finally:
+                _terminate_windows_tree(proc)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=30)
+        output = _read_log_tail(log_path)
+        if not rendered:
             raise WindowsRuntimeError(
-                f"Chromium headless smoke exceeded {timeout_seconds} seconds "
-                f"without rendering the local marker: {output[-4000:]}"
-            ) from exc
-    if proc.returncode != 0:
-        raise WindowsRuntimeError(
-            f"Chromium headless smoke failed with exit {proc.returncode}: {output[-4000:]}"
-        )
-    if marker not in output:
-        raise WindowsRuntimeError(
-            "Chromium headless smoke returned success without rendering the local marker"
-        )
+                "Chromium headless DevTools smoke did not render the local marker "
+                f"within {timeout_seconds} seconds; process_status={observed_status}; "
+                f"last_devtools_error={last_devtools_error!r}; output={output}"
+            )
+    print("Chromium headless DevTools smoke rendered the local marker")
 
 
 def sha256_file(path: Path) -> str:
