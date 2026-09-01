@@ -108,6 +108,7 @@ MAX_NINJA_INPUT_CLOSURE_COUNT = 2_000_000
 MIN_WINDOWS_COMPILER_SLICE_SECONDS = 10 * 60
 WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS = 5 * 60
 NINJA_CONTROLLER_ROTATION_EXIT_CODE = 87
+NINJA_CONTROLLER_RETRY_EXIT_CODE = 88
 GITILES_HOST = "chromium.googlesource.com"
 MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
 MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
@@ -328,6 +329,18 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         ),
         archive_sha256=(
             "c0264ff9c1685648502127fb64d1472270a7021670228e6810fb62f060dd9040"
+        ),
+    ),
+    "33502755381": CheckpointMigration(
+        run_id="33502755381",
+        version="153.0.8010.12",
+        stage=7,
+        producer_sha="08d73b9dfb715ede3c05c77158bc52d8dccf6a6b",
+        port_config_sha256=(
+            "7754ab4a089b72c33a35a0686377ae343eae6e188d73d26b5c32fda6e5c9b918"
+        ),
+        archive_sha256=(
+            "e066c261980fafb4ec8c086edcf93090d0ce0fbe24c8f2c08238472e7acf3dd5"
         ),
     ),
 }
@@ -4155,16 +4168,14 @@ def normalize_empty_ninja_controller_status(
     ``ninja: error:`` / ``ninja: build stopped: .`` pair.  That has now occurred
     both at a checkpoint boundary and well before one.  When the durable Ninja
     database gained unique outputs, preserve those outputs and let the next
-    bounded stage resume.  A diagnostic, a different status, or no durable
-    progress still fails closed; the existing timeout/stall no-progress policy
-    remains bounded by ``MAX_NO_PROGRESS_STREAK`` in ``run_build_slice``.
+    bounded stage resume.  If no new unique output was recorded, preserve the
+    checkpoint but route the failure through the workflow's bounded fresh-runner
+    retry policy.  A real diagnostic or a different status still fails closed.
     """
-    if (
-        status == 1
-        and durable_progress
-        and is_empty_ninja_controller_exit(build_log)
-    ):
-        return NINJA_CONTROLLER_ROTATION_EXIT_CODE
+    if status == 1 and is_empty_ninja_controller_exit(build_log):
+        if durable_progress:
+            return NINJA_CONTROLLER_ROTATION_EXIT_CODE
+        return NINJA_CONTROLLER_RETRY_EXIT_CODE
     return status
 
 
@@ -4192,6 +4203,26 @@ def compiler_slice_timeout_seconds(remaining_seconds: int) -> int:
     if remaining_seconds <= minimum_budget:
         return 0
     return remaining_seconds - WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS
+
+
+def _windows_ninja_build_command(ninja: Path, out: Path, jobs: int) -> list[str]:
+    """Build with fresh Windows directory stats instead of Ninja's batch cache.
+
+    The diagnostic-free controller failures occur while Ninja is selecting the
+    next edge, including immediately after a successful COPY.  Ninja's Windows
+    ``nostatcache`` mode avoids reusing batched directory metadata across that
+    edge transition while leaving the durable build/dependency logs intact.
+    """
+    return [
+        str(ninja),
+        "-d",
+        "nostatcache",
+        "-C",
+        str(out),
+        f"-j{jobs}",
+        "chrome",
+        "mini_installer",
+    ]
 
 
 def run_build_slice(
@@ -4260,14 +4291,7 @@ def run_build_slice(
     env["PATH"] = os.pathsep.join(
         (str(depot), str(depot / ".cipd_bin"), env.get("PATH", ""))
     )
-    command = [
-        str(ninja),
-        "-C",
-        str(out),
-        f"-j{jobs}",
-        "chrome",
-        "mini_installer",
-    ]
+    command = _windows_ninja_build_command(ninja, out, jobs)
     stall_marker = work_root / "ninja-stall.marker"
     print(
         "Starting bounded Ninja compiler slice with a reserved checkpoint "
@@ -4301,12 +4325,34 @@ def run_build_slice(
         build_log=log,
     )
     if status != observed_status:
-        print(
-            "::warning::Rotating an exact diagnostic-free Ninja controller "
-            f"exit into checkpoint status {NINJA_CONTROLLER_ROTATION_EXIT_CODE}; "
-            "durable progress will be preserved."
-        )
+        if status == NINJA_CONTROLLER_ROTATION_EXIT_CODE:
+            print(
+                "::warning::Rotating an exact diagnostic-free Ninja controller "
+                f"exit into checkpoint status {NINJA_CONTROLLER_ROTATION_EXIT_CODE}; "
+                "durable progress will be preserved."
+            )
+        else:
+            print(
+                "::warning::An exact diagnostic-free Ninja controller exit made "
+                "no new unique-output progress; preserving the checkpoint for a "
+                "bounded fresh-runner retry."
+            )
     result["status"] = status
+    if status == NINJA_CONTROLLER_RETRY_EXIT_CODE:
+        result["failure_class"] = "infrastructure"
+        # Controller retries are bounded by CHROMIUM_WINDOWS_RUNNER_RETRIES.
+        # Preserve (rather than increment) the compiler no-progress streak so
+        # an interrupted controller is not mislabeled as two healthy slices
+        # that ran to their timeout without producing work.
+        result["no_progress_streak"] = prior_streak
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        result_file.write_text(
+            json.dumps(result, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        raise InfrastructureError(
+            "Diagnostic-free Windows Ninja controller exit requires a bounded "
+            "fresh-runner retry"
+        )
     if status == 0:
         required = (
             out / "chrome.exe",
