@@ -9,7 +9,7 @@ from unittest import mock
 MODULE_PATH=pathlib.Path(__file__).parents[1]/"scripts"/"github_release_tag.py"
 SPEC=importlib.util.spec_from_file_location("github_release_tag",MODULE_PATH); assert SPEC and SPEC.loader
 tag_state=importlib.util.module_from_spec(SPEC); sys.modules[SPEC.name]=tag_state; SPEC.loader.exec_module(tag_state)
-SHA="a"*40; OTHER_SHA="b"*40; TAG="chromium-151.0.7922.108-linux-i686"
+SHA="a"*40; OTHER_SHA="b"*40; TAG="chromium-151.0.7922.108-linux-i686"; WINDOWS_TAG="chromium-151.0.7922.108-windows-i686"
 
 def cp(payload, rc=0, err=""):
     out=json.dumps(payload) if not isinstance(payload,str) else payload
@@ -37,6 +37,11 @@ class ReleaseTagTests(unittest.TestCase):
     def test_existing_exact_tag_is_accepted_without_write(self):
         with mock.patch.object(tag_state,"resolve_tag_commit",return_value=SHA), mock.patch.object(tag_state,"_run_gh") as run:
             self.assertEqual(tag_state.ensure_exact_tag("owner/repo",TAG,SHA,"token"),"already-exact")
+        run.assert_not_called()
+
+    def test_windows_tag_uses_the_same_exact_commit_contract(self):
+        with mock.patch.object(tag_state,"resolve_tag_commit",return_value=SHA), mock.patch.object(tag_state,"_run_gh") as run:
+            self.assertEqual(tag_state.ensure_exact_tag("owner/repo",WINDOWS_TAG,SHA,"token"),"already-exact")
         run.assert_not_called()
 
     def test_existing_wrong_tag_fails_before_write(self):
@@ -67,6 +72,7 @@ class ReleaseTagTests(unittest.TestCase):
     def test_inputs_are_strict(self):
         with self.assertRaises(ValueError): tag_state.ensure_exact_tag("bad repo",TAG,SHA,"token")
         with self.assertRaises(ValueError): tag_state.ensure_exact_tag("owner/repo","v1",SHA,"token")
+        with self.assertRaises(ValueError): tag_state.ensure_exact_tag("owner/repo","chromium-151.0.7922.108-macos-i686",SHA,"token")
         with self.assertRaises(ValueError): tag_state.ensure_exact_tag("owner/repo",TAG,"short","token")
         with self.assertRaises(tag_state.TagStateError): tag_state.ensure_exact_tag("owner/repo",TAG,SHA,"")
 
