@@ -87,7 +87,15 @@ CHECKPOINT_MANIFEST_SCHEMA = 5
 PREPARED_STATE_SCHEMA = 5
 PORT_CONFIG_HASH_SCHEMA = 1
 MAX_NO_PROGRESS_STREAK = 2
-WINDOWS_RESUME_INPUT_EPOCH = 946_684_800
+# Ninja 1.12's native Windows Stat implementation converts FILETIME values by
+# subtracting an internal epoch at 2000-12-31 21:06:40 UTC. Earlier timestamps
+# become negative, which Ninja reserves for Stat errors; because that conversion
+# does not populate an error string, the user-visible result is exactly
+# ``ninja: error:`` followed by ``ninja: build stopped: .``. Keep Windows resume
+# inputs comfortably above that boundary while still well behind build outputs.
+WINDOWS_LEGACY_RESUME_INPUT_EPOCH = 946_684_800
+WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH = 978_296_800
+WINDOWS_RESUME_INPUT_EPOCH = 1_262_304_000
 DEFAULT_MIN_WORK_GIB = 70
 DEFAULT_SOURCE_RESERVE_GIB = 25
 DEFAULT_CHECKPOINT_RESERVE_GIB = 12
@@ -280,6 +288,7 @@ class CheckpointMigration:
     producer_sha: str
     port_config_sha256: str
     archive_sha256: str
+    resume_input_epoch: int | None = None
 
 
 # Immutable bridges preserve already-proven compiler output across narrowly
@@ -298,6 +307,7 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         archive_sha256=(
             "6f124bee59ed5693db7a0477f91ad57330f990cc0f32aa43fe0e9cabb426e058"
         ),
+        resume_input_epoch=WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
     ),
     "33357533082": CheckpointMigration(
         run_id="33357533082",
@@ -310,6 +320,7 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         archive_sha256=(
             "c81f702c589404b3f4ffa6bade8db08650f6e8cade30a45b274d8e0740497ce7"
         ),
+        resume_input_epoch=WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
     ),
     "33390506701": CheckpointMigration(
         run_id="33390506701",
@@ -322,6 +333,7 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         archive_sha256=(
             "ace1e90426e6973d8ec4dabef9f73b5e106a9652003bfd2dfcde91723429f392"
         ),
+        resume_input_epoch=WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
     ),
     "33454594511": CheckpointMigration(
         run_id="33454594511",
@@ -334,6 +346,7 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         archive_sha256=(
             "c0264ff9c1685648502127fb64d1472270a7021670228e6810fb62f060dd9040"
         ),
+        resume_input_epoch=WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
     ),
     "33502755381": CheckpointMigration(
         run_id="33502755381",
@@ -346,6 +359,7 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         archive_sha256=(
             "e066c261980fafb4ec8c086edcf93090d0ce0fbe24c8f2c08238472e7acf3dd5"
         ),
+        resume_input_epoch=WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
     ),
 }
 
@@ -1037,7 +1051,7 @@ def normalize_windows_resume_inputs(
     epoch = bounded_int(
         epoch,
         "Windows resume input epoch",
-        minimum=0,
+        minimum=WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH + 1,
         maximum=int(time.time()),
     )
     if not source.is_dir() or source.is_symlink():
@@ -1184,6 +1198,104 @@ def normalize_windows_resume_inputs(
         "Normalized immutable Windows source/tool mtimes before checkpoint restore: "
         f"epoch={epoch}; files={file_count}; directories={directory_count}; "
         f"symlinks={symlink_count}; elapsed_ms={elapsed_ms}"
+    )
+    return stats
+
+
+def rebase_windows_ninja_unsafe_output_mtimes(
+    out: Path,
+    *,
+    safe_epoch: int = WINDOWS_RESUME_INPUT_EPOCH,
+) -> dict[str, int]:
+    """Move restored output mtimes out of Ninja's reserved error range.
+
+    Chromium's Windows ``copy`` rule uses ``shutil.copy2``, so generated files
+    can legitimately retain the resume-input epoch. Checkpoints written before
+    the Windows-safe epoch repair therefore contain output files dated
+    2000-01-01. Native Windows Ninja maps those FILETIMEs to negative values and
+    treats them as failed Stat calls. Rebase only timestamps in that unsafe
+    range; completed compiler outputs and both Ninja progress databases keep
+    their original contents and timestamps.
+    """
+    safe_epoch = bounded_int(
+        safe_epoch,
+        "Windows Ninja-safe output epoch",
+        minimum=WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH + 1,
+        maximum=int(time.time()),
+    )
+    if not out.is_dir() or out.is_symlink():
+        raise WindowsPipelineError(
+            f"Restored Windows output is unavailable for timestamp repair: {out}"
+        )
+
+    unsafe_ns = WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH * 1_000_000_000
+    safe_ns = safe_epoch * 1_000_000_000
+    progress_databases = {out / ".ninja_log", out / ".ninja_deps"}
+    directories: list[Path] = []
+    files_rebased = 0
+    directories_rebased = 0
+    symlinks_skipped = 0
+    started = time.monotonic()
+
+    def rebase(path: Path, *, directory: bool) -> None:
+        nonlocal files_rebased, directories_rebased, symlinks_skipped
+        if path.is_symlink():
+            symlinks_skipped += 1
+            return
+        try:
+            if path.stat().st_mtime_ns <= unsafe_ns:
+                os.utime(path, ns=(safe_ns, safe_ns))
+                if directory:
+                    directories_rebased += 1
+                else:
+                    files_rebased += 1
+        except OSError as exc:
+            raise InfrastructureError(
+                f"Could not rebase Ninja-unsafe restored output mtime: {path}: {exc}"
+            ) from exc
+
+    for root, directory_names, file_names in os.walk(
+        out, topdown=True, followlinks=False
+    ):
+        root_path = Path(root)
+        traversable: list[str] = []
+        for name in directory_names:
+            path = root_path / name
+            if path.is_symlink():
+                symlinks_skipped += 1
+            else:
+                traversable.append(name)
+        directory_names[:] = traversable
+        for name in file_names:
+            path = root_path / name
+            if path in progress_databases:
+                continue
+            rebase(path, directory=False)
+        directories.append(root_path)
+
+    # Child creation/extraction can update parent directory mtimes, so repair
+    # directories last just like the immutable-input normalization pass.
+    for directory in reversed(directories):
+        rebase(directory, directory=True)
+
+    stats = {
+        "ninja_timestamp_zero_epoch": WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH,
+        "safe_epoch": safe_epoch,
+        "files_rebased": files_rebased,
+        "directories_rebased": directories_rebased,
+        "symlinks_skipped": symlinks_skipped,
+        "progress_databases_preserved": sum(
+            path.is_file() and not path.is_symlink()
+            for path in progress_databases
+        ),
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+    print(
+        "Rebased Ninja-unsafe restored Windows output mtimes: "
+        f"files={files_rebased}; directories={directories_rebased}; "
+        f"symlinks_skipped={symlinks_skipped}; safe_epoch={safe_epoch}; "
+        f"progress_databases_preserved={stats['progress_databases_preserved']}; "
+        f"elapsed_ms={stats['elapsed_ms']}"
     )
     return stats
 
@@ -3341,7 +3453,11 @@ def _checkpoint_manifest_matches_state(
         "clang_revision": state.clang_revision,
         "sdk_family": state.sdk_family,
         "visual_studio_year": state.visual_studio_year,
-        "resume_input_epoch": WINDOWS_RESUME_INPUT_EPOCH,
+        "resume_input_epoch": (
+            migration.resume_input_epoch
+            if migration and migration.resume_input_epoch is not None
+            else WINDOWS_RESUME_INPUT_EPOCH
+        ),
         "port_config_hash_schema": state.port_config_hash_schema,
         "port_config_sha256": (
             migration.port_config_sha256 if migration else state.port_config_sha256
@@ -3457,6 +3573,13 @@ def _resolve_checkpoint_migration(
         migration.archive_sha256,
         "approved migration archive SHA-256",
     )
+    if migration.resume_input_epoch is not None:
+        bounded_int(
+            migration.resume_input_epoch,
+            "approved migration resume input epoch",
+            minimum=0,
+            maximum=int(time.time()),
+        )
     return migration
 
 
@@ -3944,6 +4067,7 @@ def prepare_pipeline(
 
     checkpoint_archive: Path | None = None
     checkpoint_compatibility = CheckpointCompatibility(0, False, ())
+    resume_output_rebase_stats: dict[str, int] | None = None
     if preferred_run_id or fallback_run_id:
         if not (repository and expected_ref and expected_sha):
             raise WindowsPipelineError(
@@ -3962,6 +4086,9 @@ def prepare_pipeline(
         )
         if checkpoint_archive is not None:
             restore_checkpoint(checkpoint_archive, source=source)
+            resume_output_rebase_stats = rebase_windows_ninja_unsafe_output_mtimes(
+                source / "out" / OUT_NAME
+            )
             state = PreparedState(
                 **{
                     **asdict(state),
@@ -4007,6 +4134,16 @@ def prepare_pipeline(
             json.dumps(resume_input_stats, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        if resume_output_rebase_stats is not None:
+            (evidence_dir / "resume-output-timestamp-rebase.json").write_text(
+                json.dumps(
+                    resume_output_rebase_stats,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         dawn_generator_stats = validate_dawn_source_generator(
             source, out, gn, ninja, env
         )

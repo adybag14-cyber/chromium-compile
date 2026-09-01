@@ -171,6 +171,72 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 )
                 self.assertEqual(stats["symlinks"], 1)
 
+    def test_windows_resume_epoch_is_above_native_ninja_error_boundary(self):
+        self.assertLessEqual(
+            pipeline.WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
+            pipeline.WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH,
+        )
+        self.assertGreater(
+            pipeline.WINDOWS_RESUME_INPUT_EPOCH,
+            pipeline.WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            source.mkdir()
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError,
+                "Windows resume input epoch must be between",
+            ):
+                pipeline.normalize_windows_resume_inputs(
+                    source,
+                    epoch=pipeline.WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
+                )
+
+    def test_restored_windows_output_rebases_only_ninja_unsafe_mtimes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = pathlib.Path(temp) / pipeline.OUT_NAME
+            unsafe_output = out / "gen/copied.ts"
+            safe_output = out / "obj/already-built.obj"
+            ninja_log = out / ".ninja_log"
+            ninja_deps = out / ".ninja_deps"
+            unsafe_output.parent.mkdir(parents=True)
+            safe_output.parent.mkdir(parents=True)
+            unsafe_output.write_text("copied\n", encoding="utf-8")
+            safe_output.write_bytes(b"compiled")
+            ninja_log.write_text(
+                "# ninja log v5\n1\t2\t3\tobj/already-built.obj\tdeadbeef\n",
+                encoding="utf-8",
+            )
+            ninja_deps.write_bytes(b"exact dependency database")
+            safe_ns = 1_700_000_000_123_456_700
+            legacy_ns = pipeline.WINDOWS_LEGACY_RESUME_INPUT_EPOCH * 1_000_000_000
+            pipeline.os.utime(unsafe_output, ns=(legacy_ns, legacy_ns))
+            pipeline.os.utime(safe_output, ns=(safe_ns, safe_ns))
+            pipeline.os.utime(ninja_log, ns=(legacy_ns, legacy_ns))
+            pipeline.os.utime(ninja_deps, ns=(legacy_ns, legacy_ns))
+            for directory in (unsafe_output.parent, safe_output.parent, out):
+                pipeline.os.utime(directory, ns=(legacy_ns, legacy_ns))
+            protected = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (safe_output, ninja_log, ninja_deps)
+            }
+
+            stats = pipeline.rebase_windows_ninja_unsafe_output_mtimes(out)
+
+            self.assertEqual(
+                unsafe_output.stat().st_mtime_ns,
+                pipeline.WINDOWS_RESUME_INPUT_EPOCH * 1_000_000_000,
+            )
+            self.assertEqual(stats["files_rebased"], 1)
+            self.assertEqual(stats["directories_rebased"], 3)
+            self.assertEqual(stats["progress_databases_preserved"], 2)
+            self.assertEqual(
+                stats["ninja_timestamp_zero_epoch"],
+                pipeline.WINDOWS_NINJA_TIMESTAMP_ZERO_EPOCH,
+            )
+            for path, before in protected.items():
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
     def test_reused_windows_graph_never_runs_gn_gen_and_requires_clean_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
             source = pathlib.Path(temp) / "src"
@@ -990,6 +1056,29 @@ class WindowsI686PipelineTests(unittest.TestCase):
         )
         self.assertEqual(compatibility.no_progress_streak, 0)
         self.assertFalse(compatibility.requires_gn_refresh)
+        manifest["resume_input_epoch"] = pipeline.WINDOWS_LEGACY_RESUME_INPUT_EPOCH
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError,
+            "resume_input_epoch",
+        ):
+            pipeline._checkpoint_manifest_matches_state(manifest, state, proof)
+        legacy_epoch_migration = pipeline.CheckpointMigration(
+            run_id=proof["run_id"],
+            version=state.version,
+            stage=proof["producer_stage"],
+            producer_sha=proof["producer_sha"],
+            port_config_sha256=state.port_config_sha256,
+            archive_sha256="5" * 64,
+            resume_input_epoch=pipeline.WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
+        )
+        compatibility = pipeline._checkpoint_manifest_matches_state(
+            manifest,
+            state,
+            proof,
+            migration=legacy_epoch_migration,
+        )
+        self.assertEqual(compatibility.migration_run_id, proof["run_id"])
+        manifest["resume_input_epoch"] = pipeline.WINDOWS_RESUME_INPUT_EPOCH
         with mock.patch.dict(
             pipeline.os.environ,
             {"RUNNER_OS": "Linux", "ImageOS": "ubuntu24"},
@@ -1186,6 +1275,10 @@ class WindowsI686PipelineTests(unittest.TestCase):
         self.assertEqual(
             stage_seven.archive_sha256,
             "e066c261980fafb4ec8c086edcf93090d0ce0fbe24c8f2c08238472e7acf3dd5",
+        )
+        self.assertEqual(
+            stage_seven.resume_input_epoch,
+            pipeline.WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
         )
         with self.assertRaisesRegex(
             pipeline.WindowsPipelineError, "exact approved migration scope"
