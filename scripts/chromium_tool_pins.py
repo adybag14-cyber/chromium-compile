@@ -51,6 +51,7 @@ WINDOWS_GCS_OUTPUT_FILES = {
 }
 WINDOWS_CIPD_TOOL_DEPENDENCIES = (
     "src/third_party/typescript/windows-amd64/src",
+    "src/third_party/lzma_sdk/bin/host_platform",
     "src/third_party/devtools-frontend/src/third_party/esbuild",
     "src/third_party/devtools-frontend/src/third_party/rollup_libs",
     "src/third_party/dawn/tools/golang/windows-amd64",
@@ -64,6 +65,12 @@ WINDOWS_CIPD_TOOL_POLICIES = {
             "checkout_win and non_git_source",
             "non_git_source and checkout_win",
         },
+    },
+    "src/third_party/lzma_sdk/bin/host_platform": {
+        "mapping": "src/third_party/lzma_sdk/bin/host_platform",
+        "package_template": "infra/3pp/tools/7z/${{platform}}",
+        "package": "infra/3pp/tools/7z/windows-amd64",
+        "conditions": {"checkout_win"},
     },
     "src/third_party/devtools-frontend/src/third_party/esbuild": {
         "mapping": "third_party/esbuild",

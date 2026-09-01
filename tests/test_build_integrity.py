@@ -142,6 +142,14 @@ deps = {
       'version': 'version:2@7.0.2',
     }],
   },
+  'src/third_party/lzma_sdk/bin/host_platform': {
+    'packages': [{
+      'package': 'infra/3pp/tools/7z/${{platform}}',
+      'version': 'version:3@26.01',
+    }],
+    'condition': 'checkout_win',
+    'dep_type': 'cipd',
+  },
   'src/third_party/gperf': {
     'url': Var('chromium_git') + '/chromium/deps/gperf.git' + '@' + 'e9eeea862a18e77b945d98eff7e1bf065d3daf8e',
     'condition': 'checkout_win',
@@ -261,7 +269,7 @@ deps = {
             cipd = tool_pins.resolve_windows_cipd_tool_pins(
                 deps, devtools, dawn
             )
-            self.assertEqual(len(cipd), 4)
+            self.assertEqual(len(cipd), 5)
             self.assertEqual(
                 cipd[0].package,
                 "chromium/third_party/typescript/windows-amd64",
@@ -269,21 +277,26 @@ deps = {
             self.assertEqual(cipd[0].version, "version:2@7.0.2")
             self.assertEqual(
                 cipd[1].package,
+                "infra/3pp/tools/7z/windows-amd64",
+            )
+            self.assertEqual(cipd[1].version, "version:3@26.01")
+            self.assertEqual(
+                cipd[2].package,
                 "infra/3pp/tools/esbuild/windows-amd64",
             )
             self.assertEqual(
-                cipd[2].package,
+                cipd[3].package,
                 "infra/3pp/tools/rollup_libs/windows-amd64",
             )
             self.assertEqual(
-                cipd[3].dependency,
+                cipd[4].dependency,
                 "src/third_party/dawn/tools/golang/windows-amd64",
             )
             self.assertEqual(
-                cipd[3].package,
+                cipd[4].package,
                 "infra/3pp/tools/go/windows-amd64",
             )
-            self.assertEqual(cipd[3].version, "version:3@1.25.0")
+            self.assertEqual(cipd[4].version, "version:3@1.25.0")
             self.assertRegex(
                 tool_pins.windows_cipd_tool_descriptor_sha256(cipd),
                 r"^[0-9a-f]{64}$",
@@ -344,6 +357,42 @@ deps = {
             dawn = pathlib.Path(tmp) / "DAWN_DEPS"
             dawn.write_text(self.DAWN_CIPD_DEPS, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
+
+    def test_windows_7zip_cipd_pin_rejects_mutable_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace("version:3@26.01", "latest")
+                + "}\n",
+                encoding="utf-8",
+            )
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            dawn = pathlib.Path(tmp) / "DAWN_DEPS"
+            dawn.write_text(self.DAWN_CIPD_DEPS, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Mutable or malformed"):
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
+
+    def test_windows_7zip_cipd_pin_rejects_condition_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            deps.write_text(
+                "deps = {\n"
+                + self.WINDOWS_GCS_DEPS.replace(
+                    "'condition': 'checkout_win',",
+                    "'condition': 'checkout_win or checkout_linux',",
+                    1,
+                )
+                + "}\n",
+                encoding="utf-8",
+            )
+            devtools = pathlib.Path(tmp) / "DEVTOOLS_DEPS"
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS, encoding="utf-8")
+            dawn = pathlib.Path(tmp) / "DAWN_DEPS"
+            dawn.write_text(self.DAWN_CIPD_DEPS, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unexpected condition"):
                 tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
 
     def test_windows_dawn_go_cipd_pin_rejects_mutable_variable(self):

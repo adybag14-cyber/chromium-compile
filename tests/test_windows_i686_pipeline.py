@@ -1126,6 +1126,13 @@ class WindowsI686PipelineTests(unittest.TestCase):
             pipeline._checkpoint_manifest_matches_state(manifest, state, proof)
         manifest["windows_build_timestamp"] = state.windows_build_timestamp
 
+        legacy_cipd_descriptor = "6" * 64
+        manifest["windows_cipd_tools_sha256"] = legacy_cipd_descriptor
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError,
+            "windows_cipd_tools_sha256",
+        ):
+            pipeline._checkpoint_manifest_matches_state(manifest, state, proof)
         migration = pipeline.CheckpointMigration(
             run_id=proof["run_id"],
             version=state.version,
@@ -1133,6 +1140,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
             producer_sha=proof["producer_sha"],
             port_config_sha256="4" * 64,
             archive_sha256="5" * 64,
+            windows_cipd_tools_sha256=legacy_cipd_descriptor,
         )
         manifest["port_config_sha256"] = migration.port_config_sha256
         compatibility = pipeline._checkpoint_manifest_matches_state(
@@ -1280,11 +1288,46 @@ class WindowsI686PipelineTests(unittest.TestCase):
             stage_seven.resume_input_epoch,
             pipeline.WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
         )
+        self.assertEqual(
+            stage_seven.windows_cipd_tools_sha256,
+            "66358e99eb0d8d3bdfd3f0117c8edd5098a0f2d7acd10a92b51f0223eeb38176",
+        )
         with self.assertRaisesRegex(
             pipeline.WindowsPipelineError, "exact approved migration scope"
         ):
             pipeline._resolve_checkpoint_migration(
                 "33502755381",
+                version="153.0.8010.12",
+                stage=8,
+            )
+
+        latest_stage_seven = pipeline._resolve_checkpoint_migration(
+            "33525395251",
+            version="153.0.8010.12",
+            stage=7,
+        )
+        self.assertIsNotNone(latest_stage_seven)
+        self.assertEqual(
+            latest_stage_seven.producer_sha,
+            "474bfa89b37124a42d0a42ed155230562370c821",
+        )
+        self.assertEqual(
+            latest_stage_seven.port_config_sha256,
+            "9bb677820a9644b4fe4c9910d4b92be744145a235dd460cd32490a322d1fb991",
+        )
+        self.assertEqual(
+            latest_stage_seven.archive_sha256,
+            "bef948bd53b94674350b9db1c0b768d75b2d19dde0557367beb8cd8d526bd452",
+        )
+        self.assertEqual(
+            latest_stage_seven.windows_cipd_tools_sha256,
+            "66358e99eb0d8d3bdfd3f0117c8edd5098a0f2d7acd10a92b51f0223eeb38176",
+        )
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "exact approved migration scope"
+        ):
+            pipeline._resolve_checkpoint_migration(
+                "33525395251",
                 version="153.0.8010.12",
                 stage=8,
             )
@@ -1452,6 +1495,12 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
             'source / "third_party/typescript/windows-amd64/src/lib/tsc.exe"',
             source,
         )
+        self.assertIn(
+            'source / "third_party/lzma_sdk/bin/host_platform/7za.exe"',
+            source,
+        )
+        self.assertIn('[str(seven_zip), "i"]', source)
+        self.assertIn("validate_windows_installer_archive_tool(source, env)", source)
         self.assertIn("devtools-frontend/src/third_party/esbuild/esbuild.exe", source)
         self.assertIn("devtools-frontend/src/third_party/rollup_libs", source)
         self.assertIn("scripts/deps/sync_rollup_libs.py", source)
@@ -1489,6 +1538,40 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
             self.assertEqual(stats["member_count"], 2)
             self.assertEqual((destination / "VERSION").read_bytes(), b"rustc fixture\n")
             self.assertEqual((destination / "bin/bindgen.exe").read_bytes(), b"MZfixture")
+
+    def test_windows_installer_archive_tool_preflight_uses_declared_7zip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            archive_script = (
+                source / "chrome/tools/build/win/create_installer_archive.py"
+            )
+            seven_zip = source / "third_party/lzma_sdk/bin/host_platform/7za.exe"
+            archive_script.parent.mkdir(parents=True)
+            seven_zip.parent.mkdir(parents=True)
+            archive_script.write_text("# source fixture\n", encoding="utf-8")
+            seven_zip.write_bytes(b"MZfixture")
+            completed = pipeline.subprocess.CompletedProcess(
+                [str(seven_zip), "i"], 0, "7-Zip fixture", ""
+            )
+            with mock.patch.object(
+                pipeline, "_run", return_value=completed
+            ) as runner:
+                resolved = pipeline.validate_windows_installer_archive_tool(
+                    source, {"PATH": "fixture"}
+                )
+            self.assertEqual(resolved, seven_zip)
+            runner.assert_called_once_with(
+                [str(seven_zip), "i"],
+                cwd=source,
+                env={"PATH": "fixture"},
+                timeout=120,
+            )
+
+            seven_zip.unlink()
+            with self.assertRaisesRegex(
+                pipeline.WindowsPipelineError, "omitted 7za.exe"
+            ):
+                pipeline.validate_windows_installer_archive_tool(source, {})
 
     def test_windows_gcs_tool_archive_rejects_traversal_and_case_aliases(self):
         with tempfile.TemporaryDirectory() as temp:
