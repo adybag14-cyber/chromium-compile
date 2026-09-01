@@ -12,6 +12,10 @@ on:
         description: Exact Chromium version expected in the artifact.
         required: true
         type: string
+      build_sha:
+        description: Exact trusted commit that produced the successful build run.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -57,7 +61,7 @@ jobs:
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           CHROMIUM_VERSION: ${{ inputs.version }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          BUILD_SHA: ${{ inputs.build_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -66,7 +70,7 @@ jobs:
             --run-id "${BUILD_RUN_ID}" \
             --version "${CHROMIUM_VERSION}" \
             --expected-ref "${DEFAULT_BRANCH}" \
-            --expected-sha "${WORKFLOW_SHA}")"
+            --expected-sha "${BUILD_SHA}")"
           printf '%s\n' "${proof}" | python3 -m json.tool
           echo "run_id=$(jq -r .run_id <<<"${proof}")" >> "${GITHUB_OUTPUT}"
           echo "head_sha=$(jq -r .head_sha <<<"${proof}")" >> "${GITHUB_OUTPUT}"
