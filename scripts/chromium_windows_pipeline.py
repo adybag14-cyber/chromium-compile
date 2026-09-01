@@ -105,6 +105,9 @@ MAX_GN_REGEN_DEPENDENCIES = 100_000
 MAX_GN_REGEN_FUTURE_SKEW_SECONDS = 300
 MAX_NINJA_INPUT_CLOSURE_BYTES = 128 * 1024 * 1024
 MAX_NINJA_INPUT_CLOSURE_COUNT = 2_000_000
+MIN_WINDOWS_COMPILER_SLICE_SECONDS = 10 * 60
+WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS = 5 * 60
+WINDOWS_CHECKPOINT_BOUNDARY_LATE_SECONDS = 2 * 60
 GITILES_HOST = "chromium.googlesource.com"
 MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
 MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
@@ -301,6 +304,18 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
         ),
         archive_sha256=(
             "c81f702c589404b3f4ffa6bade8db08650f6e8cade30a45b274d8e0740497ce7"
+        ),
+    ),
+    "33390506701": CheckpointMigration(
+        run_id="33390506701",
+        version="153.0.8010.12",
+        stage=5,
+        producer_sha="cbef7e08f1abc62d05715978ee4f96a02c13163b",
+        port_config_sha256=(
+            "8b1d3f5e50c730efac4325089f1afbb68ead1490335fcf4689d4ec373b06d317"
+        ),
+        archive_sha256=(
+            "ace1e90426e6973d8ec4dabef9f73b5e106a9652003bfd2dfcde91723429f392"
         ),
     ),
 }
@@ -4089,6 +4104,75 @@ def classify_build_log(path: Path) -> str:
     return "deterministic_build"
 
 
+def is_empty_ninja_controller_exit(path: Path) -> bool:
+    """Recognize only Ninja's empty controller exit without a build diagnostic."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")[-4_000_000:]
+    except OSError:
+        return False
+    lines = [line.rstrip("\r") for line in text.splitlines()]
+    marker = any(
+        lines[index].strip() == "ninja: error:"
+        and lines[index + 1].strip() == "ninja: build stopped: ."
+        for index in range(len(lines) - 1)
+    )
+    if not marker:
+        return False
+    explicit_failure = re.compile(
+        r"(?i)(?:^FAILED:|\berror:|\bfatal error(?:\s+[A-Z]*[0-9])?|"
+        r"\berror\s+(?:C|LNK)[0-9]+)"
+    )
+    return not any(
+        line.strip() != "ninja: error:" and explicit_failure.search(line)
+        for line in lines
+    )
+
+
+def normalize_checkpoint_boundary_status(
+    status: int,
+    *,
+    durable_progress: bool,
+    seconds_until_cutoff: int,
+    build_log: Path,
+) -> int:
+    if (
+        status == 1
+        and durable_progress
+        and -WINDOWS_CHECKPOINT_BOUNDARY_LATE_SECONDS
+        <= seconds_until_cutoff
+        <= WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS
+        and is_empty_ninja_controller_exit(build_log)
+    ):
+        return TIMEOUT_EXIT_CODE
+    return status
+
+
+def compiler_slice_timeout_seconds(remaining_seconds: int) -> int:
+    """Reserve time to own Ninja termination before an outer step boundary.
+
+    The Windows runner can end a long-lived Ninja child immediately before the
+    requested checkpoint deadline. In that race Ninja exits 1 with no compiler
+    diagnostic, so the wrapper never gets to return its controlled status 124.
+    Stop the child five minutes earlier and leave at least ten useful compiler
+    minutes; otherwise checkpoint without launching a new slice.
+    """
+    if (
+        not isinstance(remaining_seconds, int)
+        or isinstance(remaining_seconds, bool)
+        or remaining_seconds < 0
+    ):
+        raise WindowsPipelineError(
+            "remaining compiler budget must be a non-negative integer"
+        )
+    minimum_budget = (
+        MIN_WINDOWS_COMPILER_SLICE_SECONDS
+        + WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS
+    )
+    if remaining_seconds <= minimum_budget:
+        return 0
+    return remaining_seconds - WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS
+
+
 def run_build_slice(
     *,
     work_root: Path,
@@ -4115,6 +4199,7 @@ def run_build_slice(
         raise WindowsPipelineError("job_started_at is outside the bounded current job window")
     cutoff = job_started_at + checkpoint_minutes * 60
     remaining = cutoff - now
+    compiler_timeout = compiler_slice_timeout_seconds(max(0, remaining))
     source = work_root / "src"
     out = source / "out" / OUT_NAME
     ninja = work_root / "ninja/ninja.exe"
@@ -4134,8 +4219,11 @@ def run_build_slice(
         "ninja_unique_outputs_after": unique_before,
         "status": 0,
     }
-    if remaining <= 600:
-        print("::warning::Preparation consumed the compiler budget; checkpointing without starting Ninja")
+    if compiler_timeout == 0:
+        print(
+            "::warning::Preparation consumed the usable compiler budget; "
+            "checkpointing without starting Ninja"
+        )
         result_file.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
         return result
     free = shutil.disk_usage(out).free
@@ -4160,6 +4248,11 @@ def run_build_slice(
         "mini_installer",
     ]
     stall_marker = work_root / "ninja-stall.marker"
+    print(
+        "Starting bounded Ninja compiler slice with a reserved checkpoint "
+        f"termination margin: timeout_seconds={compiler_timeout}; "
+        f"reserve_seconds={WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS}"
+    )
     try:
         status = run_with_watchdog(
             command,
@@ -4168,7 +4261,7 @@ def run_build_slice(
             poll_seconds=15,
             kill_grace_seconds=30,
             stall_marker=stall_marker,
-            timeout_seconds=remaining,
+            timeout_seconds=compiler_timeout,
             timeout_kill_grace_seconds=120,
             output_log=log,
             cwd=source,
@@ -4177,10 +4270,23 @@ def run_build_slice(
     except WatchdogError as exc:
         raise InfrastructureError(f"Ninja watchdog failed internally: {exc}") from exc
     after, unique_after = _ninja_log_stats(progress_log)
-    result["status"] = status
     result["ninja_entries_after"] = after
     result["ninja_unique_outputs_after"] = unique_after
     durable_progress = unique_after > unique_before
+    observed_status = status
+    status = normalize_checkpoint_boundary_status(
+        status,
+        durable_progress=durable_progress,
+        seconds_until_cutoff=cutoff - int(time.time()),
+        build_log=log,
+    )
+    if status != observed_status:
+        print(
+            "::warning::Normalized an empty Ninja controller exit at the "
+            "checkpoint boundary to controlled timeout status 124; durable "
+            "progress will be preserved."
+        )
+    result["status"] = status
     if status == 0:
         required = (
             out / "chrome.exe",

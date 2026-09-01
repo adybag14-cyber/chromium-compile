@@ -444,6 +444,80 @@ class WindowsI686PipelineTests(unittest.TestCase):
             self.assertEqual(pipeline._ninja_log_stats(log), (3, 2))
             self.assertEqual(pipeline._ninja_log_count(log), 3)
 
+    def test_windows_compiler_slice_reserves_checkpoint_termination_margin(self):
+        minimum = (
+            pipeline.MIN_WINDOWS_COMPILER_SLICE_SECONDS
+            + pipeline.WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS
+        )
+        self.assertEqual(pipeline.compiler_slice_timeout_seconds(minimum), 0)
+        self.assertEqual(
+            pipeline.compiler_slice_timeout_seconds(minimum + 1),
+            pipeline.MIN_WINDOWS_COMPILER_SLICE_SECONDS + 1,
+        )
+        self.assertEqual(
+            pipeline.compiler_slice_timeout_seconds(18_043),
+            17_743,
+        )
+        for invalid in (-1, True, 1.5, "900"):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                pipeline.WindowsPipelineError
+            ):
+                pipeline.compiler_slice_timeout_seconds(invalid)
+
+    def test_empty_ninja_exit_is_controlled_only_at_checkpoint_boundary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log = pathlib.Path(temp) / "build.log"
+            log.write_text(
+                "[10267/13791] CXX obj/chrome/example.obj\n"
+                "ninja: error: \n"
+                "ninja: build stopped: .\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(pipeline.is_empty_ninja_controller_exit(log))
+            self.assertEqual(
+                pipeline.normalize_checkpoint_boundary_status(
+                    1,
+                    durable_progress=True,
+                    seconds_until_cutoff=62,
+                    build_log=log,
+                ),
+                pipeline.TIMEOUT_EXIT_CODE,
+            )
+            for status, progress, seconds in (
+                (2, True, 62),
+                (1, False, 62),
+                (1, True, pipeline.WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS + 1),
+                (1, True, -pipeline.WINDOWS_CHECKPOINT_BOUNDARY_LATE_SECONDS - 1),
+            ):
+                with self.subTest(status=status, progress=progress, seconds=seconds):
+                    self.assertEqual(
+                        pipeline.normalize_checkpoint_boundary_status(
+                            status,
+                            durable_progress=progress,
+                            seconds_until_cutoff=seconds,
+                            build_log=log,
+                        ),
+                        status,
+                    )
+
+            log.write_text(
+                "FAILED: obj/chrome/example.obj\n"
+                "clang-cl: error: deterministic source failure\n"
+                "ninja: error: \n"
+                "ninja: build stopped: .\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(pipeline.is_empty_ninja_controller_exit(log))
+            self.assertEqual(
+                pipeline.normalize_checkpoint_boundary_status(
+                    1,
+                    durable_progress=True,
+                    seconds_until_cutoff=62,
+                    build_log=log,
+                ),
+                1,
+            )
+
     def test_gitiles_critical_file_fetch_retries_transient_http_and_uses_show_endpoint(self):
         class Response:
             def __enter__(self):
@@ -868,6 +942,33 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 "33357533082",
                 version="153.0.8010.12",
                 stage=5,
+            )
+
+        stage_five = pipeline._resolve_checkpoint_migration(
+            "33390506701",
+            version="153.0.8010.12",
+            stage=5,
+        )
+        self.assertIsNotNone(stage_five)
+        self.assertEqual(
+            stage_five.producer_sha,
+            "cbef7e08f1abc62d05715978ee4f96a02c13163b",
+        )
+        self.assertEqual(
+            stage_five.port_config_sha256,
+            "8b1d3f5e50c730efac4325089f1afbb68ead1490335fcf4689d4ec373b06d317",
+        )
+        self.assertEqual(
+            stage_five.archive_sha256,
+            "ace1e90426e6973d8ec4dabef9f73b5e106a9652003bfd2dfcde91723429f392",
+        )
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "exact approved migration scope"
+        ):
+            pipeline._resolve_checkpoint_migration(
+                "33390506701",
+                version="153.0.8010.12",
+                stage=6,
             )
 
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
