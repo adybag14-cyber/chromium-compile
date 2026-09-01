@@ -389,6 +389,82 @@ def validate_runtime_tree(root: Path) -> dict[str, int]:
     return {"file_count": file_count, "unpacked_bytes": total_bytes, "pe32_count": pe_count}
 
 
+def write_release_zip(
+    root: Path,
+    destination: Path,
+    *,
+    max_members: int = DEFAULT_MAX_MEMBERS,
+    max_unpacked_bytes: int = DEFAULT_MAX_UNPACKED_GIB * 1024**3,
+) -> dict[str, int]:
+    """Write a bounded release ZIP with canonical POSIX member names.
+
+    Native Windows archivers commonly record ``\\`` separators in ZIP member
+    names. Those names are ambiguous across extractors and intentionally fail
+    the release validator. Build the ZIP in-process and provide every arcname
+    explicitly so a Windows checkout produces the same safe member namespace
+    as other hosts.
+    """
+    max_members = _positive_limit(max_members, "max_members", HARD_MAX_MEMBERS)
+    max_unpacked_bytes = _positive_limit(
+        max_unpacked_bytes,
+        "max_unpacked_bytes",
+        HARD_MAX_UNPACKED_GIB * 1024**3,
+    )
+    if not root.is_dir() or root.is_symlink():
+        raise WindowsRuntimeError(f"Release ZIP root is not a regular directory: {root}")
+    expected_root = _safe_member_name(root.name)
+    entries: list[tuple[Path, str]] = []
+    seen_casefold: set[str] = set()
+    unpacked_bytes = 0
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        if path.is_symlink():
+            raise WindowsRuntimeError(f"Release ZIP source contains a symbolic link: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise WindowsRuntimeError(f"Release ZIP source is not a regular file: {path}")
+        if len(entries) >= max_members:
+            raise WindowsRuntimeError(
+                f"Release ZIP source exceeds configured member limit {max_members}"
+            )
+        relative = path.relative_to(root)
+        member_name = PurePosixPath(expected_root, *relative.parts).as_posix()
+        member_name = _safe_member_name(member_name, expected_root=expected_root)
+        folded = member_name.casefold()
+        if folded in seen_casefold:
+            raise WindowsRuntimeError(
+                f"Case-insensitive duplicate release ZIP source: {member_name}"
+            )
+        seen_casefold.add(folded)
+        size = path.stat().st_size
+        if size < 0 or size > max_unpacked_bytes - unpacked_bytes:
+            raise WindowsRuntimeError(
+                f"Release ZIP source exceeds unpacked-byte limit {max_unpacked_bytes}"
+            )
+        unpacked_bytes += size
+        entries.append((path, member_name))
+    if not entries:
+        raise WindowsRuntimeError("Release ZIP source tree is empty")
+    try:
+        with zipfile.ZipFile(
+            destination,
+            mode="x",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=7,
+            allowZip64=True,
+        ) as archive:
+            for source, member_name in entries:
+                archive.write(source, arcname=member_name)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    print(
+        f"Wrote canonical Windows release ZIP: members={len(entries)}; "
+        f"unpacked_bytes={unpacked_bytes}"
+    )
+    return {"member_count": len(entries), "unpacked_bytes": unpacked_bytes}
+
+
 def _terminate_windows_tree(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return

@@ -55,6 +55,16 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 with self.assertRaises(pipeline.WindowsPipelineError):
                     pipeline._runner_command_file("GITHUB_OUTPUT", "set_output_")
 
+    def test_port_config_files_have_checkout_stable_lf_policy(self):
+        attributes = {
+            line.strip()
+            for line in (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        for relative in pipeline.PORT_CONFIG_FILES:
+            with self.subTest(relative=relative):
+                self.assertIn(f"/{relative} text eol=lf", attributes)
+
     def test_command_wrapper_rejects_unlisted_executable_before_spawn(self):
         with mock.patch.object(pipeline.subprocess, "run") as run:
             with self.assertRaisesRegex(
@@ -1344,6 +1354,34 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 stage=8,
             )
 
+        completed_stage_seven = pipeline._resolve_checkpoint_migration(
+            "33546924031",
+            version="153.0.8010.12",
+            stage=7,
+        )
+        self.assertIsNotNone(completed_stage_seven)
+        self.assertEqual(
+            completed_stage_seven.producer_sha,
+            "02db14a5c2771d489d2654e90e1939801554d589",
+        )
+        self.assertEqual(
+            completed_stage_seven.port_config_sha256,
+            "ac006d3c9b55c67ea7e74a07d58a6842eb1a5e6fb1ce9493de53cc186430e317",
+        )
+        self.assertEqual(
+            completed_stage_seven.archive_sha256,
+            "ef831e6deb3fda984e2c1a59574f25ba1a1dd0471d1f9ad5c003ad7b7d833733",
+        )
+        self.assertIsNone(completed_stage_seven.windows_cipd_tools_sha256)
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "exact approved migration scope"
+        ):
+            pipeline._resolve_checkpoint_migration(
+                "33546924031",
+                version="153.0.8010.12",
+                stage=8,
+            )
+
     def test_latest_stage_seven_manifest_matches_approved_migration(self):
         migration = pipeline._resolve_checkpoint_migration(
             "33525395251",
@@ -1435,6 +1473,37 @@ class WindowsI686PipelineTests(unittest.TestCase):
             migration=migration,
         )
         self.assertEqual(compatibility.migration_run_id, "33525395251")
+        self.assertFalse(compatibility.requires_gn_refresh)
+
+        completed_migration = pipeline._resolve_checkpoint_migration(
+            "33546924031",
+            version="153.0.8010.12",
+            stage=7,
+        )
+        self.assertIsNotNone(completed_migration)
+        completed_proof = {
+            "producer_sha": completed_migration.producer_sha,
+            "run_id": completed_migration.run_id,
+            "run_attempt": 1,
+            "producer_stage": completed_migration.stage,
+        }
+        manifest.update(
+            {
+                "windows_cipd_tools_sha256": state.windows_cipd_tools_sha256,
+                "port_config_sha256": completed_migration.port_config_sha256,
+                "github_sha": completed_proof["producer_sha"],
+                "github_run_id": completed_proof["run_id"],
+                "github_run_attempt": completed_proof["run_attempt"],
+                "stage": completed_proof["producer_stage"],
+            }
+        )
+        compatibility = pipeline._checkpoint_manifest_matches_state(
+            manifest,
+            state,
+            completed_proof,
+            migration=completed_migration,
+        )
+        self.assertEqual(compatibility.migration_run_id, "33546924031")
         self.assertFalse(compatibility.requires_gn_refresh)
 
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
