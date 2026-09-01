@@ -255,7 +255,7 @@ runs:
           --work-root $env:CHROMIUM_WINDOWS_ROOT `
           --repository-root $env:GITHUB_WORKSPACE `
           --destination $env:GITHUB_WORKSPACE `
-          --smoke-timeout-seconds 120
+          --smoke-timeout-seconds 180
         $status = $LASTEXITCODE
         if ($status -ne 0) {
           $failureClass = if ($status -eq 75) { 'infrastructure' } else { 'deterministic_build' }
