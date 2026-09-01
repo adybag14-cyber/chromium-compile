@@ -10,7 +10,9 @@ import subprocess
 import time
 
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-TAG_RE = re.compile(r"^chromium-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-linux-i686$")
+TAG_RE = re.compile(
+    r"^chromium-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-(?:linux|windows)-i686$"
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 class TagStateError(RuntimeError):
