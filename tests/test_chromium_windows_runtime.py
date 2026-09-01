@@ -192,72 +192,75 @@ class WindowsRuntimeTests(unittest.TestCase):
             ):
                 runtime.validate_release_zip(archive, VERSION)
 
-    def test_headless_smoke_uses_portable_cwd_and_ci_flags(self):
+    def test_headless_devtools_smoke_renders_marker_and_kills_exact_tree(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp) / runtime.release_root(VERSION)
             chrome = root / "Chrome-bin" / VERSION / "chrome.exe"
             chrome.parent.mkdir(parents=True)
             chrome.write_bytes(pe_bytes())
             proc = mock.Mock()
-            proc.returncode = 0
-            proc.communicate.return_value = (
-                "<p>chromium-windows-i686-runtime-smoke</p>",
-                None,
-            )
+            proc.poll.return_value = None
+            proc.wait.return_value = 0
             with (
                 mock.patch.object(runtime, "os", types.SimpleNamespace(name="nt")),
                 mock.patch.object(runtime.subprocess, "Popen", return_value=proc) as popen,
+                mock.patch.object(runtime, "_terminate_windows_tree") as terminate,
+                mock.patch.object(runtime, "_read_devtools_port", return_value=9222),
+                mock.patch.object(
+                    runtime,
+                    "_read_devtools_json",
+                    return_value=[
+                        {
+                            "type": "page",
+                            "title": "chromium-windows-i686-runtime-smoke",
+                        }
+                    ],
+                ),
+                mock.patch.object(runtime.time, "monotonic", side_effect=(0.0, 1.0)),
             ):
                 runtime.smoke_test_runtime(root, timeout_seconds=30)
 
         command = popen.call_args.args[0]
         self.assertIn("--headless=new", command)
-        self.assertIn("--no-first-run", command)
-        self.assertIn("--noerrdialogs", command)
-        self.assertIn("--disable-crash-reporter", command)
+        self.assertIn("--remote-debugging-address=127.0.0.1", command)
+        self.assertIn("--remote-debugging-port=0", command)
+        self.assertNotIn("--dump-dom", command)
         self.assertEqual(popen.call_args.kwargs["cwd"], chrome.parent)
+        terminate.assert_called_once_with(proc)
 
-    def test_headless_smoke_accepts_marker_then_kills_exact_timed_out_tree(self):
+    def test_headless_devtools_smoke_timeout_reports_bounded_diagnostic(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp) / runtime.release_root(VERSION)
             chrome = root / "Chrome-bin" / VERSION / "chrome.exe"
             chrome.parent.mkdir(parents=True)
             chrome.write_bytes(pe_bytes())
             proc = mock.Mock()
-            proc.communicate.side_effect = (
-                runtime.subprocess.TimeoutExpired([str(chrome)], 30),
-                ("<p>chromium-windows-i686-runtime-smoke</p>", None),
-            )
+            proc.poll.return_value = None
+            proc.wait.return_value = 0
             with (
                 mock.patch.object(runtime, "os", types.SimpleNamespace(name="nt")),
                 mock.patch.object(runtime.subprocess, "Popen", return_value=proc),
                 mock.patch.object(runtime, "_terminate_windows_tree") as terminate,
-            ):
-                runtime.smoke_test_runtime(root, timeout_seconds=30)
-        terminate.assert_called_once_with(proc)
-        self.assertEqual(proc.communicate.call_count, 2)
-
-    def test_headless_smoke_timeout_reports_output_without_marker(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = pathlib.Path(temp) / runtime.release_root(VERSION)
-            chrome = root / "Chrome-bin" / VERSION / "chrome.exe"
-            chrome.parent.mkdir(parents=True)
-            chrome.write_bytes(pe_bytes())
-            proc = mock.Mock()
-            proc.communicate.side_effect = (
-                runtime.subprocess.TimeoutExpired([str(chrome)], 30),
-                ("startup diagnostic", None),
-            )
-            with (
-                mock.patch.object(runtime, "os", types.SimpleNamespace(name="nt")),
-                mock.patch.object(runtime.subprocess, "Popen", return_value=proc),
-                mock.patch.object(runtime, "_terminate_windows_tree"),
+                mock.patch.object(runtime, "_read_devtools_port", return_value=None),
+                mock.patch.object(runtime.time, "monotonic", side_effect=(0.0, 1.0, 31.0)),
+                mock.patch.object(runtime.time, "sleep"),
                 self.assertRaisesRegex(
                     runtime.WindowsRuntimeError,
-                    "without rendering.*startup diagnostic",
+                    "DevTools smoke did not render.*process_status=None",
                 ),
             ):
                 runtime.smoke_test_runtime(root, timeout_seconds=30)
+        terminate.assert_called_once_with(proc)
+
+    def test_devtools_port_file_is_bounded_and_validated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "DevToolsActivePort"
+            path.write_text("9222\n/devtools/browser/id\n", encoding="utf-8")
+            self.assertEqual(runtime._read_devtools_port(path), 9222)
+            path.write_text("70000\n", encoding="utf-8")
+            self.assertIsNone(runtime._read_devtools_port(path))
+            path.write_text("not-a-port\n", encoding="utf-8")
+            self.assertIsNone(runtime._read_devtools_port(path))
 
 
 if __name__ == "__main__":
