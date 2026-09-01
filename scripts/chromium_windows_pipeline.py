@@ -202,6 +202,7 @@ CRITICAL_WINDOWS_SOURCE_FILES = (
     "build/vs_toolchain.py",
     "build/toolchain/win/BUILD.gn",
     "chrome/installer/mini_installer/BUILD.gn",
+    "chrome/tools/build/win/create_installer_archive.py",
     "docs/windows_build_instructions.md",
 )
 
@@ -289,6 +290,7 @@ class CheckpointMigration:
     port_config_sha256: str
     archive_sha256: str
     resume_input_epoch: int | None = None
+    windows_cipd_tools_sha256: str | None = None
 
 
 # Immutable bridges preserve already-proven compiler output across narrowly
@@ -360,6 +362,24 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
             "e066c261980fafb4ec8c086edcf93090d0ce0fbe24c8f2c08238472e7acf3dd5"
         ),
         resume_input_epoch=WINDOWS_LEGACY_RESUME_INPUT_EPOCH,
+        windows_cipd_tools_sha256=(
+            "66358e99eb0d8d3bdfd3f0117c8edd5098a0f2d7acd10a92b51f0223eeb38176"
+        ),
+    ),
+    "33525395251": CheckpointMigration(
+        run_id="33525395251",
+        version="153.0.8010.12",
+        stage=7,
+        producer_sha="474bfa89b37124a42d0a42ed155230562370c821",
+        port_config_sha256=(
+            "9bb677820a9644b4fe4c9910d4b92be744145a235dd460cd32490a322d1fb991"
+        ),
+        archive_sha256=(
+            "bef948bd53b94674350b9db1c0b768d75b2d19dde0557367beb8cd8d526bd452"
+        ),
+        windows_cipd_tools_sha256=(
+            "66358e99eb0d8d3bdfd3f0117c8edd5098a0f2d7acd10a92b51f0223eeb38176"
+        ),
     ),
 }
 
@@ -1955,6 +1975,28 @@ def install_windows_gcs_tools(
     return descriptor_sha, pins
 
 
+def validate_windows_installer_archive_tool(
+    source: Path,
+    env: Mapping[str, str],
+) -> Path:
+    archive_script = source / "chrome/tools/build/win/create_installer_archive.py"
+    if not archive_script.is_file() or archive_script.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium source omitted regular create_installer_archive.py"
+        )
+    seven_zip = source / "third_party/lzma_sdk/bin/host_platform/7za.exe"
+    if not seven_zip.is_file() or seven_zip.is_symlink():
+        raise WindowsPipelineError(
+            "Chromium-pinned Windows 7-Zip CIPD package omitted 7za.exe"
+        )
+    # This is the exact executable resolved by create_installer_archive.py for
+    # chrome.7z and mini_installer packaging. Execute its information command
+    # before compilation so a missing or non-runnable host tool fails early.
+    _run([str(seven_zip), "i"], cwd=source, env=env, timeout=120)
+    print(f"Validated source-declared Windows installer archive tool: {seven_zip}")
+    return seven_zip
+
+
 def install_windows_cipd_tools(
     source: Path,
     depot_tools: Path,
@@ -2025,6 +2067,7 @@ def install_windows_cipd_tools(
             "Chromium-pinned Windows TypeScript CIPD package omitted lib/tsc.exe"
         )
     _run([str(tsc), "--version"], cwd=source, env=env, timeout=120)
+    validate_windows_installer_archive_tool(source, env)
     esbuild = (
         source
         / "third_party/devtools-frontend/src/third_party/esbuild/esbuild.exe"
@@ -3447,7 +3490,11 @@ def _checkpoint_manifest_matches_state(
         "ninja_package": state.ninja_package,
         "ninja_version": state.ninja_version,
         "cpython3_version": state.cpython3_version,
-        "windows_cipd_tools_sha256": state.windows_cipd_tools_sha256,
+        "windows_cipd_tools_sha256": (
+            migration.windows_cipd_tools_sha256
+            if migration and migration.windows_cipd_tools_sha256 is not None
+            else state.windows_cipd_tools_sha256
+        ),
         "windows_gcs_tools_sha256": state.windows_gcs_tools_sha256,
         "windows_git_tools_sha256": state.windows_git_tools_sha256,
         "clang_revision": state.clang_revision,
@@ -3579,6 +3626,11 @@ def _resolve_checkpoint_migration(
             "approved migration resume input epoch",
             minimum=0,
             maximum=int(time.time()),
+        )
+    if migration.windows_cipd_tools_sha256 is not None:
+        validate_sha256(
+            migration.windows_cipd_tools_sha256,
+            "approved migration Windows CIPD tool descriptor SHA-256",
         )
     return migration
 
