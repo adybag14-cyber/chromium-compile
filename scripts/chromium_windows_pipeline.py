@@ -109,6 +109,7 @@ MIN_WINDOWS_COMPILER_SLICE_SECONDS = 10 * 60
 WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS = 5 * 60
 NINJA_CONTROLLER_ROTATION_EXIT_CODE = 87
 NINJA_CONTROLLER_RETRY_EXIT_CODE = 88
+MAX_NINJA_CONTROLLER_RESTARTS_PER_SLICE = 3
 GITILES_HOST = "chromium.googlesource.com"
 MIN_TRUSTED_CHROMIUM_TIMESTAMP = 1_200_000_000
 MAX_PE_COFF_TIMESTAMP = 0xFFFFFFFF
@@ -4265,6 +4266,7 @@ def run_build_slice(
         "complete": False,
         "failure_class": "",
         "no_progress_streak": prior_streak,
+        "ninja_controller_restarts": 0,
         "ninja_entries_before": before,
         "ninja_entries_after": before,
         "ninja_unique_outputs_before": unique_before,
@@ -4298,22 +4300,61 @@ def run_build_slice(
         f"termination margin: timeout_seconds={compiler_timeout}; "
         f"reserve_seconds={WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS}"
     )
-    try:
-        status = run_with_watchdog(
-            command,
-            progress_log=progress_log,
-            stall_seconds=stall_minutes * 60,
-            poll_seconds=15,
-            kill_grace_seconds=30,
-            stall_marker=stall_marker,
-            timeout_seconds=compiler_timeout,
-            timeout_kill_grace_seconds=120,
-            output_log=log,
-            cwd=source,
-            env=env,
+    print(
+        "Ninja Windows directory-stat cache is disabled for resumable "
+        "compilation (-d nostatcache)"
+    )
+    compiler_deadline = time.monotonic() + compiler_timeout
+    controller_restarts = 0
+    while True:
+        attempt_timeout = int(compiler_deadline - time.monotonic())
+        if attempt_timeout <= 0:
+            status = TIMEOUT_EXIT_CODE
+            break
+        log = work_root / (
+            "windows-i686-build.log"
+            if controller_restarts == 0
+            else f"windows-i686-build-controller-{controller_restarts}.log"
         )
-    except WatchdogError as exc:
-        raise InfrastructureError(f"Ninja watchdog failed internally: {exc}") from exc
+        attempt_rows, attempt_unique = _ninja_log_stats(progress_log)
+        try:
+            status = run_with_watchdog(
+                command,
+                progress_log=progress_log,
+                stall_seconds=stall_minutes * 60,
+                poll_seconds=15,
+                kill_grace_seconds=30,
+                stall_marker=stall_marker,
+                timeout_seconds=attempt_timeout,
+                timeout_kill_grace_seconds=120,
+                output_log=log,
+                cwd=source,
+                env=env,
+            )
+        except WatchdogError as exc:
+            raise InfrastructureError(
+                f"Ninja watchdog failed internally: {exc}"
+            ) from exc
+        current_rows, current_unique = _ninja_log_stats(progress_log)
+        remaining_after_attempt = int(compiler_deadline - time.monotonic())
+        if not (
+            status == 1
+            and is_empty_ninja_controller_exit(log)
+            and controller_restarts < MAX_NINJA_CONTROLLER_RESTARTS_PER_SLICE
+            and remaining_after_attempt > MIN_WINDOWS_COMPILER_SLICE_SECONDS
+        ):
+            break
+        controller_restarts += 1
+        result["ninja_controller_restarts"] = controller_restarts
+        print(
+            "::warning::Restarting Ninja on the same prepared output after an "
+            "exact diagnostic-free controller exit: "
+            f"restart={controller_restarts}/"
+            f"{MAX_NINJA_CONTROLLER_RESTARTS_PER_SLICE}; "
+            f"rows={attempt_rows}->{current_rows}; "
+            f"unique_outputs={attempt_unique}->{current_unique}; "
+            f"remaining_seconds={remaining_after_attempt}"
+        )
     after, unique_after = _ninja_log_stats(progress_log)
     result["ninja_entries_after"] = after
     result["ninja_unique_outputs_after"] = unique_after
