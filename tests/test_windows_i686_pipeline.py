@@ -464,37 +464,33 @@ class WindowsI686PipelineTests(unittest.TestCase):
             ):
                 pipeline.compiler_slice_timeout_seconds(invalid)
 
-    def test_empty_ninja_exit_is_controlled_only_at_checkpoint_boundary(self):
+    def test_empty_ninja_controller_exit_with_progress_rotates_at_any_time(self):
         with tempfile.TemporaryDirectory() as temp:
             log = pathlib.Path(temp) / "build.log"
             log.write_text(
-                "[10267/13791] CXX obj/chrome/example.obj\n"
+                "[991/3543] CXX obj/chrome/example.obj\n"
                 "ninja: error: \n"
                 "ninja: build stopped: .\n",
                 encoding="utf-8",
             )
             self.assertTrue(pipeline.is_empty_ninja_controller_exit(log))
             self.assertEqual(
-                pipeline.normalize_checkpoint_boundary_status(
+                pipeline.normalize_empty_ninja_controller_status(
                     1,
                     durable_progress=True,
-                    seconds_until_cutoff=62,
                     build_log=log,
                 ),
-                pipeline.TIMEOUT_EXIT_CODE,
+                pipeline.NINJA_CONTROLLER_ROTATION_EXIT_CODE,
             )
-            for status, progress, seconds in (
-                (2, True, 62),
-                (1, False, 62),
-                (1, True, pipeline.WINDOWS_CHECKPOINT_TERMINATION_RESERVE_SECONDS + 1),
-                (1, True, -pipeline.WINDOWS_CHECKPOINT_BOUNDARY_LATE_SECONDS - 1),
+            for status, progress in (
+                (2, True),
+                (1, False),
             ):
-                with self.subTest(status=status, progress=progress, seconds=seconds):
+                with self.subTest(status=status, progress=progress):
                     self.assertEqual(
-                        pipeline.normalize_checkpoint_boundary_status(
+                        pipeline.normalize_empty_ninja_controller_status(
                             status,
                             durable_progress=progress,
-                            seconds_until_cutoff=seconds,
                             build_log=log,
                         ),
                         status,
@@ -509,10 +505,9 @@ class WindowsI686PipelineTests(unittest.TestCase):
             )
             self.assertFalse(pipeline.is_empty_ninja_controller_exit(log))
             self.assertEqual(
-                pipeline.normalize_checkpoint_boundary_status(
+                pipeline.normalize_empty_ninja_controller_status(
                     1,
                     durable_progress=True,
-                    seconds_until_cutoff=62,
                     build_log=log,
                 ),
                 1,
@@ -969,6 +964,33 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 "33390506701",
                 version="153.0.8010.12",
                 stage=6,
+            )
+
+        stage_six = pipeline._resolve_checkpoint_migration(
+            "33454594511",
+            version="153.0.8010.12",
+            stage=6,
+        )
+        self.assertIsNotNone(stage_six)
+        self.assertEqual(
+            stage_six.producer_sha,
+            "b31d768fa3843489a63e6f4b375ccd77e79a85fe",
+        )
+        self.assertEqual(
+            stage_six.port_config_sha256,
+            "fec64b496706536a4e15c1b6dd8b0a72ff40aeaf9e0427994517770cace86e08",
+        )
+        self.assertEqual(
+            stage_six.archive_sha256,
+            "c0264ff9c1685648502127fb64d1472270a7021670228e6810fb62f060dd9040",
+        )
+        with self.assertRaisesRegex(
+            pipeline.WindowsPipelineError, "exact approved migration scope"
+        ):
+            pipeline._resolve_checkpoint_migration(
+                "33454594511",
+                version="153.0.8010.12",
+                stage=7,
             )
 
     def test_source_declared_sdk_and_visual_studio_are_derived_not_hardcoded(self):
