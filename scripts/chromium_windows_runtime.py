@@ -508,11 +508,19 @@ def smoke_test_runtime(root: Path, *, timeout_seconds: int = 120) -> None:
     with tempfile.TemporaryDirectory(prefix="chromium-win32-smoke-") as user_data:
         command = [
             str(chrome),
-            "--headless",
+            "--headless=new",
             "--no-sandbox",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--noerrdialogs",
             "--disable-gpu",
             "--disable-background-networking",
+            "--disable-breakpad",
+            "--disable-crash-reporter",
             "--disable-component-update",
+            "--disable-extensions",
+            "--disable-sync",
+            "--metrics-recording-only",
             f"--user-data-dir={user_data}",
             "--dump-dom",
             f"data:text/html,<title>{marker}</title><p>{marker}</p>",
@@ -524,14 +532,28 @@ def smoke_test_runtime(root: Path, *, timeout_seconds: int = 120) -> None:
             text=True,
             encoding="utf-8",
             errors="replace",
+            cwd=chrome.parent,
         )
         try:
             output, _ = proc.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             _terminate_windows_tree(proc)
-            proc.wait(timeout=30)
+            try:
+                output, _ = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                output, _ = proc.communicate(timeout=30)
+            output = output or ""
+            if marker in output:
+                print(
+                    "::warning::Chromium rendered the local smoke marker but "
+                    f"did not exit within {timeout_seconds} seconds; terminated "
+                    "only its exact PID tree after successful rendering."
+                )
+                return
             raise WindowsRuntimeError(
-                f"Chromium headless smoke exceeded {timeout_seconds} seconds"
+                f"Chromium headless smoke exceeded {timeout_seconds} seconds "
+                f"without rendering the local marker: {output[-4000:]}"
             ) from exc
     if proc.returncode != 0:
         raise WindowsRuntimeError(

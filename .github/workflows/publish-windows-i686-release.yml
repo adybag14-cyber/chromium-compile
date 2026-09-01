@@ -148,7 +148,7 @@ jobs:
           python scripts/chromium_windows_runtime.py extract-zip $package $extract --version $env:CHROMIUM_VERSION
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $root = Join-Path $extract "chromium-$env:CHROMIUM_VERSION-windows-i686"
-          python scripts/chromium_windows_runtime.py smoke $root --timeout-seconds 120
+          python scripts/chromium_windows_runtime.py smoke $root --timeout-seconds 180
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   publish:

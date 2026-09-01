@@ -4,6 +4,7 @@ import pathlib
 import struct
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from unittest import mock
@@ -190,6 +191,73 @@ class WindowsRuntimeTests(unittest.TestCase):
                 runtime.WindowsRuntimeError, "Case-insensitive duplicate"
             ):
                 runtime.validate_release_zip(archive, VERSION)
+
+    def test_headless_smoke_uses_portable_cwd_and_ci_flags(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / runtime.release_root(VERSION)
+            chrome = root / "Chrome-bin" / VERSION / "chrome.exe"
+            chrome.parent.mkdir(parents=True)
+            chrome.write_bytes(pe_bytes())
+            proc = mock.Mock()
+            proc.returncode = 0
+            proc.communicate.return_value = (
+                "<p>chromium-windows-i686-runtime-smoke</p>",
+                None,
+            )
+            with (
+                mock.patch.object(runtime, "os", types.SimpleNamespace(name="nt")),
+                mock.patch.object(runtime.subprocess, "Popen", return_value=proc) as popen,
+            ):
+                runtime.smoke_test_runtime(root, timeout_seconds=30)
+
+        command = popen.call_args.args[0]
+        self.assertIn("--headless=new", command)
+        self.assertIn("--no-first-run", command)
+        self.assertIn("--noerrdialogs", command)
+        self.assertIn("--disable-crash-reporter", command)
+        self.assertEqual(popen.call_args.kwargs["cwd"], chrome.parent)
+
+    def test_headless_smoke_accepts_marker_then_kills_exact_timed_out_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / runtime.release_root(VERSION)
+            chrome = root / "Chrome-bin" / VERSION / "chrome.exe"
+            chrome.parent.mkdir(parents=True)
+            chrome.write_bytes(pe_bytes())
+            proc = mock.Mock()
+            proc.communicate.side_effect = (
+                runtime.subprocess.TimeoutExpired([str(chrome)], 30),
+                ("<p>chromium-windows-i686-runtime-smoke</p>", None),
+            )
+            with (
+                mock.patch.object(runtime, "os", types.SimpleNamespace(name="nt")),
+                mock.patch.object(runtime.subprocess, "Popen", return_value=proc),
+                mock.patch.object(runtime, "_terminate_windows_tree") as terminate,
+            ):
+                runtime.smoke_test_runtime(root, timeout_seconds=30)
+        terminate.assert_called_once_with(proc)
+        self.assertEqual(proc.communicate.call_count, 2)
+
+    def test_headless_smoke_timeout_reports_output_without_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / runtime.release_root(VERSION)
+            chrome = root / "Chrome-bin" / VERSION / "chrome.exe"
+            chrome.parent.mkdir(parents=True)
+            chrome.write_bytes(pe_bytes())
+            proc = mock.Mock()
+            proc.communicate.side_effect = (
+                runtime.subprocess.TimeoutExpired([str(chrome)], 30),
+                ("startup diagnostic", None),
+            )
+            with (
+                mock.patch.object(runtime, "os", types.SimpleNamespace(name="nt")),
+                mock.patch.object(runtime.subprocess, "Popen", return_value=proc),
+                mock.patch.object(runtime, "_terminate_windows_tree"),
+                self.assertRaisesRegex(
+                    runtime.WindowsRuntimeError,
+                    "without rendering.*startup diagnostic",
+                ),
+            ):
+                runtime.smoke_test_runtime(root, timeout_seconds=30)
 
 
 if __name__ == "__main__":
