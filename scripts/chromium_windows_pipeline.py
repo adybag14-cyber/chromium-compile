@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime
 import hashlib
 import json
@@ -4963,32 +4964,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             evidence_dir=args.evidence_dir,
         )
     elif args.command == "verify-checkpoint-run":
-        proof = verify_checkpoint_run(
-            repository=args.repository,
-            run_id=args.run_id,
-            version=args.version,
-            expected_stage=args.expected_stage,
-            expected_ref=args.expected_ref,
-            expected_sha=args.expected_sha,
-            artifact_name=args.artifact_name,
-        )
+        with contextlib.redirect_stdout(sys.stderr):
+            proof = verify_checkpoint_run(
+                repository=args.repository,
+                run_id=args.run_id,
+                version=args.version,
+                expected_stage=args.expected_stage,
+                expected_ref=args.expected_ref,
+                expected_sha=args.expected_sha,
+                artifact_name=args.artifact_name,
+            )
         print(json.dumps(proof, sort_keys=True))
     elif args.command == "verify-build-run":
-        proof = verify_completed_build_run(
-            repository=args.repository,
-            run_id=args.run_id,
-            version=args.version,
-            expected_ref=args.expected_ref,
-            expected_sha=args.expected_sha,
-        )
+        with contextlib.redirect_stdout(sys.stderr):
+            proof = verify_completed_build_run(
+                repository=args.repository,
+                run_id=args.run_id,
+                version=args.version,
+                expected_ref=args.expected_ref,
+                expected_sha=args.expected_sha,
+            )
         print(json.dumps(proof, sort_keys=True))
     elif args.command == "validate-release-bundle":
-        result = validate_release_bundle(
-            args.directory,
-            version=args.version,
-            expected_run_id=args.expected_run_id,
-            expected_sha=args.expected_sha,
-        )
+        with contextlib.redirect_stdout(sys.stderr):
+            result = validate_release_bundle(
+                args.directory,
+                version=args.version,
+                expected_run_id=args.expected_run_id,
+                expected_sha=args.expected_sha,
+            )
         print(json.dumps(result, sort_keys=True))
     elif args.command == "build":
         run_build_slice(

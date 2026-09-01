@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import io
 import json
@@ -54,6 +55,82 @@ class WindowsI686PipelineTests(unittest.TestCase):
             ):
                 with self.assertRaises(pipeline.WindowsPipelineError):
                     pipeline._runner_command_file("GITHUB_OUTPUT", "set_output_")
+
+    def test_machine_json_commands_keep_diagnostics_off_stdout(self):
+        cases = (
+            (
+                "verify_checkpoint_run",
+                [
+                    "verify-checkpoint-run",
+                    "--repository",
+                    "owner/repository",
+                    "--run-id",
+                    "1",
+                    "--version",
+                    "1.2.3.4",
+                    "--expected-stage",
+                    "1",
+                    "--expected-ref",
+                    "main",
+                    "--expected-sha",
+                    "a" * 40,
+                    "--artifact-name",
+                    "checkpoint",
+                ],
+            ),
+            (
+                "verify_completed_build_run",
+                [
+                    "verify-build-run",
+                    "--repository",
+                    "owner/repository",
+                    "--run-id",
+                    "1",
+                    "--version",
+                    "1.2.3.4",
+                    "--expected-ref",
+                    "main",
+                    "--expected-sha",
+                    "a" * 40,
+                ],
+            ),
+            (
+                "validate_release_bundle",
+                [
+                    "validate-release-bundle",
+                    ".",
+                    "--version",
+                    "1.2.3.4",
+                    "--expected-run-id",
+                    "1",
+                    "--expected-sha",
+                    "a" * 40,
+                ],
+            ),
+        )
+        expected = {"machine": "json"}
+        for function_name, argv in cases:
+            with self.subTest(command=argv[0]):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                def noisy_result(*_args, **_kwargs):
+                    print("+ gh api trusted/diagnostic")
+                    return expected
+
+                with (
+                    mock.patch.object(
+                        pipeline,
+                        function_name,
+                        side_effect=noisy_result,
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    self.assertEqual(pipeline.main(argv), 0)
+                self.assertEqual(json.loads(stdout.getvalue()), expected)
+                self.assertIn("+ gh api trusted/diagnostic", stderr.getvalue())
+                self.assertNotIn("+ gh api", stdout.getvalue())
 
     def test_port_config_files_have_checkout_stable_lf_policy(self):
         attributes = {
