@@ -22,16 +22,25 @@ SHA = "a" * 40
 RUN_ID = "123456"
 
 
-def run_payload(*, status="completed", conclusion="success", sha=SHA, version=VERSION):
+def run_payload(
+    *,
+    status="completed",
+    conclusion="success",
+    sha=SHA,
+    version=VERSION,
+    lane="linux",
+):
+    workflow = "chromium-i686.yml" if lane == "linux" else "chromium-windows-i686.yml"
+    label = "Chromium i686" if lane == "linux" else "Chromium Windows i686"
     return {
-        "path": ".github/workflows/chromium-i686.yml@refs/heads/main",
+        "path": f".github/workflows/{workflow}@refs/heads/main",
         "head_repository": {"full_name": REPO},
         "head_branch": BRANCH,
         "head_sha": sha,
         "event": "workflow_dispatch",
         "status": status,
         "conclusion": conclusion,
-        "display_title": f"Chromium i686 {version} - stage 3 - attempt 0",
+        "display_title": f"{label} {version} - stage 3 - attempt 0",
     }
 
 
@@ -127,6 +136,41 @@ class ReleaseHandoffTests(unittest.TestCase):
         self.assertEqual(kwargs["dedupe_since_run_id"], RUN_ID)
         self.assertEqual(kwargs["expected_head_sha"], SHA)
 
+    def test_windows_publisher_receives_independently_verified_build_sha(self):
+        created = datetime(2026, 8, 18, 15, 0, tzinfo=timezone.utc)
+        with (
+            mock.patch.object(
+                handoff,
+                "wait_for_successful_build",
+                return_value=run_payload(lane="windows"),
+            ),
+            mock.patch.object(
+                handoff.dispatch,
+                "workflow_run_created_at",
+                return_value=created,
+            ),
+            mock.patch.object(handoff, "wait_for_legacy_publisher", return_value=False),
+            mock.patch.object(
+                handoff.dispatch,
+                "dispatch_once",
+                return_value="accepted-confirmed",
+            ) as dispatch_once,
+        ):
+            result = handoff.handoff_release(
+                REPO,
+                RUN_ID,
+                VERSION,
+                BRANCH,
+                SHA,
+                lane="windows",
+            )
+        self.assertEqual(result, "accepted-confirmed")
+        inputs = dispatch_once.call_args.args[4]
+        self.assertEqual(dispatch_once.call_args.args[1], "publish-windows-i686-release.yml")
+        self.assertIn(f"build_run_id={RUN_ID}", inputs)
+        self.assertIn(f"version={VERSION}", inputs)
+        self.assertIn(f"build_sha={SHA}", inputs)
+
     def test_cli_inputs_fail_closed_before_github(self):
         invalid = [
             ("bad repo", RUN_ID, VERSION, BRANCH, SHA),
@@ -163,6 +207,14 @@ class ReleaseHandoffTests(unittest.TestCase):
         self.assertIn('test "${WORKFLOW_SHA}" = "${LINEAGE_SHA}"', handoff_workflow)
         self.assertIn("scripts/github_release_handoff.py", handoff_workflow)
         self.assertNotIn("pull_request_target", handoff_workflow)
+
+        windows_publish = (
+            ROOT / ".github/workflows/publish-windows-i686-release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("build_sha:", windows_publish)
+        self.assertIn("BUILD_SHA: ${{ inputs.build_sha }}", windows_publish)
+        self.assertIn('--expected-sha "${BUILD_SHA}"', windows_publish)
+        self.assertNotIn('--expected-sha "${WORKFLOW_SHA}"', windows_publish)
 
 
 if __name__ == "__main__":

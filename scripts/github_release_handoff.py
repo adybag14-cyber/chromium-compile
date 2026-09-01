@@ -183,12 +183,15 @@ def handoff_release(
 
     label = "Chromium i686" if lane == "linux" else "Chromium Windows i686"
     expected_title = f"Publish {label} {version} from build run {run_id}"
+    publisher_inputs = [f"build_run_id={run_id}", f"version={version}"]
+    if lane == "windows":
+        publisher_inputs.append(f"build_sha={normalized_sha}")
     return dispatch.dispatch_once(
         repository,
         PUBLISH_WORKFLOWS[lane],
         branch,
         expected_title,
-        [f"build_run_id={run_id}", f"version={version}"],
+        publisher_inputs,
         dedupe_completed=True,
         dedupe_since_run_id=run_id,
         expected_head_sha=normalized_sha,
