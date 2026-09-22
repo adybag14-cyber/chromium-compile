@@ -878,6 +878,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"## {lane.summary_title}",
         "",
         f"- Baseline: `{minimum}`",
+        f"- Latest version considered: `{max(versions, key=version_key) if versions else 'none'}`",
         f"- Stable versions above baseline observed: `{len(versions)}`",
         f"- Active port runs: `{len(state.active)}`",
         f"- Open maintenance issues: `{len(issue_blocked)}`",
@@ -889,8 +890,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     if source_pending:
         summary.append(f"- Source pending: `{', '.join(source_pending)}`")
+    if state.active:
+        summary.append(f"- Active versions: `{', '.join(sorted(state.active, key=version_key))}`")
     if candidates:
         summary.append(f"- Versions: `{', '.join(candidates)}`")
+    elif state.active:
+        summary.append("- Result: waiting for the active port pipeline to finish before starting another version.")
+    elif source_pending:
+        summary.append("- Result: waiting for authoritative source publication; pending versions remain retryable.")
     else:
         summary.append("- Result: no unprocessed stable release was found.")
     print("\n".join(summary))
