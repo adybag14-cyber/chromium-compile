@@ -250,6 +250,8 @@ jobs:
     name: Validate latest Chromium source contract
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      validated: ${{ steps.contract.outputs.validated }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -257,12 +259,26 @@ jobs:
           persist-credentials: false
 
       - name: Resolve latest source-declared tool pins
+        id: contract
         shell: bash
         run: |
           set -euo pipefail
+          echo "validated=false" >> "${GITHUB_OUTPUT}"
           source .github/scripts/chromium_i686_common.sh
           version="$(resolve_latest_version)"
           echo "Probing Chromium ${version} source contract."
+          if python3 scripts/chromium_source_object.py --version "${version}" --availability-only; then
+            :
+          else
+            status=$?
+            if [ "${status}" -eq 3 ]; then
+              echo "::notice::Chromium ${version} source archive is not published yet; deferring the source contract probe."
+              echo "Chromium ${version}: source publication pending; no source/tool contract result yet." >> "${GITHUB_STEP_SUMMARY}"
+              exit 0
+            fi
+            echo "::error::Could not verify Chromium ${version} source publication readiness."
+            exit "${status}"
+          fi
           source_metadata="${RUNNER_TEMP}/latest-chromium-source-object.json"
           source_cache_key="$(python3 scripts/chromium_source_object.py \
             --version "${version}" --metadata-out "${source_metadata}" --cache-key-only)"
@@ -298,6 +314,7 @@ jobs:
           install_gn_from_cipd
           "${GN_BINARY}" --version
           test "$(chromium_gn_version)" = "${expected_gn}"
+          echo "validated=true" >> "${GITHUB_OUTPUT}"
 
   validate_checkpoint_recovery:
     name: Validate real checkpoint recovery artifact
@@ -703,6 +720,7 @@ jobs:
       ${{
         always() &&
         needs.validate_upstream_contract.result == 'success' &&
+        needs.validate_upstream_contract.outputs.validated == 'true' &&
         (
           github.event_name == 'schedule' ||
           (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)

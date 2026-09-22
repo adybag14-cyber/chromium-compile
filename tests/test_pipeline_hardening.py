@@ -359,6 +359,7 @@ class PipelineHardeningTests(unittest.TestCase):
         source_close = validation[source_start:runner_start]
         self.assertIn("needs: validate_upstream_contract", source_close)
         self.assertIn("needs.validate_upstream_contract.result == 'success'", source_close)
+        self.assertIn("needs.validate_upstream_contract.outputs.validated == 'true'", source_close)
         self.assertIn("continue-on-error: true", source_close)
         self.assertIn("[i686-port] Chromium source/tool contract drift", source_close)
         self.assertIn("--close-if-open", source_close)
@@ -879,6 +880,11 @@ class PipelineHardeningTests(unittest.TestCase):
         self.assertIn("install_depot_tools", validation)
         self.assertIn("install_gn_from_cipd", validation)
         self.assertIn("report_upstream_contract_drift:", validation)
+        probe = validation[validation.index("  validate_upstream_contract:\n"):validation.index("  validate_checkpoint_recovery:\n")]
+        self.assertIn("validated: ${{ steps.contract.outputs.validated }}", probe)
+        self.assertIn('echo "validated=false" >> "${GITHUB_OUTPUT}"', probe)
+        self.assertLess(probe.index("--availability-only"), probe.index("--cache-key-only"))
+        self.assertGreater(probe.index('echo "validated=true"'), probe.index('test "$(chromium_gn_version)"'))
 
     def test_preflight_source_pending_is_retryable_not_quarantined(self):
         preflight = (ROOT / ".github/workflows/chromium-i686-preflight.yml").read_text(encoding="utf-8")

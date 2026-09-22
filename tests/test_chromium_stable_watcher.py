@@ -30,6 +30,24 @@ class StableWatcherTests(unittest.TestCase):
             [],
         )
 
+    def test_active_pipeline_reports_newer_version_without_claiming_queue_is_empty(self):
+        with mock.patch.object(watcher, "fetch_stable_versions", return_value=["154.0.0.1", "155.0.0.1"]), \
+             mock.patch.object(watcher, "list_blocked_versions", return_value=set()), \
+             mock.patch.object(watcher, "list_port_run_state", return_value=({"154.0.0.1"}, set())), \
+             mock.patch.object(watcher, "list_release_health", return_value=(set(), set())), \
+             mock.patch.object(watcher, "dispatch_preflight") as dispatch_call, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            result = watcher.main([
+                "--repository", "owner/repo", "--ref", "main", "--dry-run",
+                "--baseline", str(pathlib.Path(__file__).parents[1] / "support/baseline.json"),
+            ])
+        self.assertEqual(result, 0)
+        dispatch_call.assert_not_called()
+        self.assertIn("Latest version considered: `155.0.0.1`", stdout.getvalue())
+        self.assertIn("Active versions: `154.0.0.1`", stdout.getvalue())
+        self.assertIn("waiting for the active port pipeline", stdout.getvalue())
+        self.assertNotIn("no unprocessed stable release", stdout.getvalue())
+
     def test_blocked_version_does_not_hide_later_versions(self):
         state = watcher.PortState(
             known={"151.0.0.1"},
@@ -358,6 +376,8 @@ class StableWatcherTests(unittest.TestCase):
         dispatch_call.assert_not_called()
         self.assertIn("source object is not published yet", stdout.getvalue())
         self.assertIn("Stable versions waiting for source publication: `1`", stdout.getvalue())
+        self.assertIn("waiting for authoritative source publication", stdout.getvalue())
+        self.assertNotIn("no unprocessed stable release", stdout.getvalue())
 
     def test_pending_older_source_does_not_hide_later_ready_version(self):
         older, newer = "155.0.1.2", "155.0.1.3"
