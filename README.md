@@ -369,3 +369,9 @@ The staged builder now treats the GitHub-hosted runner as an untrusted, replacea
 Checkpoint reuse is fail-closed: the producer run/artifact must match the repository, Chromium build workflow, current ref, version and compatible stage; archive members/links are containment-validated before extraction; then checksum/manifest source, toolchain and port-contract checks apply.
 
 A compiler slice also has a bounded durable-progress watchdog: by default, if `out/Release_x86/.ninja_log` does not change for 90 minutes while `autoninja` is running, the process tree is terminated, the partial output is checkpointed, and the next slice gets a fresh runner. `CHROMIUM_I686_NINJA_STALL_MINUTES` may be set only from 30 through 180 minutes. The existing two-slice no-progress streak still stops a repeatedly wedged build, while the 340-minute checkpoint cutoff remains the absolute backstop.
+
+## License
+
+Unless otherwise noted, this repository's original scripts, workflows, documentation, and other original contributions are licensed under the [Apache License, Version 2.0](LICENSE).
+
+Chromium and third-party code and components retain their respective licenses and copyright notices.
