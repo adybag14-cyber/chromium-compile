@@ -20,6 +20,13 @@ pipeline = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = pipeline
 SPEC.loader.exec_module(pipeline)
 
+# Historical checkpoint fixtures must not inherit the current hosted image.
+CHECKPOINT_FIXTURE_RUNNER_ENV = {
+    "RUNNER_OS": "Windows",
+    "ImageOS": "win25-vs2026",
+    "ImageVersion": "20260824.214.3",
+}
+
 
 class WindowsI686PipelineTests(unittest.TestCase):
     @staticmethod
@@ -1066,6 +1073,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
                     1_785_646_800,
                 )
 
+    @mock.patch.dict(pipeline.os.environ, CHECKPOINT_FIXTURE_RUNNER_ENV)
     def test_prepared_state_and_checkpoint_bind_tag_and_linker_timestamps(self):
         state = pipeline.PreparedState(
             schema=pipeline.PREPARED_STATE_SCHEMA,
@@ -1459,6 +1467,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 stage=8,
             )
 
+    @mock.patch.dict(pipeline.os.environ, CHECKPOINT_FIXTURE_RUNNER_ENV)
     def test_latest_stage_seven_manifest_matches_approved_migration(self):
         migration = pipeline._resolve_checkpoint_migration(
             "33525395251",
@@ -1551,6 +1560,22 @@ class WindowsI686PipelineTests(unittest.TestCase):
         )
         self.assertEqual(compatibility.migration_run_id, "33525395251")
         self.assertFalse(compatibility.requires_gn_refresh)
+
+        for environment_field, value, manifest_field in (
+            ("ImageOS", "different-windows-image", "runner_image"),
+            ("ImageVersion", "20260922.1", "runner_image_version"),
+        ):
+            with (
+                self.subTest(runner_drift=environment_field),
+                mock.patch.dict(pipeline.os.environ, {environment_field: value}),
+                self.assertRaisesRegex(
+                    pipeline.WindowsPipelineError,
+                    f"runner toolchain drift: {manifest_field}$",
+                ),
+            ):
+                pipeline._checkpoint_manifest_matches_state(
+                    manifest, state, proof, migration=migration
+                )
 
         completed_migration = pipeline._resolve_checkpoint_migration(
             "33546924031",
