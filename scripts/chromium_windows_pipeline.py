@@ -15,6 +15,7 @@ import datetime
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -42,6 +43,8 @@ from chromium_source_object import (
 )
 from chromium_source_object import fetch_metadata as fetch_source_metadata
 from chromium_tool_pins import (
+    DEVTOOLS_NODE_MODULES,
+    DEVTOOLS_ROLLUP_LIBS,
     CipdPackagePin,
     GcsObjectPin,
     GitDependencyPin,
@@ -110,6 +113,10 @@ DEFAULT_TOOL_MAX_UNPACKED_GIB = 8
 DEFAULT_NETWORK_TIMEOUT_SECONDS = 7200
 DEFAULT_TOOLCHAIN_TIMEOUT_SECONDS = 3600
 DEFAULT_ARCHIVE_TIMEOUT_SECONDS = 1800
+# Chromium 158 has over 1.3 million source entries; Unicode-safe extraction
+# took 25.5 minutes on the hosted Windows image. Keep a bounded 60-minute
+# source allowance so normal runner I/O variance does not consume the margin.
+DEFAULT_SOURCE_EXTRACT_TIMEOUT_SECONDS = 3600
 DEFAULT_REMOVE_TIMEOUT_SECONDS = 900
 MAX_GN_REGEN_DEPFILE_BYTES = 4 * 1024 * 1024
 MAX_GN_REGEN_DEPENDENCIES = 100_000
@@ -1094,7 +1101,7 @@ def prepare_source(version: str, *, work_root: Path, cache_dir: Path) -> tuple[P
             "--version",
             version,
         ],
-        timeout=DEFAULT_ARCHIVE_TIMEOUT_SECONDS,
+        timeout=DEFAULT_SOURCE_EXTRACT_TIMEOUT_SECONDS,
     )
 
     _validate_extracted_version(source, version)
@@ -1815,6 +1822,7 @@ def _extract_gcs_tool_archive(
     destination: Path,
     *,
     source_root: Path,
+    allow_symlinks: bool = False,
 ) -> dict[str, int]:
     source_root = source_root.resolve()
     resolved_parent = destination.parent.resolve()
@@ -1836,6 +1844,7 @@ def _extract_gcs_tool_archive(
     seen_casefold: set[str] = set()
     member_count = 0
     unpacked_bytes = 0
+    symlinks: list[tuple[Path, str]] = []
     max_unpacked_bytes = DEFAULT_TOOL_MAX_UNPACKED_GIB * 1024**3
     try:
         try:
@@ -1861,6 +1870,14 @@ def _extract_gcs_tool_archive(
                     )
                 seen.add(name)
                 seen_casefold.add(folded)
+                if member.issym() and allow_symlinks:
+                    if not member.linkname or "\\" in member.linkname or PurePosixPath(member.linkname).is_absolute():
+                        raise WindowsPipelineError(f"Unsafe npm link target: {name}")
+                    link_name = _safe_tool_member_name(posixpath.normpath(posixpath.join(posixpath.dirname(name), member.linkname)))
+                    if not link_name:
+                        raise WindowsPipelineError(f"Empty npm link target: {name}")
+                    symlinks.append((staging.joinpath(*PurePosixPath(name).parts), link_name))
+                    continue
                 if not (member.isfile() or member.isdir()):
                     raise WindowsPipelineError(
                         f"Windows tool archive contains a link or special file: {name}"
@@ -1891,6 +1908,14 @@ def _extract_gcs_tool_archive(
                     )
                 with source, target.open("xb") as output:
                     shutil.copyfileobj(source, output, length=8 * 1024 * 1024)
+        # npm's .bin links are created only after all regular files, so archive
+        # entries cannot write through a symlink during extraction.
+        for target, link_name in symlinks:
+            link_target = staging.joinpath(*PurePosixPath(link_name).parts)
+            if not link_target.is_file() or link_target.is_symlink():
+                raise WindowsPipelineError(f"npm link does not target a regular packaged file: {link_name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(os.path.relpath(link_target, target.parent))
         if destination.exists():
             shutil.rmtree(destination)
         os.replace(staging, destination)
@@ -1911,7 +1936,7 @@ def install_windows_gcs_tools(
     depot_tools: Path,
     env: Mapping[str, str],
 ) -> tuple[str, tuple[GcsObjectPin, ...]]:
-    pins = resolve_windows_gcs_tool_pins(source / "DEPS")
+    pins = resolve_windows_gcs_tool_pins(source / "DEPS", source / "third_party/devtools-frontend/src/DEPS")
     descriptor_sha = windows_gcs_tool_descriptor_sha256(pins)
     for pin in pins:
         relative = PurePosixPath(pin.dependency).relative_to("src")
@@ -1939,6 +1964,7 @@ def install_windows_gcs_tools(
                     archive,
                     destination,
                     source_root=source,
+                    allow_symlinks=pin.dependency == DEVTOOLS_NODE_MODULES,
                 )
                 output = destination / pin.output_file
                 shutil.copy2(archive, output)
@@ -2137,55 +2163,66 @@ def install_windows_cipd_tools(
             "Dawn-pinned Windows Go CIPD package omitted bin/go.exe"
         )
     _run([str(dawn_go), "version"], cwd=source, env=env, timeout=120)
-    rollup_root = (
-        source
-        / "third_party/devtools-frontend/src/third_party/rollup_libs"
-    )
-    rollup_files = [
-        path
-        for path in rollup_root.rglob("*")
-        if path.is_file()
-        and not path.is_symlink()
-        and path.name not in {".cipd", ".chromium-windows-i686-cipd.json"}
-    ]
-    if not rollup_files:
-        raise WindowsPipelineError(
-            "Chromium-pinned DevTools rollup libraries package is empty"
-        )
     devtools_root = source / "third_party/devtools-frontend/src"
-    sync_rollup = devtools_root / "scripts/deps/sync_rollup_libs.py"
-    if not sync_rollup.is_file() or sync_rollup.is_symlink():
-        raise WindowsPipelineError(
-            "Pinned DevTools source omitted scripts/deps/sync_rollup_libs.py"
-        )
-    depot_python = _depot_python(depot_tools)
-    _run(
-        [str(depot_python), str(sync_rollup)],
-        cwd=devtools_root,
-        env=env,
-        timeout=300,
-    )
-    rollup_native_package = (
-        devtools_root
-        / "node_modules/@rollup/rollup-win32-x64-msvc/package.json"
-    )
-    rollup_cli = devtools_root / "node_modules/rollup/dist/bin/rollup"
     node = source / "third_party/node/win/node.exe"
-    for path, label in (
-        (rollup_native_package, "materialized native Rollup package"),
-        (rollup_cli, "DevTools Rollup CLI"),
-        (node, "Windows Node executable"),
-    ):
-        if not path.is_file() or path.is_symlink():
+    if any(pin.dependency == DEVTOOLS_ROLLUP_LIBS for pin in pins):
+        rollup_root = (
+            source
+            / "third_party/devtools-frontend/src/third_party/rollup_libs"
+        )
+        rollup_files = [
+            path
+            for path in rollup_root.rglob("*")
+            if path.is_file()
+            and not path.is_symlink()
+            and path.name not in {".cipd", ".chromium-windows-i686-cipd.json"}
+        ]
+        if not rollup_files:
             raise WindowsPipelineError(
-                f"DevTools Rollup runtime integration omitted {label}: {path}"
+                "Chromium-pinned DevTools rollup libraries package is empty"
             )
-    _run(
-        [str(node), str(rollup_cli), "--version"],
-        cwd=devtools_root,
-        env=env,
-        timeout=120,
-    )
+        devtools_root = source / "third_party/devtools-frontend/src"
+        sync_rollup = devtools_root / "scripts/deps/sync_rollup_libs.py"
+        if not sync_rollup.is_file() or sync_rollup.is_symlink():
+            raise WindowsPipelineError(
+                "Pinned DevTools source omitted scripts/deps/sync_rollup_libs.py"
+            )
+        depot_python = _depot_python(depot_tools)
+        _run(
+            [str(depot_python), str(sync_rollup)],
+            cwd=devtools_root,
+            env=env,
+            timeout=300,
+        )
+        rollup_native_package = (
+            devtools_root
+            / "node_modules/@rollup/rollup-win32-x64-msvc/package.json"
+        )
+        rollup_cli = devtools_root / "node_modules/rollup/dist/bin/rollup"
+        node = source / "third_party/node/win/node.exe"
+        for path, label in (
+            (rollup_native_package, "materialized native Rollup package"),
+            (rollup_cli, "DevTools Rollup CLI"),
+            (node, "Windows Node executable"),
+        ):
+            if not path.is_file() or path.is_symlink():
+                raise WindowsPipelineError(
+                    f"DevTools Rollup runtime integration omitted {label}: {path}"
+                )
+        _run(
+            [str(node), str(rollup_cli), "--version"],
+            cwd=devtools_root,
+            env=env,
+            timeout=120,
+        )
+    else:
+        # New DevTools revisions use a source-pinned GCS npm archive and esbuild,
+        # with no Rollup dependency or sync_rollup_libs.py hook.
+        tsc_cli = devtools_root / "node_modules/typescript/bin/tsc"
+        for path in (tsc_cli, devtools_root / "node_modules/typescript/package.json"):
+            if not path.is_file() or path.is_symlink():
+                raise WindowsPipelineError(f"Pinned DevTools npm archive omitted TypeScript: {path}")
+        _run([str(node), str(tsc_cli), "--version"], cwd=devtools_root, env=env, timeout=120)
     print(
         "Validated source-declared Windows CIPD tool descriptors: "
         f"SHA-256 {descriptor_sha}"

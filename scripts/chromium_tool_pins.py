@@ -35,9 +35,12 @@ WINDOWS_GCS_TOOL_DEPENDENCIES = (
     "src/third_party/rust-toolchain",
     "src/third_party/llvm-libclang",
 )
+DEVTOOLS_NODE_MODULES = "src/third_party/devtools-frontend/src/node_modules"
+DEVTOOLS_ROLLUP_LIBS = "src/third_party/devtools-frontend/src/third_party/rollup_libs"
 GCS_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 GCS_OBJECT_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
 WINDOWS_GCS_BUCKETS = {
+    DEVTOOLS_NODE_MODULES: "chromium-nodejs",
     "src/buildtools/win-format": "chromium-clang-format",
     "src/third_party/node/win": "chromium-nodejs",
     "src/third_party/node/node_modules": "chromium-nodejs",
@@ -45,6 +48,7 @@ WINDOWS_GCS_BUCKETS = {
     "src/third_party/llvm-libclang": "chromium-browser-clang",
 }
 WINDOWS_GCS_OUTPUT_FILES = {
+    DEVTOOLS_NODE_MODULES: "node_modules.tar.gz",
     "src/buildtools/win-format": "clang-format.exe",
     "src/third_party/node/win": "node.exe",
     "src/third_party/node/node_modules": "node_modules.tar.gz",
@@ -277,10 +281,10 @@ def _dependency_mapping(text: str, dependency: str) -> str:
 
 def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
     """Resolve one exact Windows first-class GCS object from Chromium DEPS."""
-    if dependency not in WINDOWS_GCS_TOOL_DEPENDENCIES:
+    if dependency not in WINDOWS_GCS_TOOL_DEPENDENCIES + (DEVTOOLS_NODE_MODULES,):
         raise ValueError(f"Unsupported Windows GCS tool dependency: {dependency!r}")
     text = path.read_text(encoding="utf-8")
-    mapping = _dependency_mapping(text, dependency)
+    mapping = _dependency_mapping(text, "node_modules" if dependency == DEVTOOLS_NODE_MODULES else dependency)
     if _literal_field(mapping, "dep_type") != "gcs":
         raise ValueError(f"Chromium dependency {dependency!r} is no longer first-class GCS")
     bucket = _literal_field(mapping, "bucket")
@@ -319,7 +323,7 @@ def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
             }
             allowed_conditions = (
                 {"non_git_source"}
-                if dependency == "src/third_party/node/node_modules"
+                if dependency in {"src/third_party/node/node_modules", DEVTOOLS_NODE_MODULES}
                 else windows_non_git_conditions
             )
             if normalized_condition not in allowed_conditions:
@@ -346,7 +350,7 @@ def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
         size_bytes = _integer_field(item, "size_bytes")
         generation = str(_integer_field(item, "generation"))
         object_path = PurePosixPath(object_name)
-        expected_parts = 1 if output_file else 2
+        expected_parts = 2 if dependency == DEVTOOLS_NODE_MODULES else (1 if output_file else 2)
         if (
             not GCS_OBJECT_RE.fullmatch(object_name)
             or object_path.is_absolute()
@@ -356,6 +360,8 @@ def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
             or (not output_file and not object_name.endswith(".tar.xz"))
         ):
             raise ValueError(f"Unsafe Windows GCS object name: {object_name!r}")
+        if dependency == DEVTOOLS_NODE_MODULES and object_path.parts != ("devtools-frontend", sha256):
+            raise ValueError("DevTools node_modules must use its content-addressed GCS object")
         if not re.fullmatch(r"[0-9a-f]{64}", sha256):
             raise ValueError(f"Mutable or malformed GCS SHA-256 for {dependency!r}")
         if not 1 <= size_bytes <= 2 * 1024**3:
@@ -383,15 +389,29 @@ def resolve_windows_gcs_object(path: Path, dependency: str) -> GcsObjectPin:
     return selected[0]
 
 
-def resolve_windows_gcs_tool_pins(path: Path) -> tuple[GcsObjectPin, ...]:
-    return tuple(
+def resolve_devtools_node_modules(path: Path) -> GcsObjectPin | None:
+    text = path.read_text(encoding="utf-8")
+    if not re.search(r"(?m)^[ \t]+(['\"])node_modules\1\s*:", text):
+        return None
+    if re.search(r"(?m)^[ \t]+(['\"])third_party/rollup_libs\1\s*:", text):
+        raise ValueError("Ambiguous DevTools npm layouts: GCS node_modules and legacy Rollup CIPD")
+    return resolve_windows_gcs_object(path, DEVTOOLS_NODE_MODULES)
+
+
+def resolve_windows_gcs_tool_pins(path: Path, devtools_deps: Path | None = None) -> tuple[GcsObjectPin, ...]:
+    pins = tuple(
         resolve_windows_gcs_object(path, dependency)
         for dependency in WINDOWS_GCS_TOOL_DEPENDENCIES
     )
+    node_modules = resolve_devtools_node_modules(devtools_deps) if devtools_deps else None
+    return pins + ((node_modules,) if node_modules else ())
 
 
 def windows_gcs_tool_descriptor_sha256(pins: tuple[GcsObjectPin, ...]) -> str:
-    if tuple(pin.dependency for pin in pins) != WINDOWS_GCS_TOOL_DEPENDENCIES:
+    if tuple(pin.dependency for pin in pins) not in (
+        WINDOWS_GCS_TOOL_DEPENDENCIES,
+        WINDOWS_GCS_TOOL_DEPENDENCIES + (DEVTOOLS_NODE_MODULES,),
+    ):
         raise ValueError(
             "Windows GCS tool descriptors are missing or out of canonical order"
         )
@@ -470,6 +490,7 @@ def resolve_windows_cipd_tool_pins(
     devtools_deps: Path,
     dawn_deps: Path,
 ) -> tuple[CipdPackagePin, ...]:
+    node_modules = resolve_devtools_node_modules(devtools_deps)
     return tuple(
         resolve_windows_cipd_package(
             (
@@ -484,11 +505,15 @@ def resolve_windows_cipd_tool_pins(
             dependency,
         )
         for dependency in WINDOWS_CIPD_TOOL_DEPENDENCIES
+        if not (node_modules and dependency == DEVTOOLS_ROLLUP_LIBS)
     )
 
 
 def windows_cipd_tool_descriptor_sha256(pins: tuple[CipdPackagePin, ...]) -> str:
-    if tuple(pin.dependency for pin in pins) != WINDOWS_CIPD_TOOL_DEPENDENCIES:
+    if tuple(pin.dependency for pin in pins) not in (
+        WINDOWS_CIPD_TOOL_DEPENDENCIES,
+        tuple(dependency for dependency in WINDOWS_CIPD_TOOL_DEPENDENCIES if dependency != DEVTOOLS_ROLLUP_LIBS),
+    ):
         raise ValueError(
             "Windows CIPD tool descriptors are missing or out of canonical order"
         )

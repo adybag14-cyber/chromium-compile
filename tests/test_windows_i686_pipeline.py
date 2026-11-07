@@ -1926,6 +1926,50 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
                     alias, destination, source_root=source
                 )
 
+    def test_npm_archive_links_are_opt_in_and_materialized_after_regular_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            source = root / "src"
+            source.mkdir()
+            archive_path = root / "npm.tar.xz"
+            with tarfile.open(archive_path, "w:xz") as archive:
+                link = tarfile.TarInfo(".bin/tool")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../pkg/cli.js"
+                archive.addfile(link)
+                regular = tarfile.TarInfo("pkg/cli.js")
+                regular.size = 5
+                archive.addfile(regular, io.BytesIO(b"probe"))
+            destination = source / "node_modules"
+            with self.assertRaisesRegex(pipeline.WindowsPipelineError, "link or special"):
+                pipeline._extract_gcs_tool_archive(archive_path, destination, source_root=source)
+            try:
+                pipeline._extract_gcs_tool_archive(archive_path, destination, source_root=source, allow_symlinks=True)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Local account lacks symlink privilege; hosted Windows runner verifies this case")
+                raise
+            self.assertTrue((destination / ".bin/tool").is_symlink())
+            self.assertEqual((destination / ".bin/tool").read_bytes(), b"probe")
+
+    def test_npm_archive_rejects_external_links_without_replacing_destination(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            source = root / "src"
+            source.mkdir()
+            destination = source / "node_modules"
+            destination.mkdir()
+            (destination / "keep").write_bytes(b"untouched")
+            archive_path = root / "npm.tar.xz"
+            with tarfile.open(archive_path, "w:xz") as archive:
+                link = tarfile.TarInfo(".bin/tool")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../outside"
+                archive.addfile(link)
+            with self.assertRaises(pipeline.WindowsPipelineError):
+                pipeline._extract_gcs_tool_archive(archive_path, destination, source_root=source, allow_symlinks=True)
+            self.assertEqual((destination / "keep").read_bytes(), b"untouched")
+
     def test_gn_args_use_trusted_file_not_multiline_command_argument(self):
         source = (ROOT / "scripts/chromium_windows_pipeline.py").read_text(
             encoding="utf-8"
