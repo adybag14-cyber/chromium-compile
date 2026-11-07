@@ -29,6 +29,17 @@ archive_validator = load_module("validate_release_archive", "scripts/validate_re
 
 
 class ToolPinTests(unittest.TestCase):
+    DEVTOOLS_NPM_MAPPING = """
+  'node_modules': {
+    'dep_type': 'gcs', 'bucket': 'chromium-nodejs', 'condition': 'non_git_source',
+    'objects': [{
+      'object_name': 'devtools-frontend/c67f72622077f8d20a0d641e63f95772120577b846ace3e3d434db9f13188350',
+      'sha256sum': 'c67f72622077f8d20a0d641e63f95772120577b846ace3e3d434db9f13188350',
+      'size_bytes': 25471299, 'generation': 1792758257766269,
+      'output_file': 'node_modules.tar.gz',
+    }],
+  },
+"""
     DEVTOOLS_CIPD_DEPS = """
 deps = {
   'third_party/esbuild': {
@@ -311,6 +322,36 @@ deps = {
                 tool_pins.windows_git_tool_descriptor_sha256(git_pins),
                 r"^[0-9a-f]{64}$",
             )
+
+    def test_modern_devtools_uses_pinned_npm_archive_instead_of_rollup_cipd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            deps, devtools, dawn = root / "DEPS", root / "DEVTOOLS", root / "DAWN"
+            deps.write_text("deps = {\n" + self.WINDOWS_GCS_DEPS + "}\n")
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS.split("  'third_party/rollup_libs'")[0] + self.DEVTOOLS_NPM_MAPPING + "}\n")
+            dawn.write_text(self.DAWN_CIPD_DEPS)
+            gcs = tool_pins.resolve_windows_gcs_tool_pins(deps, devtools)
+            self.assertEqual(gcs[-1].dependency, tool_pins.DEVTOOLS_NODE_MODULES)
+            self.assertEqual(gcs[-1].generation, "1792758257766269")
+            self.assertNotEqual(tool_pins.windows_gcs_tool_descriptor_sha256(gcs), tool_pins.windows_gcs_tool_descriptor_sha256(gcs[:-1]))
+            cipd = tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
+            self.assertEqual(len(cipd), 4)
+            self.assertNotIn(tool_pins.DEVTOOLS_ROLLUP_LIBS, [pin.dependency for pin in cipd])
+            self.assertRegex(tool_pins.windows_cipd_tool_descriptor_sha256(cipd), r"^[0-9a-f]{64}$")
+
+    def test_modern_devtools_rejects_ambiguous_layout_and_invalid_object_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "DEPS"
+            for text in (
+                self.DEVTOOLS_CIPD_DEPS + self.DEVTOOLS_NPM_MAPPING,
+                self.DEVTOOLS_NPM_MAPPING.replace("'chromium-nodejs'", "'other-bucket'"),
+                self.DEVTOOLS_NPM_MAPPING.replace("devtools-frontend/", "other-namespace/"),
+                self.DEVTOOLS_NPM_MAPPING.replace("1792758257766269", "0"),
+            ):
+                with self.subTest(text=text):
+                    path.write_text(text)
+                    with self.assertRaises(ValueError):
+                        tool_pins.resolve_devtools_node_modules(path)
 
     def test_windows_gcs_tool_pin_rejects_broadened_host_condition(self):
         with tempfile.TemporaryDirectory() as tmp:
