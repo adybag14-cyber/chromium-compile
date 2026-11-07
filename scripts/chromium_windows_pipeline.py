@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import copy
 import datetime
 import hashlib
 import json
@@ -967,6 +968,44 @@ def _validate_extracted_version(source: Path, expected: str) -> None:
         )
 
 
+def extract_source_archive(tarball: Path, destination: Path, version: str) -> None:
+    """Extract the validated source with Unicode names, stripping its root."""
+    root = f"chromium-{validate_version(version)}"
+    if destination.is_symlink() or getattr(destination, "is_junction", lambda: False)():
+        raise WindowsPipelineError("Source extraction destination is a reparse point")
+    if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
+        raise WindowsPipelineError("Source extraction requires a fresh empty directory")
+    destination.mkdir(parents=True, exist_ok=True)
+    count = 0
+
+    def strip_root(name: str) -> str:
+        path = PurePosixPath(name)
+        if path.is_absolute() or not path.parts or path.parts[0] != root or ".." in path.parts:
+            raise WindowsPipelineError(f"Source member is outside its version root: {name!r}")
+        return PurePosixPath(*path.parts[1:]).as_posix()
+
+    # Windows' bundled bsdtar 3.8.9 cannot decode names outside the ANSI code
+    # page. Python retains Unicode paths and its data filter checks extraction
+    # and link destinations against the fresh root on the actual host OS.
+    with tarfile.open(tarball, mode="r|xz", errorlevel=2) as archive:
+        def members():
+            nonlocal count
+            for original in archive:
+                member = copy.copy(original)
+                member.name = strip_root(original.name)
+                if member.name == ".":
+                    if not member.isdir():
+                        raise WindowsPipelineError("Source archive root is not a directory")
+                    continue
+                if member.islnk():
+                    member.linkname = strip_root(member.linkname)
+                count += 1
+                yield member
+
+        archive.extractall(destination, members=members(), filter="data")
+    print(f"Extracted {count} source members with the Unicode-safe Python tar reader")
+
+
 def prepare_source(version: str, *, work_root: Path, cache_dir: Path) -> tuple[Path, str]:
     version = validate_version(version)
     work_root = validate_work_root(work_root)
@@ -1043,17 +1082,17 @@ def prepare_source(version: str, *, work_root: Path, cache_dir: Path) -> tuple[P
     # an atomic staging directory would add dozens of avoidable path characters.
     # A failed extraction cannot be reused because every job receives a new VM.
     source.mkdir(parents=True)
-    tar = shutil.which("tar.exe") or shutil.which("tar")
-    if not tar:
-        raise InfrastructureError("bsdtar is unavailable for Chromium source extraction")
     _run(
         [
-            tar,
-            "-xJf",
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "extract-source",
+            "--tarball",
             str(tarball),
-            "-C",
+            "--destination",
             str(source),
-            "--strip-components=1",
+            "--version",
+            version,
         ],
         timeout=DEFAULT_ARCHIVE_TIMEOUT_SECONDS,
     )
@@ -4864,6 +4903,11 @@ def build_parser() -> argparse.ArgumentParser:
     config = subparsers.add_parser("config-hash")
     config.add_argument("--repository-root", type=Path, required=True)
 
+    extract = subparsers.add_parser("extract-source")
+    extract.add_argument("--tarball", type=Path, required=True)
+    extract.add_argument("--destination", type=Path, required=True)
+    extract.add_argument("--version", required=True)
+
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--version", required=True)
     prepare.add_argument("--work-root", type=Path, required=True)
@@ -4949,6 +4993,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(asdict(verify_windows_x86_source_contract(args.source)), sort_keys=True))
     elif args.command == "config-hash":
         print(compute_port_config_sha256(args.repository_root))
+    elif args.command == "extract-source":
+        extract_source_archive(args.tarball, args.destination, args.version)
     elif args.command == "prepare":
         prepare_pipeline(
             version=args.version,
@@ -5051,6 +5097,7 @@ if __name__ == "__main__":
         OSError,
         ValueError,
         json.JSONDecodeError,
+        tarfile.TarError,
         zipfile.BadZipFile,
     ) as exc:
         print(f"deterministic pipeline error: {exc}", file=sys.stderr)

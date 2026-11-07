@@ -37,6 +37,62 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 info.size = len(payload)
                 archive.addfile(info, io.BytesIO(payload))
 
+    def test_source_extraction_preserves_unicode_bytes_timestamps_and_hardlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            archive_path = root / "source.tar.xz"
+            names = ["plain.txt", "\u65e5\u672c\u8a9e.txt", "nested/\U0001f428.txt"]
+            with tarfile.open(archive_path, "w:xz", format=tarfile.PAX_FORMAT) as archive:
+                for name in names:
+                    info = tarfile.TarInfo("chromium-1.2.3.4/" + name)
+                    info.size = 5
+                    info.mtime = 1234567890
+                    archive.addfile(info, io.BytesIO(b"probe"))
+                link = tarfile.TarInfo("chromium-1.2.3.4/linked.txt")
+                link.type = tarfile.LNKTYPE
+                link.mtime = 1234567890
+                link.linkname = "chromium-1.2.3.4/" + names[1]
+                archive.addfile(link)
+            destination = root / "src"
+            pipeline.extract_source_archive(archive_path, destination, "1.2.3.4")
+            for name in names + ["linked.txt"]:
+                self.assertEqual((destination / name).read_bytes(), b"probe")
+                self.assertEqual(int((destination / name).stat().st_mtime), 1234567890)
+            self.assertTrue((destination / "linked.txt").samefile(destination / names[1]))
+            self.assertFalse((destination / "chromium-1.2.3.4").exists())
+
+    def test_source_extraction_rejects_path_and_link_escapes(self):
+        cases = [
+            ("chromium-1.2.3.4/../outside", tarfile.REGTYPE, ""),
+            ("different-root/outside", tarfile.REGTYPE, ""),
+            ("chromium-1.2.3.4/link", tarfile.SYMTYPE, "../outside"),
+            ("chromium-1.2.3.4/link", tarfile.LNKTYPE, "outside"),
+        ]
+        for name, kind, target in cases:
+            with self.subTest(name=name, target=target), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp)
+                outside = root / "outside"
+                outside.write_bytes(b"untouched")
+                archive_path = root / "source.tar.xz"
+                with tarfile.open(archive_path, "w:xz") as archive:
+                    info = tarfile.TarInfo(name)
+                    info.type = kind
+                    info.linkname = target
+                    archive.addfile(info)
+                with self.assertRaises((pipeline.WindowsPipelineError, tarfile.FilterError)):
+                    pipeline.extract_source_archive(archive_path, root / "src", "1.2.3.4")
+                self.assertEqual(outside.read_bytes(), b"untouched")
+
+    def test_source_extraction_does_not_overwrite_an_existing_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            destination = pathlib.Path(temp) / "src"
+            destination.mkdir()
+            sentinel = destination / "keep"
+            sentinel.write_text("untouched")
+            with self.assertRaisesRegex(pipeline.WindowsPipelineError, "fresh empty"):
+                pipeline.extract_source_archive(pathlib.Path(temp) / "missing.tar.xz", destination, "1.2.3.4")
+            self.assertEqual(sentinel.read_text(), "untouched")
+
     def test_runner_command_files_are_scoped_to_runner_temp(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
