@@ -105,7 +105,12 @@ WINDOWS_GIT_TOOL_DEPENDENCIES = (
     "src/third_party/microsoft_webauthn/src",
     "src/third_party/perl",
 )
+WINDOWS_MMR_DEPENDENCY = "src/third_party/microsoft_multimedia_redirection/src"
 WINDOWS_GIT_TOOL_REPOSITORIES = {
+    WINDOWS_MMR_DEPENDENCY: (
+        "/external/github.com/microsoft/multimedia-redirection.git",
+        "https://chromium.googlesource.com/external/github.com/microsoft/multimedia-redirection.git",
+    ),
     "src/third_party/gperf": (
         "/chromium/deps/gperf.git",
         "https://chromium.googlesource.com/chromium/deps/gperf.git",
@@ -526,7 +531,7 @@ def windows_cipd_tool_descriptor_sha256(pins: tuple[CipdPackagePin, ...]) -> str
 
 
 def resolve_windows_git_dependency(path: Path, dependency: str) -> GitDependencyPin:
-    if dependency not in WINDOWS_GIT_TOOL_DEPENDENCIES:
+    if dependency not in WINDOWS_GIT_TOOL_REPOSITORIES:
         raise ValueError(f"Unsupported Windows Git tool dependency: {dependency!r}")
     text = path.read_text(encoding="utf-8")
     mapping = _dependency_mapping(text, dependency)
@@ -560,14 +565,24 @@ def resolve_windows_git_dependency(path: Path, dependency: str) -> GitDependency
 
 
 def resolve_windows_git_tool_pins(path: Path) -> tuple[GitDependencyPin, ...]:
+    # MMR was added after the older supported Chromium source snapshots. Its
+    # presence is optional, but a declared dependency must retain the exact
+    # repository, checkout_win condition and immutable revision contracts.
+    text = path.read_text(encoding="utf-8")
+    optional = (WINDOWS_MMR_DEPENDENCY,) if re.search(
+        rf"(?m)^[ \t]+(['\"]){re.escape(WINDOWS_MMR_DEPENDENCY)}\1\s*:", text
+    ) else ()
     return tuple(
         resolve_windows_git_dependency(path, dependency)
-        for dependency in WINDOWS_GIT_TOOL_DEPENDENCIES
+        for dependency in WINDOWS_GIT_TOOL_DEPENDENCIES + optional
     )
 
 
 def windows_git_tool_descriptor_sha256(pins: tuple[GitDependencyPin, ...]) -> str:
-    if tuple(pin.dependency for pin in pins) != WINDOWS_GIT_TOOL_DEPENDENCIES:
+    if tuple(pin.dependency for pin in pins) not in (
+        WINDOWS_GIT_TOOL_DEPENDENCIES,
+        WINDOWS_GIT_TOOL_DEPENDENCIES + (WINDOWS_MMR_DEPENDENCY,),
+    ):
         raise ValueError(
             "Windows Git tool descriptors are missing or out of canonical order"
         )
