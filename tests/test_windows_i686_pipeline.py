@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -2023,6 +2024,7 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
             source = pathlib.Path(temp) / "src"
             out = source / "out" / pipeline.OUT_NAME
             out.mkdir(parents=True)
+            (source / "a.cc").write_text("int source;\n", encoding="utf-8")
             ninja_log = out / ".ninja_log"
             ninja_deps = out / ".ninja_deps"
             ninja_log.write_text(
@@ -2047,6 +2049,8 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
                         "No missing dependencies on generated files found.\n",
                         "",
                     )
+                if "targets" in command:
+                    return pipeline.subprocess.CompletedProcess(command, 0, "obj/generated.h: generate\nchrome: phony\nmini_installer: phony\n", "")
                 self.fail(f"Unexpected Ninja closure command: {command}")
 
             log_before = ninja_log.read_bytes()
@@ -2059,13 +2063,45 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
                     {},
                 )
 
-            self.assertEqual(runner.call_count, 2)
+            self.assertEqual(runner.call_count, 3)
             self.assertEqual(stats["manifest_input_count"], 2)
+            self.assertEqual(stats["source_inputs_checked"], 1)
             self.assertEqual(stats["dependency_nodes_processed"], 156605)
             self.assertFalse(stats["build_simulation"])
             self.assertTrue(stats["state_unchanged"])
             self.assertEqual(ninja_log.read_bytes(), log_before)
             self.assertEqual(ninja_deps.read_bytes(), deps_before)
+
+    @unittest.skipUnless(shutil.which("ninja"), "Ninja is required for the real graph fixture")
+    def test_real_ninja_closure_rejects_missing_sources_but_allows_generated_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "src"
+            out = source / "out" / pipeline.OUT_NAME
+            out.mkdir(parents=True)
+            (source / "source file.txt").write_text("generator input", encoding="utf-8")
+            (out / "build.ninja").write_text(
+                "rule generate\n  command = echo SHOULD-NOT-EXECUTE\n"
+                "build obj/generated$ file.h: generate ../../source$ file.txt\n"
+                "build obj/Mmr_i.obj: generate ../../Mmr_i.c obj/generated$ file.h\n"
+                "build chrome: phony obj/Mmr_i.obj\n"
+                "build mini_installer: phony chrome\n", encoding="utf-8")
+            ninja = pathlib.Path(shutil.which("ninja"))
+            if ninja.name.casefold() != "ninja.exe":
+                # The production helper allows Windows executable basenames.
+                # A Linux fixture can exercise the same Ninja tools under that
+                # name without broadening the production executable allowlist.
+                fixture_ninja = pathlib.Path(temp) / "ninja.exe"
+                shutil.copy2(ninja, fixture_ninja)
+                ninja = fixture_ninja
+            with self.assertRaisesRegex(pipeline.WindowsPipelineError, "no producer.*missing"):
+                pipeline.validate_ninja_input_closure(source, out, ninja, dict(pipeline.os.environ))
+            (source / "Mmr_i.c").write_text("/* interface GUIDs */\n", encoding="utf-8")
+            stats = pipeline.validate_ninja_input_closure(source, out, ninja, dict(pipeline.os.environ))
+            self.assertEqual(stats["source_inputs_checked"], 2)
+            self.assertFalse(stats["build_simulation"])
+            self.assertTrue(stats["state_unchanged"])
+            self.assertFalse((out / "obj/generated file.h").exists())
+            self.assertFalse((out / "obj/Mmr_i.obj").exists())
 
     def test_read_only_ninja_closure_rejects_progress_database_mutation(self):
         with tempfile.TemporaryDirectory() as temp:

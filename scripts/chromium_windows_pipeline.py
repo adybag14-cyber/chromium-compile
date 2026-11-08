@@ -2243,6 +2243,7 @@ def install_windows_git_tools(
         "src/third_party/gperf": "gperf",
         "src/third_party/microsoft_dxheaders/src": "microsoft-dxheaders",
         "src/third_party/microsoft_webauthn/src": "microsoft-webauthn",
+        "src/third_party/microsoft_multimedia_redirection/src": "microsoft-multimedia-redirection",
         "src/third_party/perl": "perl",
     }
     resolved_source = source.resolve()
@@ -2344,6 +2345,14 @@ def install_windows_git_tools(
             )
     _run([str(gperf), "--version"], cwd=source, env=env, timeout=120)
     _run([str(perl), "-v"], cwd=source, env=env, timeout=120)
+    if any(pin.dependency == "src/third_party/microsoft_multimedia_redirection/src" for pin in pins):
+        mmr = source / "third_party/microsoft_multimedia_redirection/src"
+        for relative in ("api/Mmr.idl", "api/Mmr_h.h", "api/Mmr_i.c", "LICENSE"):
+            path = mmr / relative
+            if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+                raise WindowsPipelineError(
+                    f"Chromium-pinned Microsoft multimedia redirection omitted {relative}"
+                )
     print(
         "Validated source-declared Windows Git tool descriptors: "
         f"SHA-256 {descriptor_sha}"
@@ -4007,7 +4016,9 @@ def validate_ninja_input_closure(
     creating response files or pretending that generated outputs completed. It
     is therefore not a read-only checkpoint validator. Ninja's ``inputs`` and
     ``missingdeps`` tools parse the same manifest closure, while ``missingdeps``
-    also loads and checks the dependency database. ``-n`` prevents the log-open
+    also loads and checks the dependency database. Neither tool diagnoses an
+    absent source file, so compare inputs with the declared producer outputs
+    and require every non-generated input to exist. ``-n`` prevents the log-open
     path from recompacting either database. Exact before/after identities make
     preserving completed work an enforced invariant rather than an assumption.
     """
@@ -4053,6 +4064,49 @@ def validate_ninja_input_closure(
             raise WindowsPipelineError(
                 "Ninja input-closure traversal was empty, duplicated, malformed, or unbounded"
             )
+
+        target_probe = _run(
+            [str(ninja), "-C", str(out), "-n", "-t", "targets", "all"],
+            cwd=source, env=env, timeout=1200, capture=True,
+        )
+        target_text = target_probe.stdout or ""
+        target_lines = target_text.splitlines()
+        if (not target_lines or len(target_lines) > MAX_NINJA_INPUT_CLOSURE_COUNT
+                or len(target_text.encode("utf-8")) > MAX_NINJA_INPUT_CLOSURE_BYTES
+                or (target_probe.stderr or "").strip()):
+            raise WindowsPipelineError("Ninja producer traversal was empty, malformed, or unbounded")
+
+        def identity(value: str) -> str:
+            return os.path.normcase(os.path.abspath(out / value))
+
+        outputs = set()
+        for line in target_lines:
+            path, separator, rule = line.rpartition(": ")
+            if (not separator or not path or "\0" in path or len(path) > 32_768
+                    or not re.fullmatch(r"[A-Za-z0-9_.+-]+", rule)):
+                raise WindowsPipelineError("Ninja producer traversal contains a malformed target")
+            outputs.add(identity(path))
+        source_inputs_checked = 0
+        for line in input_lines:
+            # `inputs` shell-quotes paths; `targets all` prints raw paths.
+            # Windows command-line quoting does not treat apostrophes specially.
+            if os.name == "nt":
+                value = line[1:-1] if line.startswith('"') and line.endswith('"') else line
+                if '"' in value:
+                    raise WindowsPipelineError("Ninja input has malformed Windows quoting")
+            else:
+                values = shlex.split(line)
+                if len(values) != 1:
+                    raise WindowsPipelineError("Ninja input has malformed shell quoting")
+                value = values[0]
+            if not value:
+                raise WindowsPipelineError("Ninja input path is empty")
+            if identity(value) not in outputs:
+                source_inputs_checked += 1
+                if not (out / value).exists():
+                    raise WindowsPipelineError(
+                        f"Ninja input has no producer and is missing from the prepared source: {value}"
+                    )
 
         missing_probe = _run(
             [
@@ -4100,6 +4154,8 @@ def validate_ninja_input_closure(
         "manifest_input_bytes": len(input_payload),
         "manifest_input_count": len(input_lines),
         "manifest_input_sha256": hashlib.sha256(input_payload).hexdigest(),
+        "source_inputs_checked": source_inputs_checked,
+        "declared_output_count": len(outputs),
         "ninja_databases": before,
         "ninja_tool_dry_run_guard": True,
         "state_unchanged": True,

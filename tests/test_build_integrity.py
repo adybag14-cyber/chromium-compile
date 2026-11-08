@@ -487,6 +487,36 @@ deps = {
             with self.assertRaisesRegex(ValueError, "moved repositories"):
                 tool_pins.resolve_windows_git_tool_pins(deps)
 
+    def test_optional_mmr_dependency_is_pinned_and_changes_provenance(self):
+        mapping = """
+  'src/third_party/microsoft_multimedia_redirection/src': {
+    'url': Var('chromium_git') + '/external/github.com/microsoft/multimedia-redirection.git' + '@' + '8b1d8893d126547309f1bab8d8232418aa7c7109',
+    'condition': 'checkout_win',
+  },
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = pathlib.Path(tmp) / "DEPS"
+            legacy = "deps = {\n" + self.WINDOWS_GCS_DEPS + "}\n"
+            deps.write_text(legacy, encoding="utf-8")
+            before = tool_pins.resolve_windows_git_tool_pins(deps)
+            self.assertEqual(len(before), 4)
+            deps.write_text("deps = {\n" + self.WINDOWS_GCS_DEPS + mapping + "}\n", encoding="utf-8")
+            current = tool_pins.resolve_windows_git_tool_pins(deps)
+            self.assertEqual(current[-1].dependency, tool_pins.WINDOWS_MMR_DEPENDENCY)
+            self.assertEqual(current[-1].revision, "8b1d8893d126547309f1bab8d8232418aa7c7109")
+            self.assertNotEqual(tool_pins.windows_git_tool_descriptor_sha256(before),
+                                tool_pins.windows_git_tool_descriptor_sha256(current))
+            for bad in (
+                mapping.replace("/external/github.com/microsoft/", "/attacker/"),
+                mapping.replace("checkout_win", "checkout_linux"),
+                mapping.replace("8b1d8893d126547309f1bab8d8232418aa7c7109", "main"),
+                mapping + mapping,
+            ):
+                with self.subTest(mapping=bad):
+                    deps.write_text("deps = {\n" + self.WINDOWS_GCS_DEPS + bad + "}\n", encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        tool_pins.resolve_windows_git_tool_pins(deps)
+
 
 
 class RuntimeCollectorTests(unittest.TestCase):
