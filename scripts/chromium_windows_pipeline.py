@@ -2415,6 +2415,38 @@ def materialize_chromium_revision_metadata(
     return windows_build_timestamp
 
 
+def materialize_source_gn(
+    source: Path,
+    gn: Path,
+    depot_tools: Path,
+    env: Mapping[str, str],
+) -> None:
+    # V8 metagen invokes depot_tools/gn.py during compilation. That wrapper
+    # searches buildtools inside the source tree, not our separate CIPD root.
+    # Keep the CIPD site separate from the populated source tarball, but expose
+    # the same pinned executable at the wrapper's preferred upstream location.
+    target = source / "buildtools/win/gn/gn.exe"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(gn, target)
+    if sha256_file(target) != sha256_file(gn):
+        raise InfrastructureError("Source-tree GN differs from the pinned CIPD executable")
+    expected = _run(
+        [str(gn), "--version"], env=env, timeout=60, capture=True
+    ).stdout.strip()
+    actual = _run(
+        [str(_depot_python(depot_tools)), str(depot_tools / "gn.py"), "--version"],
+        cwd=source,
+        env=env,
+        timeout=60,
+        capture=True,
+    ).stdout.strip()
+    if not expected or actual != expected:
+        raise WindowsPipelineError(
+            f"depot_tools GN wrapper version mismatch: expected {expected!r}, got {actual!r}"
+        )
+    print(f"Verified source-tree GN wrapper: {actual} at {target}")
+
+
 def install_source_declared_tools(
     source: Path,
     work_root: Path,
@@ -2459,7 +2491,7 @@ def install_source_declared_tools(
     gn = gn_root / "gn.exe"
     if not gn.is_file():
         raise WindowsPipelineError("Chromium-pinned GN CIPD install omitted gn.exe")
-    _run([str(gn), "--version"], env=env, timeout=60)
+    materialize_source_gn(source, gn, depot_tools, env)
 
     # The official source tarball already contains a populated
     # third_party/ninja directory, so it cannot become a fresh CIPD site root.
