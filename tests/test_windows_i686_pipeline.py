@@ -1794,6 +1794,59 @@ MSVS_VERSIONS = collections.OrderedDict([('2026', '18.0')])
         self.assertIn("Debuggers/x86/dbghelp.dll", source)
         self.assertIn("Lib/{sdk_family}/um/x86/kernel32.lib", source)
 
+    def test_source_gn_exposes_pinned_bytes_and_probes_depot_wrapper(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            source = root / "src"
+            gn = root / "gn.exe"
+            gn.write_bytes(b"pinned GN executable")
+            depot = root / "depot_tools"
+            python = depot / "python3.exe"
+            env = {"DEPOT_TOOLS_UPDATE": "0"}
+            with mock.patch.object(pipeline, "_depot_python", return_value=python), mock.patch.object(
+                pipeline, "_run",
+                return_value=pipeline.subprocess.CompletedProcess([], 0, "1234 (pinned)\n", ""),
+            ) as run:
+                pipeline.materialize_source_gn(source, gn, depot, env)
+            self.assertEqual(
+                (source / "buildtools/win/gn/gn.exe").read_bytes(), gn.read_bytes()
+            )
+            self.assertEqual(run.call_args_list, [
+                mock.call([str(gn), "--version"], env=env, timeout=60, capture=True),
+                mock.call(
+                    [str(python), str(depot / "gn.py"), "--version"],
+                    cwd=source, env=env, timeout=60, capture=True,
+                ),
+            ])
+
+    def test_source_gn_rejects_corrupted_copy_before_executing_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            gn = root / "gn.exe"
+            gn.write_bytes(b"pinned GN executable")
+            with mock.patch.object(
+                pipeline.shutil, "copy2",
+                side_effect=lambda source, target: target.write_bytes(b"corrupted"),
+            ), mock.patch.object(pipeline, "_run") as run:
+                with self.assertRaisesRegex(pipeline.InfrastructureError, "Source-tree GN differs"):
+                    pipeline.materialize_source_gn(root / "src", gn, root / "depot", {})
+            run.assert_not_called()
+
+    def test_source_gn_rejects_wrapper_version_drift_or_empty_version(self):
+        for expected, actual in [("1234 (pinned)", "5678 (different)"), ("", "")]:
+            with self.subTest(expected=expected, actual=actual), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp)
+                gn = root / "gn.exe"
+                gn.write_bytes(b"pinned GN executable")
+                with mock.patch.object(pipeline, "_depot_python", return_value=root / "python.exe"), mock.patch.object(
+                    pipeline, "_run", side_effect=[
+                        pipeline.subprocess.CompletedProcess([], 0, expected, ""),
+                        pipeline.subprocess.CompletedProcess([], 0, actual, ""),
+                    ],
+                ):
+                    with self.assertRaisesRegex(pipeline.WindowsPipelineError, "wrapper version mismatch"):
+                        pipeline.materialize_source_gn(root / "src", gn, root / "depot", {})
+
     def test_windows_batch_tools_use_tokenized_cmd_call_without_s_requoting(self):
         source = (ROOT / "scripts/chromium_windows_pipeline.py").read_text(
             encoding="utf-8"
