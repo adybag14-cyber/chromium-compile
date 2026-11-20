@@ -339,6 +339,27 @@ deps = {
             self.assertNotIn(tool_pins.DEVTOOLS_ROLLUP_LIBS, [pin.dependency for pin in cipd])
             self.assertRegex(tool_pins.windows_cipd_tool_descriptor_sha256(cipd), r"^[0-9a-f]{64}$")
 
+    def test_pinned_devtools_checkout_can_supply_typescript_without_a_package_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            deps, devtools, dawn = root / "DEPS", root / "DEVTOOLS", root / "DAWN"
+            deps.write_text("deps = {\n" + self.WINDOWS_GCS_DEPS + "}\n")
+            devtools.write_text(self.DEVTOOLS_CIPD_DEPS.split("  'third_party/rollup_libs'")[0] + "}\n")
+            dawn.write_text(self.DAWN_CIPD_DEPS)
+            with self.assertRaisesRegex(ValueError, "lacks vendored TypeScript"):
+                tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
+
+            typescript = root / "node_modules/typescript"
+            (typescript / "bin").mkdir(parents=True)
+            (typescript / "bin/tsc").write_text("require('../lib/tsc.js');\n")
+            (typescript / "package.json").write_text('{"name":"typescript"}\n')
+            gcs = tool_pins.resolve_windows_gcs_tool_pins(deps, devtools)
+            self.assertEqual(tuple(pin.dependency for pin in gcs), tool_pins.WINDOWS_GCS_TOOL_DEPENDENCIES)
+            cipd = tool_pins.resolve_windows_cipd_tool_pins(deps, devtools, dawn)
+            self.assertEqual(len(cipd), 4)
+            self.assertNotIn(tool_pins.DEVTOOLS_ROLLUP_LIBS, [pin.dependency for pin in cipd])
+            self.assertRegex(tool_pins.windows_cipd_tool_descriptor_sha256(cipd), r"^[0-9a-f]{64}$")
+
     def test_modern_devtools_rejects_ambiguous_layout_and_invalid_object_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "DEPS"
