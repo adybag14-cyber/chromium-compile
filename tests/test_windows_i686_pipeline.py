@@ -4,6 +4,7 @@ import io
 import json
 import pathlib
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -456,7 +457,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
 
     def test_restored_gn_manifest_revalidates_only_the_zero_byte_stamp(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = pathlib.Path(temp)
+            root = pathlib.Path(temp).resolve()
             source = root / "src"
             out = source / "out" / pipeline.OUT_NAME
             visual_studio = root / "Program Files/Microsoft Visual Studio/18/Enterprise"
@@ -471,6 +472,8 @@ class WindowsI686PipelineTests(unittest.TestCase):
             source_dep.write_text("group(\"fixture\") {}\n", encoding="utf-8")
             args_gn = out / "args.gn"
             args_gn.write_text(pipeline.WINDOWS_GN_ARGS, encoding="utf-8")
+            gn = root / "gn" / "gn.exe"
+            pinned_command = subprocess.list2cmdline([gn.as_posix().replace(":", "$:")])
             build_ninja = out / "build.ninja"
             build_ninja.write_text(
                 "\n".join(
@@ -478,7 +481,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
                         "ninja_required_version = 1.7.2",
                         "",
                         "rule gn",
-                        "  command = ../../../gn/gn.exe --root=../.. -q --regeneration gen .",
+                        f"  command = {pinned_command} --root=../.. -q --regeneration gen .",
                         "  pool = console",
                         "  description = Regenerating ninja files",
                         "",
@@ -526,6 +529,13 @@ class WindowsI686PipelineTests(unittest.TestCase):
             pipeline.os.utime(stamp, ns=(old_ns, old_ns))
             pipeline.os.utime(vs_dep, ns=(external_ns, external_ns))
             pipeline.os.utime(kits_dep, ns=(external_ns, external_ns))
+            original_graph = build_ninja.read_text(encoding="utf-8")
+            build_ninja.write_text(original_graph.replace("/gn/gn.exe", "/other/gn.exe"), encoding="utf-8")
+            with self.assertRaisesRegex(pipeline.WindowsPipelineError, "pinned GN executable"):
+                pipeline.revalidate_restored_gn_manifest(
+                    source, out, gn=gn, visual_studio=visual_studio, windows_kits_root=windows_kits
+                )
+            build_ninja.write_text(original_graph, encoding="utf-8")
             protected = {
                 path: (path.read_bytes(), path.stat().st_mtime_ns)
                 for path in (
@@ -541,6 +551,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
             stats = pipeline.revalidate_restored_gn_manifest(
                 source,
                 out,
+                gn=gn,
                 visual_studio=visual_studio,
                 windows_kits_root=windows_kits,
             )
@@ -584,6 +595,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
                 pipeline.revalidate_restored_gn_manifest(
                     source,
                     out,
+                    gn=root / "gn" / "gn.exe",
                     visual_studio=visual_studio,
                     windows_kits_root=windows_kits,
                 )

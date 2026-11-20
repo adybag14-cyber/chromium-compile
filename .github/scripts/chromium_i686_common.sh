@@ -406,14 +406,16 @@ normalize_ubuntu_archive_mirrors() {
   files+=("${apt_root}"/etc/apt/sources.list.d/*.list "${apt_root}"/etc/apt/sources.list.d/*.sources)
   shopt -u nullglob
 
+  local archive_mirror='(azure|[a-z]{2}-[a-z-]+-[0-9]+\.ec2)\.archive\.ubuntu\.com'
+  local ports_mirror='azure\.ports\.ubuntu\.com'
   local file changed=false
   for file in "${files[@]}"; do
     [ -f "${file}" ] || continue
-    if sudo grep -Eq 'azure\.(archive|ports)\.ubuntu\.com' "${file}"; then
-      echo "Rewriting unavailable Azure Ubuntu mirror in ${file} to the canonical Ubuntu archive."
-      sudo sed -i \
-        -e 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' \
-        -e 's/azure\.ports\.ubuntu\.com/ports.ubuntu.com/g' \
+    if sudo grep -Eq "https?://(${archive_mirror}|${ports_mirror})(/|[[:space:]]|$)" "${file}"; then
+      echo "Rewriting Ubuntu runner mirrors in ${file} to the canonical Ubuntu archives."
+      sudo sed -Ei \
+        -e "s@(https?://)${archive_mirror}(/|[[:space:]]|$)@\1archive.ubuntu.com\3@g" \
+        -e "s@(https?://)${ports_mirror}(/|[[:space:]]|$)@\1ports.ubuntu.com\2@g" \
         "${file}" || return 1
       changed=true
     fi
@@ -444,7 +446,7 @@ bounded_sudo_apt_get() {
 
   echo "::warning::APT index refresh failed/timed out; trying canonical Ubuntu mirrors once before giving up."
   if ! normalize_ubuntu_archive_mirrors; then
-    echo "::warning::No Azure Ubuntu mirror entry could be safely normalized for retry."
+    echo "::warning::No supported Ubuntu runner mirror entry could be normalized for retry."
     return 1
   fi
   _run_sudo_apt_get_with_timeout "${seconds}" "$@"
@@ -462,7 +464,7 @@ bounded_sudo_apt_prefetch_install() {
 
   echo "::warning::APT package prefetch failed/timed out before mutation; trying canonical Ubuntu mirrors once."
   if ! normalize_ubuntu_archive_mirrors; then
-    echo "::warning::No Azure Ubuntu mirror entry could be safely normalized for package-prefetch retry."
+    echo "::warning::No supported Ubuntu runner mirror entry could be normalized for package-prefetch retry."
     return 1
   fi
   if ! bounded_sudo_apt_get update; then

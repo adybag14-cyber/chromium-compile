@@ -156,20 +156,23 @@ fi
 [ "${calls}" -eq 1 ]
 [ "${normalized}" -eq 1 ]
 
-# Exercise the real Azure -> canonical Ubuntu rewrite against a temporary APT tree.
+# Exercise Azure and EC2 runner mirrors against a temporary APT tree.
 apt_root="${RUNNER_TEMP}/apt-root"
 mkdir -p "${apt_root}/etc/apt/sources.list.d"
 printf 'ID=ubuntu\nVERSION_ID="22.04"\n' > "${RUNNER_TEMP}/os-release"
 printf 'http://azure.archive.ubuntu.com/ubuntu\nhttps://archive.ubuntu.com/ubuntu\n' > "${apt_root}/etc/apt/apt-mirrors.txt"
 printf 'deb http://azure.archive.ubuntu.com/ubuntu jammy main universe\n' > "${apt_root}/etc/apt/sources.list"
-printf 'URIs: http://azure.archive.ubuntu.com/ubuntu\nSuites: jammy\n' > "${apt_root}/etc/apt/sources.list.d/ubuntu.sources"
+printf 'URIs: http://us-east-2.ec2.archive.ubuntu.com/ubuntu\nSuites: noble\n' > "${apt_root}/etc/apt/sources.list.d/ubuntu.sources"
+printf 'deb https://us-east-2.ec2.archive.ubuntu.com.example/ubuntu noble main\n' > "${apt_root}/etc/apt/sources.list.d/extra.list"
 export CHROMIUM_I686_OS_RELEASE_FILE="${RUNNER_TEMP}/os-release"
 export CHROMIUM_I686_APT_ROOT="${apt_root}"
 sudo() { "$@"; }
 real_normalize_ubuntu_archive_mirrors
 grep -q 'archive.ubuntu.com/ubuntu' "${apt_root}/etc/apt/apt-mirrors.txt"
 grep -q 'archive.ubuntu.com/ubuntu' "${apt_root}/etc/apt/sources.list"
-grep -q 'archive.ubuntu.com/ubuntu' "${apt_root}/etc/apt/sources.list.d/ubuntu.sources"
+grep -Fxq 'URIs: http://archive.ubuntu.com/ubuntu' "${apt_root}/etc/apt/sources.list.d/ubuntu.sources"
+grep -Fxq 'Suites: noble' "${apt_root}/etc/apt/sources.list.d/ubuntu.sources"
+grep -Fxq 'deb https://us-east-2.ec2.archive.ubuntu.com.example/ubuntu noble main' "${apt_root}/etc/apt/sources.list.d/extra.list"
 if grep -R -q 'azure.archive.ubuntu.com' "${apt_root}/etc/apt"; then
   echo "Azure Ubuntu mirror remained after normalization" >&2
   exit 1

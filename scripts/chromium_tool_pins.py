@@ -495,7 +495,20 @@ def resolve_windows_cipd_tool_pins(
     devtools_deps: Path,
     dawn_deps: Path,
 ) -> tuple[CipdPackagePin, ...]:
-    node_modules = resolve_devtools_node_modules(devtools_deps)
+    uses_rollup = False
+    if resolve_devtools_node_modules(devtools_deps) is None:
+        text = devtools_deps.read_text(encoding="utf-8")
+        uses_rollup = re.search(
+            r"(?m)^[ \t]+(['\"])third_party/rollup_libs\1\s*:", text
+        ) is not None
+        if not uses_rollup:
+            # Some pinned revisions ship TypeScript in the DevTools checkout.
+            typescript = devtools_deps.parent / "node_modules/typescript"
+            required = (typescript / "bin/tsc", typescript / "package.json")
+            if not all(path.is_file() and not path.is_symlink() for path in required):
+                raise ValueError(
+                    "DevTools declares no npm archive or Rollup CIPD pin and lacks vendored TypeScript"
+                )
     return tuple(
         resolve_windows_cipd_package(
             (
@@ -510,7 +523,7 @@ def resolve_windows_cipd_tool_pins(
             dependency,
         )
         for dependency in WINDOWS_CIPD_TOOL_DEPENDENCIES
-        if not (node_modules and dependency == DEVTOOLS_ROLLUP_LIBS)
+        if uses_rollup or dependency != DEVTOOLS_ROLLUP_LIBS
     )
 
 

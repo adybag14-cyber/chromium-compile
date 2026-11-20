@@ -404,6 +404,20 @@ APPROVED_CHECKPOINT_MIGRATIONS = {
             "ef831e6deb3fda984e2c1a59574f25ba1a1dd0471d1f9ad5c003ad7b7d833733"
         ),
     ),
+    # This producer wrote the absolute GN regeneration command that Stage 2
+    # previously rejected. Only this exact Stage 1 archive may cross the fix.
+    "44405767807": CheckpointMigration(
+        run_id="44405767807",
+        version="159.0.8154.13",
+        stage=1,
+        producer_sha="f9d3aebe1cf015ae48e1cd942b30f360ef09b51c",
+        port_config_sha256=(
+            "75d39d3b35d195546c351b6f05fe49feb6224ca799a39d9dadef27b2fde4991e"
+        ),
+        archive_sha256=(
+            "b355871ba62c91d032adb98afab772e1a515851a6dce8a13c9e5b6caa4438d2b"
+        ),
+    ),
 }
 
 
@@ -2216,12 +2230,11 @@ def install_windows_cipd_tools(
             timeout=120,
         )
     else:
-        # New DevTools revisions use a source-pinned GCS npm archive and esbuild,
-        # with no Rollup dependency or sync_rollup_libs.py hook.
+        # DevTools without Rollup uses TypeScript from Git or the pinned GCS archive.
         tsc_cli = devtools_root / "node_modules/typescript/bin/tsc"
         for path in (tsc_cli, devtools_root / "node_modules/typescript/package.json"):
             if not path.is_file() or path.is_symlink():
-                raise WindowsPipelineError(f"Pinned DevTools npm archive omitted TypeScript: {path}")
+                raise WindowsPipelineError(f"DevTools npm dependencies omitted TypeScript: {path}")
         _run([str(node), str(tsc_cli), "--version"], cwd=devtools_root, env=env, timeout=120)
     print(
         "Validated source-declared Windows CIPD tool descriptors: "
@@ -2978,6 +2991,7 @@ def reuse_restored_gn_graph(
     manifest_stats = revalidate_restored_gn_manifest(
         source,
         out,
+        gn=gn,
         visual_studio=visual_studio,
     )
 
@@ -3081,6 +3095,7 @@ def revalidate_restored_gn_manifest(
     source: Path,
     out: Path,
     *,
+    gn: Path,
     visual_studio: Path,
     windows_kits_root: Path = WINDOWS_KITS_ROOT,
 ) -> dict[str, object]:
@@ -3128,15 +3143,26 @@ def revalidate_restored_gn_manifest(
                 f"Restored checkpoint lacks reusable regular {path.name}"
             )
 
-    header = "\n".join(build_ninja.read_text(encoding="utf-8").splitlines()[:32])
+    header = build_ninja.read_text(encoding="utf-8").splitlines()[:32]
     required_lines = (
         "rule gn",
-        "  command = ../../../gn/gn.exe --root=../.. -q --regeneration gen .",
         "build build.ninja.stamp: gn",
         "  depfile = build.ninja.d",
         "build build.ninja: phony build.ninja.stamp",
     )
     missing_lines = [line for line in required_lines if line not in header]
+    # Newer GN leaves the executable absolute when it lives outside the source
+    # tree. Accept both spellings of the same checked tool and exact arguments.
+    gn = gn.resolve()
+    relative_gn = Path(os.path.relpath(gn, out)).as_posix()
+    absolute_gn = gn.as_posix().replace("$", "$$").replace(":", "$:")
+    commands = [line for line in header if line.startswith("  command = ")]
+    expected_commands = {
+        f"  command = {executable} --root=../.. -q --regeneration gen ."
+        for executable in (relative_gn, subprocess.list2cmdline([absolute_gn]))
+    }
+    if len(commands) != 1 or commands[0] not in expected_commands:
+        missing_lines.append("regeneration command for the pinned GN executable")
     if missing_lines:
         raise WindowsPipelineError(
             "Restored build.ninja lacks the expected bounded GN regeneration contract: "
