@@ -457,7 +457,7 @@ class WindowsI686PipelineTests(unittest.TestCase):
 
     def test_restored_gn_manifest_revalidates_only_the_zero_byte_stamp(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = pathlib.Path(temp)
+            root = pathlib.Path(temp).resolve()
             source = root / "src"
             out = source / "out" / pipeline.OUT_NAME
             visual_studio = root / "Program Files/Microsoft Visual Studio/18/Enterprise"
